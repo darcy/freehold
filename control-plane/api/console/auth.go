@@ -49,16 +49,28 @@ func randomHex(n int) (string, error) {
 	return hex.EncodeToString(b), nil
 }
 
-// Session is an operator's authenticated session.
+// Session is an authenticated console session. role is "operator" (the admin
+// whitelist — the full admin/ops surface) or "member" (any relay member —
+// scheduled jobs only, their own rows). Sessions persist to a JSON file
+// (0600) so a serve restart — every build/update restarts this process — does
+// not log anyone out.
 type Session struct {
 	expires time.Time
 	pubkey  string
+	role    string
 }
+
+// Session roles.
+const (
+	RoleOperator = "operator"
+	RoleMember   = "member"
+)
 
 // Portal is a single-use browser-launch token.
 type Portal struct {
 	expires time.Time
 	pubkey  string
+	role    string
 }
 
 // Auth is the NIP-98 operator auth. Present ONLY when an admin whitelist is
@@ -94,14 +106,16 @@ func NewAuth(admins []string, file string) *Auth {
 
 // sessionRow is the on-disk shape of one session (expires as unix seconds).
 type sessionRow struct {
-	Pubkey  string `json:"pubkey"`
-	Expires int64  `json:"expires"`
+	Pubkey string `json:"pubkey"`
+	Role   string `json:"role,omitempty"`
+	Expires int64 `json:"expires"`
 }
 
 // loadSessions reads the persisted sessions, dropping expired ones and any
-// pubkey no longer on the admin whitelist (rotating the whitelist must lock
-// an old key out even when its session file row survives). A missing or
-// corrupt file just means a fresh start.
+// OPERATOR row whose pubkey left the admin whitelist (rotating the whitelist
+// must lock an old key out even when its session file row survives). Member
+// rows keep their role — membership was verified at login and the 7-day TTL
+// self-limits them. A missing or corrupt file just means a fresh start.
 func (a *Auth) loadSessions() {
 	if a.file == "" {
 		return
@@ -115,14 +129,21 @@ func (a *Auth) loadSessions() {
 		return
 	}
 	for tok, r := range rows {
-		if r.Pubkey == "" || !a.admins[r.Pubkey] {
+		if r.Pubkey == "" {
+			continue
+		}
+		role := r.Role
+		if role == "" {
+			role = RoleOperator // rows predating roles were operator-only
+		}
+		if role == RoleOperator && !a.admins[r.Pubkey] {
 			continue
 		}
 		exp := time.Unix(r.Expires, 0)
 		if exp.Before(now()) {
 			continue
 		}
-		a.sessions[tok] = Session{expires: exp, pubkey: r.Pubkey}
+		a.sessions[tok] = Session{expires: exp, pubkey: r.Pubkey, role: role}
 	}
 }
 
@@ -136,7 +157,7 @@ func (a *Auth) saveSessions() error {
 	}
 	rows := make(map[string]sessionRow, len(a.sessions))
 	for tok, s := range a.sessions {
-		rows[tok] = sessionRow{Pubkey: s.pubkey, Expires: s.expires.Unix()}
+		rows[tok] = sessionRow{Pubkey: s.pubkey, Role: s.role, Expires: s.expires.Unix()}
 	}
 	raw, err := json.Marshal(rows)
 	if err != nil {
@@ -179,17 +200,22 @@ func (a *Auth) ConsumeChallenge(nonce string) bool {
 	return now().Sub(ts) <= challengeTTL
 }
 
-// IssueSession mints a session token for an operator. An error from a broken
-// state dir propagates: persistence silently stopping would be exactly the
-// logout-on-restart this file exists to prevent.
+// IssueSession mints a session token for an operator.
 func (a *Auth) IssueSession(pubkey string) (string, error) {
+	return a.IssueSessionRole(pubkey, RoleOperator)
+}
+
+// IssueSessionRole mints a session token with an explicit role. An error from
+// a broken state dir propagates: persistence silently stopping would be
+// exactly the logout-on-restart this file exists to prevent.
+func (a *Auth) IssueSessionRole(pubkey, role string) (string, error) {
 	token, err := randomHex(32)
 	if err != nil {
 		return "", err
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	a.sessions[token] = Session{expires: now().Add(sessionTTL), pubkey: pubkey}
+	a.sessions[token] = Session{expires: now().Add(sessionTTL), pubkey: pubkey, role: role}
 	if err := a.saveSessions(); err != nil {
 		delete(a.sessions, token)
 		return "", err
@@ -197,49 +223,54 @@ func (a *Auth) IssueSession(pubkey string) (string, error) {
 	return token, nil
 }
 
-// SessionIdentity validates a session (sliding refresh) + returns the operator
-// pubkey. None for unknown/expired tokens.
-func (a *Auth) SessionIdentity(token string) (string, bool) {
+// SessionIdentity validates a session (sliding refresh) + returns the pubkey
+// and role. None for unknown/expired tokens.
+func (a *Auth) SessionIdentity(token string) (string, string, bool) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	s, ok := a.sessions[token]
 	if !ok {
-		return "", false
+		return "", "", false
 	}
 	if s.expires.Before(now()) {
 		delete(a.sessions, token)
-		return "", false
+		return "", "", false
 	}
 	s.expires = now().Add(sessionTTL)
 	a.sessions[token] = s
-	return s.pubkey, true
+	return s.pubkey, s.role, true
 }
 
 // IssuePortal mints a single-use portal token bound to an operator.
 func (a *Auth) IssuePortal(pubkey string) (string, error) {
+	return a.IssuePortalRole(pubkey, RoleOperator)
+}
+
+// IssuePortalRole mints a single-use portal token bound to a pubkey + role.
+func (a *Auth) IssuePortalRole(pubkey, role string) (string, error) {
 	token, err := randomHex(16)
 	if err != nil {
 		return "", err
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	a.portals[token] = Portal{expires: now().Add(portalTTL), pubkey: pubkey}
+	a.portals[token] = Portal{expires: now().Add(portalTTL), pubkey: pubkey, role: role}
 	return token, nil
 }
 
-// ConsumePortal single-use consumes a portal token if fresh (operator pubkey).
-func (a *Auth) ConsumePortal(token string) (string, bool) {
+// ConsumePortal single-use consumes a portal token if fresh (pubkey + role).
+func (a *Auth) ConsumePortal(token string) (string, string, bool) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	p, ok := a.portals[token]
 	if !ok {
-		return "", false
+		return "", "", false
 	}
 	delete(a.portals, token)
 	if p.expires.Before(now()) {
-		return "", false
+		return "", "", false
 	}
-	return p.pubkey, true
+	return p.pubkey, p.role, true
 }
 
 // sessionToken extracts the session cookie value from the request.
@@ -252,20 +283,47 @@ func sessionToken(r *http.Request) string {
 	return ""
 }
 
-// requireSession is the gate for /api/* routes. No-op without auth (loopback
-// posture); 401 with a configured-but-missing/invalid session. Returns the
-// operator pubkey when auth is configured.
+// requireSession is the gate for /api/* routes open to any authenticated
+// role (the scheduled-jobs read). No-op without auth (loopback posture); 401
+// with a configured-but-missing/invalid session. Returns the pubkey when auth
+// is configured.
 func (s *Server) requireSession(r *http.Request) (string, error) {
+	return s.sessionPubkey(r)
+}
+
+// sessionFor validates the session cookie, returning (pubkey, role). Without
+// auth configured (loopback posture) it returns ("", "", nil) — the caller is
+// the operator on the box.
+func (s *Server) sessionFor(r *http.Request) (string, string, error) {
 	if s.Auth == nil {
-		return "", nil
+		return "", "", nil
 	}
 	tok := sessionToken(r)
 	if tok == "" {
-		return "", errUnauthorized
+		return "", "", errUnauthorized
 	}
-	pk, ok := s.Auth.SessionIdentity(tok)
+	pk, role, ok := s.Auth.SessionIdentity(tok)
 	if !ok {
-		return "", errUnauthorized
+		return "", "", errUnauthorized
+	}
+	return pk, role, nil
+}
+
+func (s *Server) sessionPubkey(r *http.Request) (string, error) {
+	pk, _, err := s.sessionFor(r)
+	return pk, err
+}
+
+// requireAdmin is the gate for the admin/ops routes: an operator-role session
+// (or the loopback posture). A member session gets 403 — members hold exactly
+// one surface, the scheduled-jobs read.
+func (s *Server) requireAdmin(r *http.Request) (string, error) {
+	pk, role, err := s.sessionFor(r)
+	if err != nil {
+		return "", err
+	}
+	if s.Auth != nil && role != RoleOperator {
+		return "", errForbidden
 	}
 	return pk, nil
 }

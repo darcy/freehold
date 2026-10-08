@@ -584,6 +584,45 @@ func (m *Model) buildAgents(cfg *config.Config) {
 	}
 }
 
+// buildJobs fills the Jobs view from the CP's /api/jobs — the operator's
+// metadata-only fold (owner, agent, schedule, last run; never a prompt).
+func (m *Model) buildJobs() {
+	m.Jobs = nil
+	if m.console == nil || m.console.client == nil {
+		m.Jobs = []JobRow{{ID: "(not logged into a console)", Schedule: styleDim.Render("press l to log in")}}
+		return
+	}
+	jobs, err := m.console.client.ScheduledJobs()
+	if err != nil {
+		m.Jobs = []JobRow{{ID: "(jobs fetch failed)", LastRun: styleRed.Render(clip(err.Error(), 40))}}
+		return
+	}
+	for _, j := range jobs {
+		sched := j.Cron
+		if j.TZ != "" {
+			sched += " " + j.TZ
+		}
+		if j.At > 0 {
+			sched = "once @ " + time.Unix(int64(j.At), 0).UTC().Format("2006-01-02 15:04Z")
+		}
+		if j.Paused {
+			sched += " (paused)"
+		}
+		last := "—"
+		if j.LastRun != nil {
+			last = j.LastRun.Status + " " + humanize(time.Since(time.Unix(int64(j.LastRun.FiredAt), 0)))
+		}
+		created := "—"
+		if j.CreatedAt > 0 {
+			created = humanize(time.Since(time.Unix(int64(j.CreatedAt), 0)))
+		}
+		m.Jobs = append(m.Jobs, JobRow{ID: j.ID, Owner: j.Owner, Agent: j.Agent, Schedule: sched, LastRun: last, Created: created})
+	}
+	if len(m.Jobs) == 0 {
+		m.Jobs = []JobRow{{ID: "(no scheduled jobs)", Schedule: styleDim.Render("ask an agent to create one")}}
+	}
+}
+
 // ---- Update --------------------------------------------------------------
 
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -712,14 +751,14 @@ func (m *Model) nextView() {
 		m.ActiveView = ViewServices
 		return
 	}
-	m.ActiveView = View((int(m.ActiveView) + 1) % 6)
+	m.ActiveView = View((int(m.ActiveView) + 1) % viewCount)
 }
 func (m *Model) prevView() {
 	if m.Mode != ModeRunning {
 		m.ActiveView = ViewServices
 		return
 	}
-	m.ActiveView = View((int(m.ActiveView) + 5) % 6)
+	m.ActiveView = View((int(m.ActiveView) + viewCount - 1) % viewCount)
 }
 
 // ---- View ----------------------------------------------------------------
@@ -847,6 +886,15 @@ func renderViews(m *Model) string {
 		headers = []string{"name", "pubkey", "available", "created"}
 		for _, a := range m.Agents {
 			rows = append(rows, []string{a.Name, clip(a.Pubkey, 16), a.Available, a.Created})
+		}
+	case ViewJobs:
+		title = "Jobs · scheduled (owner-redacted — prompts live with their owners)"
+		headers = []string{"id", "owner", "agent", "schedule", "last run", "created"}
+		if len(m.Jobs) == 0 {
+			rows = append(rows, []string{styleDim.Render("(no scheduled jobs — any agent can create one: ask it to)")})
+		}
+		for _, j := range m.Jobs {
+			rows = append(rows, []string{j.ID, clip(j.Owner, 16), j.Agent, j.Schedule, j.LastRun, j.Created})
 		}
 	case ViewRunners:
 		title = "Runners · CP (console /api/overview)"

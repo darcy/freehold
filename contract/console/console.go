@@ -425,6 +425,49 @@ func (c *Client) Agents() ([]AgentInfo, error) {
 	return wrapper.Agents, nil
 }
 
+// JobRunInfo is one scheduled-job run (fired/ok/timeout/skipped/missed/error).
+type JobRunInfo struct {
+	FiredAt uint64 `json:"fired_at"`
+	Status  string `json:"status"`
+	Detail  string `json:"detail,omitempty"`
+}
+
+// JobInfo is one scheduled job as the console's /api/jobs serves it. The
+// prompt and label ride ONLY the requesting session's own rows — the server
+// redacts them from every other viewer, the operator included.
+type JobInfo struct {
+	ID        string      `json:"id"`
+	Owner     string      `json:"owner"`
+	Agent     string      `json:"agent"`
+	Channel   string      `json:"channel"`
+	Cron      string      `json:"cron,omitempty"`
+	At        uint64      `json:"at,omitempty"`
+	TZ        string      `json:"tz,omitempty"`
+	CreatedAt uint64      `json:"created_at"`
+	NextRunAt uint64      `json:"next_run_at"`
+	Paused    bool        `json:"paused,omitempty"`
+	LastRun   *JobRunInfo `json:"last_run,omitempty"`
+	Label     *string     `json:"label,omitempty"`
+	Prompt    *string     `json:"prompt,omitempty"`
+}
+
+// ScheduledJobs lists the CP's scheduled jobs (redacted per the session's
+// role: a member sees only their own rows with prompts; an operator sees
+// every row metadata-only).
+func (c *Client) ScheduledJobs() ([]JobInfo, error) {
+	raw, err := c.request(http.MethodGet, "/api/jobs", nil)
+	if err != nil {
+		return nil, err
+	}
+	var wrapper struct {
+		Jobs []JobInfo `json:"jobs"`
+	}
+	if err := json.Unmarshal(raw, &wrapper); err != nil {
+		return nil, err
+	}
+	return wrapper.Jobs, nil
+}
+
 // UnregisterAgent drops an agent's registry row.
 func (c *Client) UnregisterAgent(name string) (json.RawMessage, error) {
 	return c.request(http.MethodDelete, "/api/agents/"+name, nil)

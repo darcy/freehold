@@ -2679,6 +2679,17 @@ func BuildCreateAgentFn(spec *Spec) agent.CreateAgentFn {
 						}
 					}
 				}
+				// The CONSOLE identity rides every channel too — it is the
+				// scheduled-jobs fire identity (its mentions wake the agent).
+				// Signed by the CPA (the owner); a world where the console and
+				// operator coincide skips the duplicate.
+				if consolePK := spec.consolePubkey(); consolePK != "" && consolePK != spec.OwnerPub {
+					if member, merr := relay.IsMemberAuth(spec.relayDial(), authURL, cpaSec, channelID, consolePK); merr != nil || !member {
+						if err := relay.PutUserChannelAuth(spec.relayDial(), authURL, cpaSec, channelID, consolePK); err != nil {
+							return "", fmt.Errorf("add console identity to #freehold: %w", err)
+						}
+					}
+				}
 				joined = append(joined, channelRef{channelID, channelName})
 				continue
 			}
@@ -2694,6 +2705,15 @@ func BuildCreateAgentFn(spec *Spec) agent.CreateAgentFn {
 					if perr != nil && created {
 						return "", fmt.Errorf("add operator to %s: %w", channelName, perr)
 					}
+				}
+			}
+			// The console identity (the scheduled-jobs fire identity) rides
+			// every agent channel — best-effort like the CPA add below: a
+			// pre-existing private channel its signer doesn't own refuses,
+			// and the fire path reports the refusal at create/fire time.
+			if consolePK := spec.consolePubkey(); consolePK != "" && consolePK != spec.OwnerPub {
+				if member, merr := relay.IsMemberAuth(spec.relayDial(), authURL, nSec, channelID, consolePK); merr != nil || !member {
+					_ = relay.PutUserChannelAuth(spec.relayDial(), authURL, nSec, channelID, consolePK)
 				}
 			}
 			joined = append(joined, channelRef{channelID, channelName})
@@ -2844,10 +2864,12 @@ func (s *Spec) identityPubkey(name string) string {
 // author gate accepts (the manifest's BUZZ_ACP_RESPOND_TO_ALLOWLIST). A
 // reserved department wakes for the operator + every core identity (the CPA +
 // the four departments — itself included; buzz-acp ignores self-events); a
-// custom agent wakes for its asker + the CPA. The asker is the operator today:
-// create_agent is called by the CPA's harness and the CP cannot see chat
-// threads. A missing core identity is skipped — reconcileAgentsInto pre-mints
-// them, so a fresh first build still has them all.
+// custom agent wakes for its asker + the CPA. The CONSOLE identity is always
+// included: it is the scheduled-jobs fire path — every job lands as a
+// console-signed mention. The asker is the operator today: create_agent is
+// called by the CPA's harness and the CP cannot see chat threads. A missing
+// core identity is skipped — reconcileAgentsInto pre-mints them, so a fresh
+// first build still has them all.
 func (s *Spec) respondAllowlist(name string) string {
 	isDepartment := false
 	for _, dep := range agents.DepartmentNames() {
@@ -2856,7 +2878,7 @@ func (s *Spec) respondAllowlist(name string) string {
 			break
 		}
 	}
-	pubkeys := []string{s.OwnerPub, s.cpaPubkey()}
+	pubkeys := []string{s.OwnerPub, s.cpaPubkey(), s.consolePubkey()}
 	if isDepartment {
 		for _, dep := range agents.DepartmentNames() {
 			pubkeys = append(pubkeys, s.identityPubkey(dep))
@@ -2872,6 +2894,22 @@ func (s *Spec) respondAllowlist(name string) string {
 		out = append(out, pk)
 	}
 	return strings.Join(out, ",")
+}
+
+// consolePubkey derives the CONSOLE identity's pubkey (the scheduled-jobs
+// fire identity, nested at <StateDir>/console/identity.json). "" when the
+// identity is absent/unreadable — the allowlist then just omits it (the same
+// skip rule the core identities follow).
+func (s *Spec) consolePubkey() string {
+	sec, err := cpstate.ConsoleSecret(s.consoleStateRoot())
+	if err != nil {
+		return ""
+	}
+	pk, err := crypto.PubkeyFromSecret(sec)
+	if err != nil {
+		return ""
+	}
+	return pk
 }
 
 // cpaSecret returns the CPA's Nostr secret (32 bytes), or nil when its identity

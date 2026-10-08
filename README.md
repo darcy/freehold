@@ -181,9 +181,9 @@ are. There is no implicit "default" profile.
 - **configure** — config present, world not converged: an idempotent
   check-then-run pipeline (relay/cp LXCs, deploy relay + cp). Failed stages
   show their tail; `r` retries.
-- **running** — the post-bring-up dashboard: six views cycled with `Tab` /
-  `Shift-Tab` — **Services** · **Agents** · **Runners** · **Data** · **DNS** ·
-  **Certs** — plus a one-line world strip. `l` re-logs into the CP console,
+- **running** — the post-bring-up dashboard: seven views cycled with `Tab` /
+  `Shift-Tab` — **Services** · **Agents** · **Jobs** · **Runners** · **Data** ·
+  **DNS** · **Certs** — plus a one-line world strip. `l` re-logs into the CP console,
   `w` opens the web console already authenticated (single-use portal token),
   `s` edits the operator settings (today: the timezone agent pods run).
 - **Remote-CP access** — `freehold login` is root-free: it authorizes this

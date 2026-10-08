@@ -1,6 +1,8 @@
 package agenttools
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -8,7 +10,9 @@ import (
 	"net/http"
 	"slices"
 	"strings"
+	"time"
 
+	"freehold/contract/console"
 	"freehold/control-plane/api/agent"
 )
 
@@ -68,6 +72,15 @@ type Server struct {
 	// operator-signed migration sweep working across a version jump. Empty =
 	// no peer.
 	OperatorPeer string
+
+	// Jobs is the scheduled-jobs store (this process owns jobs.json + runs
+	// the scheduler). nil = the job tools refuse (not bound).
+	Jobs *JobsStore
+	// ResolveChannel maps a channel name (or passes through an id) to the
+	// h-tag id the fire posts to, signed by the CONSOLE identity — the same
+	// credential that fires the job, so what resolves here is what can post
+	// later. nil = job creation needs a raw channel id.
+	ResolveChannel func(name string) (string, error)
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -226,6 +239,38 @@ func ToolList() []map[string]interface{} {
 			}, []string{}),
 		},
 		{
+			"name": "create_job", "description": "Schedule a job: at its schedule, the control plane posts prompt as a mention to agent in channel, and agent's in-channel reply is the delivery (the job runs on the named agent — usually you; pass another agent's name to run it there). cron is a standard 5-field expression or an @every/@hourly descriptor; tz the IANA zone (default UTC) — resolve the asker's actual clock before writing either; or pass at (a unix timestamp) INSTEAD of cron/at for a one-shot reminder. owner is the npub of the person who asked (omit for your own job). label is a short human name for it. The prompt is REDACTED from every console viewer who is not the owner — including the operator. Confirm the schedule with the asker before creating.",
+			"inputSchema": i(map[string]interface{}{
+				"prompt":  map[string]interface{}{"type": "string"},
+				"cron":    map[string]interface{}{"type": "string"},
+				"at":      map[string]interface{}{"type": "integer"},
+				"tz":      map[string]interface{}{"type": "string"},
+				"channel": map[string]interface{}{"type": "string"},
+				"agent":   map[string]interface{}{"type": "string"},
+				"owner":   map[string]interface{}{"type": "string"},
+				"label":   map[string]interface{}{"type": "string"},
+			}, []string{"prompt", "channel"}),
+		},
+		{
+			"name": "list_jobs", "description": "List scheduled jobs. With owner set, only that npub's jobs (what to show a user who asks about their own); without, all jobs. Returns id, owner, agent, channel, schedule, next run, last run status — and the prompt only on jobs you created or that name you as agent.",
+			"inputSchema": i(map[string]interface{}{
+				"owner": map[string]interface{}{"type": "string"},
+			}, []string{}),
+		},
+		{
+			"name": "delete_job", "description": "Delete a scheduled job by id (the way a user stops a job).",
+			"inputSchema": i(map[string]interface{}{
+				"id": map[string]interface{}{"type": "string"},
+			}, []string{"id"}),
+		},
+		{
+			"name": "pause_job", "description": "Pause or resume a scheduled job by id (paused=true pauses, false resumes).",
+			"inputSchema": i(map[string]interface{}{
+				"id":     map[string]interface{}{"type": "string"},
+				"paused": map[string]interface{}{"type": "boolean"},
+			}, []string{"id", "paused"}),
+		},
+		{
 			"name": "world_status", "description": "What the CP currently manages (its agent registry) — the box's post-login trigger surface.",
 			"inputSchema": i(map[string]interface{}{}, []string{}),
 		},
@@ -330,6 +375,143 @@ type updateAgentArgs struct {
 	Channels []string `json:"channels"`
 	Private  bool     `json:"private"`
 	Model    string   `json:"model"`
+}
+
+// createJobArgs is create_job's body. Agent defaults to the caller, owner to
+// the caller (a self-scheduled job); the CPA passes the asker's npub as owner
+// and another agent's name when the job runs there.
+type createJobArgs struct {
+	Prompt  string `json:"prompt"`
+	Cron    string `json:"cron"`
+	At      uint64 `json:"at"`
+	TZ      string `json:"tz"`
+	Channel string `json:"channel"`
+	Agent   string `json:"agent"`
+	Owner   string `json:"owner"`
+	Label   string `json:"label"`
+}
+
+// isChannelID reports whether s already looks like an h-tag channel id (a
+// UUID) rather than a display name to resolve.
+func isChannelID(s string) bool {
+	if len(s) != 36 {
+		return false
+	}
+	for i, c := range s {
+		switch c {
+		case '-':
+			if i != 8 && i != 13 && i != 18 && i != 23 {
+				return false
+			}
+		default:
+			if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// createJob validates + records a job. The channel resolves to its h-tag id
+// (a UUID passes through; a name resolves via the console identity — the same
+// credential that will fire it, so an unresolvable channel is one the fire
+// could not post into anyway).
+func (s *Server) createJob(a createJobArgs, caller string) (*Job, error) {
+	if s.Jobs == nil {
+		return nil, fmt.Errorf("jobs are not bound on this server")
+	}
+	if a.Prompt == "" {
+		return nil, fmt.Errorf("prompt is required")
+	}
+	if a.Channel == "" {
+		return nil, fmt.Errorf("channel is required (the channel the job fires into)")
+	}
+	channel := a.Channel
+	if !isChannelID(channel) {
+		if s.ResolveChannel == nil {
+			return nil, fmt.Errorf("channel must be the channel id (a UUID); name resolution is not wired on this server")
+		}
+		resolved, err := s.ResolveChannel(channel)
+		if err != nil {
+			return nil, fmt.Errorf("channel %q: %w (a private channel the console identity cannot see cannot be fired into — use an open channel, or have the channel owner add the console identity)", a.Channel, err)
+		}
+		channel = resolved
+	}
+	// The running agent defaults to the caller; an explicit name must exist
+	// (the row routes by the agent's PUBKEY — stable across renames — and
+	// carries the name for display, refreshed per fire).
+	agentName, agentPK := "", caller
+	for _, ai := range mustAgents(s.Tools) {
+		if ai.Pubkey == caller {
+			agentName = ai.Name
+			break
+		}
+	}
+	if a.Agent != "" {
+		agentName, agentPK = "", ""
+		for _, ai := range mustAgents(s.Tools) {
+			if ai.Name == a.Agent {
+				agentName, agentPK = ai.Name, ai.Pubkey
+				break
+			}
+		}
+		if agentName == "" {
+			return nil, fmt.Errorf("agent %q is not in the registry", a.Agent)
+		}
+	}
+	if agentName == "" {
+		return nil, fmt.Errorf("agent unknown: pass the name of a registered agent (the caller is not registered)")
+	}
+	if a.At == 0 {
+		if _, err := ParseSchedule(a.Cron, a.TZ); err != nil {
+			return nil, err
+		}
+	}
+	nt := nextRunFor(a.Cron, a.TZ, a.At)
+	owner := a.Owner
+	if owner != "" && !isHex64(owner) {
+		return nil, fmt.Errorf("owner must be the asker's 64-hex npub (or omitted for your own job)")
+	}
+	id, err := randomHex(6)
+	if err != nil {
+		return nil, err
+	}
+	job := &Job{
+		ID: id, Owner: owner, Agent: agentName, AgentPubkey: agentPK, Channel: channel,
+		Cron: a.Cron, At: a.At, TZ: a.TZ, Label: a.Label,
+		Prompt: a.Prompt, NextRunAt: nt,
+	}
+	if err := s.Jobs.Create(job); err != nil {
+		return nil, err
+	}
+	return job, nil
+}
+
+// mustAgents lists the registry (empty on error — validation then fails with
+// the clearer per-field message).
+func mustAgents(t *agent.Tools) []console.AgentInfo {
+	if t == nil || t.Console == nil {
+		return nil
+	}
+	agents, err := t.Console.Agents()
+	if err != nil {
+		return nil
+	}
+	return agents
+}
+
+// nextRunFor computes a new job's first NextRunAt: the one-shot timestamp, or
+// the next occurrence after now (0 on an unparseable cron — Create validated
+// it, and the first tick advances/re-records).
+func nextRunFor(cronExpr, tz string, at uint64) uint64 {
+	if at != 0 {
+		return at
+	}
+	nt, _, err := nextAfter(cronExpr, tz, time.Now())
+	if err != nil {
+		return 0
+	}
+	return uint64(nt.Unix())
 }
 
 // isWorldTool reports whether a tool is an operator-scoped action: granting an
@@ -507,6 +689,83 @@ func (s *Server) dispatch(w http.ResponseWriter, id json.RawMessage, params json
 		}
 		b, _ := json.Marshal(agents)
 		s.textResult(w, id, nil, string(b))
+	case "create_job":
+		var a createJobArgs
+		if err := json.Unmarshal(call.Arguments, &a); err != nil {
+			s.rpcError(w, id, -32602, "create_job arguments: "+err.Error())
+			return
+		}
+		job, err := s.createJob(a, caller)
+		if err != nil {
+			s.textResult(w, id, err, "")
+			return
+		}
+		out, _ := json.Marshal(job)
+		s.textResult(w, id, nil, "scheduled "+string(out))
+	case "list_jobs":
+		var a struct {
+			Owner string `json:"owner"`
+		}
+		_ = json.Unmarshal(call.Arguments, &a)
+		if s.Jobs == nil {
+			s.textResult(w, id, fmt.Errorf("jobs are not bound on this server"), "")
+			return
+		}
+		// The same privacy boundary the console API enforces: the prompt and
+		// label ride only rows the caller OWNS or is the named agent of —
+		// every other caller (agent or operator peer) gets metadata only.
+		callerName := ""
+		for _, ai := range mustAgents(s.Tools) {
+			if ai.Pubkey == caller {
+				callerName = ai.Name
+				break
+			}
+		}
+		jobs := s.Jobs.Snapshot()
+		if a.Owner != "" {
+			filtered := jobs[:0]
+			for _, j := range jobs {
+				if j.Owner == a.Owner {
+					filtered = append(filtered, j)
+				}
+			}
+			jobs = filtered
+		}
+		for i := range jobs {
+			if jobs[i].Owner != caller && jobs[i].Agent != callerName {
+				jobs[i].Prompt = ""
+				jobs[i].Label = ""
+			}
+		}
+		b, _ := json.Marshal(jobs)
+		s.textResult(w, id, nil, string(b))
+	case "delete_job":
+		var a struct {
+			ID string `json:"id"`
+		}
+		if err := json.Unmarshal(call.Arguments, &a); err != nil || a.ID == "" {
+			s.rpcError(w, id, -32602, "delete_job arguments: id required")
+			return
+		}
+		if s.Jobs == nil {
+			s.textResult(w, id, fmt.Errorf("jobs are not bound on this server"), "")
+			return
+		}
+		s.textResult(w, id, s.Jobs.Delete(a.ID), "deleted "+a.ID)
+	case "pause_job":
+		var a struct {
+			ID     string `json:"id"`
+			Paused *bool  `json:"paused"`
+		}
+		if err := json.Unmarshal(call.Arguments, &a); err != nil || a.ID == "" || a.Paused == nil {
+			s.rpcError(w, id, -32602, "pause_job arguments: id + paused required")
+			return
+		}
+		if s.Jobs == nil {
+			s.textResult(w, id, fmt.Errorf("jobs are not bound on this server"), "")
+			return
+		}
+		s.textResult(w, id, s.Jobs.SetPaused(a.ID, *a.Paused), "paused "+a.ID)
 	case "world_status":
 		out, err := s.Tools.WorldStatus()
 		if err != nil {
@@ -629,4 +888,26 @@ func (s *Server) rpcError(w http.ResponseWriter, id json.RawMessage, code int, m
 		"jsonrpc": "2.0", "id": id,
 		"error": map[string]interface{}{"code": code, "message": msg},
 	})
+}
+
+// isHex64 reports whether s is 64 hex chars (a npub).
+func isHex64(s string) bool {
+	if len(s) != 64 {
+		return false
+	}
+	for _, c := range s {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+			return false
+		}
+	}
+	return true
+}
+
+// randomHex returns n random bytes as hex.
+func randomHex(n int) (string, error) {
+	b := make([]byte, n)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
 }

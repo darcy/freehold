@@ -299,8 +299,8 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     alt-screen (`tea.NewProgram(m, WithAltScreen(), …)`); `freehold` with no
     args enters it, a subcommand routes to the CLI.
 
-*   **Six views**, cycled with `Tab` / `Shift-Tab`: Services · Agents ·
-    Runners · DATA · DNS · Certs. Keys in running mode: `q` quit, `r`
+*   **Seven views**, cycled with `Tab` / `Shift-Tab`: Services · Agents ·
+    Jobs · Runners · DATA · DNS · Certs. Keys in running mode: `q` quit, `r`
     recheck the world, `w` open the web console, `l` log in with the operator nsec,
     `p`/`x`/`g` provision/revoke/grant, `s` edit the operator settings
     (today: the agent pods' timezone). Build/teardown run from the shell.
@@ -600,13 +600,17 @@ resident-runner mode, the retired-name guard — is in `docs/AI.md` ("Runners an
 
 *   **The control plane console is a Go server + CP CLI** (`control-plane/api/console/`
     + `control-plane/api/cmd/freehold-console`): the `/api/*` routes (auth/overview/world/teardown/
-    provision/rotate/revoke/grant/DNS/agents/portal) with the SAME security
-    guards — NIP-98 operator login (challenge/session), `HttpOnly;
+    provision/rotate/revoke/grant/DNS/agents/jobs/portal) with the SAME security
+    guards — NIP-98 login (challenge/session), `HttpOnly;
     SameSite=Strict` session cookies, single-use portal tokens, login
     freshness windows, the DNS-rebinding `Origin` guard, and the
-    loopback-only-until-authn bind guard. It also carries the box-side CP CLI
-    verbs (`provision`/`grant`/`adopt`/`add-secret`/`identity`), so the deploy
-    and the rebuild engine ship + drive a Go console end to end. The console
+    loopback-only-until-authn bind guard. Login carries a ROLE: an **operator**
+    (the admin whitelist — the full admin/ops surface) or a **member** (any relay
+    community member — the scheduled-jobs read of their own rows only; every
+    admin route refuses a member session). The scheduled-jobs read is
+    owner-redacted: prompts and labels ride only the owner's own rows. It also
+    carries the box-side CP CLI verbs (`provision`/`grant`/`adopt`/`add-secret`/`identity`),
+    so the deploy and the rebuild engine ship + drive a Go console end to end. The console
     is the CP's own identity (0600, minted on the box at first serve — never
     shipped) that signs readiness probes against each runner — no side door,
     the runner still fails closed. `contract/console` is the Go client that

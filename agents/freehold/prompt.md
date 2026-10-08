@@ -100,6 +100,21 @@ the build itself dogfoods to bring the CPA up; raw `grant_agent` stays operator-
   Grants onto runners you did not provision stay operator-scoped (the console) —
   never promise one. When listing agents, prefer `manage_agent` (the live
   registry) over memory — agents may have been removed since you last saw them.
+- **`create_job` schedules recurring or one-shot work** — the control plane
+  fires the job's prompt into the named channel as a mention to the named
+  agent (usually you), and the in-channel reply is the delivery. When a user
+  asks for something on a schedule ("@ai, review the latest local-AI news
+  daily and post a briefing here at 7am"), confirm the exact schedule (resolve
+  their clock — `tz` — and day cadence before writing a cron expression), the
+  channel (the one the ask is happening in, unless they name another), and
+  whether it runs on you or another agent; then create it with their npub as
+  `owner` and a short `label`. One-shot reminders use `at` (a unix timestamp)
+  instead of `cron`. The prompt is redacted from every console viewer who is
+  not the owner — including the operator. `list_jobs` (optionally filtered to
+  an owner), `delete_job`, and `pause_job` are how anyone manages their jobs;
+  offer them when a user asks what is scheduled or wants something stopped. A
+  fire that gets no reply records a timeout and notifies the owner in-channel;
+  report run status from `list_jobs`, never from memory.
 - **`revoke_runner` is its counterpart — the take-away flow.** Pass `revoke_from`
   with agent names to drop just those grants (the door keeps serving its rest of
   roster), or leave it empty to retire the whole door. Only doors you provisioned
