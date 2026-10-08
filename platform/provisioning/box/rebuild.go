@@ -456,13 +456,19 @@ func (e *Engine) RunBootstrap() error {
 		// provider appends over the key its host was born with). A
 		// re-adopt's reused package mints no fresh key — the recovered line
 		// rides, so the provider re-asserts it on a host whose uninstall
-		// stripped it (the reuse-path gap).
+		// stripped it (the reuse-path gap). But the gate exists to COLLECT a
+		// key the door lacks — a door that already answers must not gate:
+		// headless re-adopt bailed on EVERY re-run (the key's authorized, the
+		// install can't say so) until this probe. A failed probe gates as
+		// before, so the collect path is unchanged.
 		key := doorKey
 		if key == "" {
 			key = e.recoverDoorKey()
 		}
-		if err := e.InstallDoorKey(key); err != nil {
-			return err
+		if key != "" && !e.doorWorks() {
+			if err := e.InstallDoorKey(key); err != nil {
+				return err
+			}
 		}
 	} else if doorKey != "" {
 		if err := e.doorGate(doorKey); err != nil {
@@ -946,6 +952,36 @@ func (e *Engine) doorKeyNotInstalled() error {
 	return fmt.Errorf(
 		"the door needs its ssh key before rebuild can continue — install it on %s, then re-run rebuild:\n\n    %s\n\n  (on the host: mkdir -p /root/.ssh && %s)",
 		e.F.Host, key, instr)
+}
+
+// doorWorks probes the substrate door with the package's OWN ssh key (the
+// one the gate collects — NOT the agent-ops derivation, which no world's
+// authorized_keys carries): decrypt the sealed credential to a 0600 temp
+// file, ssh a no-op. Any failure = the door needs the gate.
+func (e *Engine) doorWorks() bool {
+	pem, err := SubstrateKeyPEM(filepath.Join(RunnerPkgs(), e.F.Target), e.F.Target)
+	if err != nil {
+		return false
+	}
+	f, err := os.CreateTemp("", "fh-door-probe-*")
+	if err != nil {
+		return false
+	}
+	defer os.Remove(f.Name())
+	if _, werr := f.Write(pem); werr != nil {
+		f.Close()
+		return false
+	}
+	if cerr := f.Close(); cerr != nil {
+		return false
+	}
+	if cherr := os.Chmod(f.Name(), 0o600); cherr != nil {
+		return false
+	}
+	probe := exec.Command("ssh", "-i", f.Name(), "-o", "BatchMode=yes",
+		"-o", "ConnectTimeout=6", "-o", "StrictHostKeyChecking=accept-new",
+		e.F.Host, "echo freehold-door-ok")
+	return probe.Run() == nil
 }
 
 // recoverDoorKey re-derives the door ssh PUBLIC line from the existing
