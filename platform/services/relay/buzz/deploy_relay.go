@@ -301,13 +301,10 @@ func InstallCmd(spec *RelayDeploySpec) string {
 			"fi; done && "+
 			"(grep -qE \"=CHANGE_ME\" .env && echo \"still has CHANGE_ME placeholders in "+
 			"%s/deploy/compose/.env\" >&2 && exit 1 || true) && "+
-			// The bundle's minio service is patched onto the RustFS engine
-			// (marker-gated, survives every re-extract). The relay itself is
-			// NOT started here: the engine comes up alone (up minio
-			// minio-init) so the media mover can verify the one-time mirror
-			// before the relay ever serves from it — DeployRelay runs the
-			// mover, then ./run.sh start as its own step.
-			shipScript("/tmp/fh-rustfs-patch.sh", composePatchScript(dir))+" && "+
+			// The engine comes up ALONE (no relay): the media mover verifies
+			// the one-time mirror before the relay ever serves from it —
+			// DeployRelay runs the compose patch, this stage, the mover, and
+			// ./run.sh start as separate steps.
 			"%s && "+
 			"docker compose --env-file .env stop relay minio minio-init && "+
 			"docker compose --env-file .env up -d minio minio-init",
@@ -369,6 +366,11 @@ func DeployRelay(exec provisioning.GuestExecFunc, spec *RelayDeploySpec) (*Relay
 		return nil, err
 	}
 	install := InstallCmd(spec)
+	// The bundle's minio service is patched onto the RustFS engine — its own
+	// step (marker-gated, survives every re-extract), before the engine stage.
+	if err := runToOK("patch compose", shipScript("/tmp/fh-rustfs-patch.sh", composePatchScript(spec.DeployDir)), 120); err != nil {
+		return nil, err
+	}
 	if err := runToOK("stage relay engine", install, 600); err != nil {
 		return nil, err
 	}

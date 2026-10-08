@@ -103,11 +103,11 @@ func TestInstallCmdSingleQuoteFree(t *testing.T) {
 	}
 }
 
-// InstallCmd stages the rustfs engine (patch + chown + stop + engine-up) but
-// must NOT start the relay: DeployRelay runs the media mover between the
-// engine-up and ./run.sh start so the one-time mirror verifies first. The
-// quay re-point sed is dead on the 1972b7d bundle (no `image: minio/` left)
-// and must not come back.
+// InstallCmd stages the engine (chown + stop + engine-up) but must NOT start
+// the relay: DeployRelay runs the compose patch, the media mover, and
+// ./run.sh start around it so the one-time mirror verifies first. The quay
+// re-point sed is dead on the 1972b7d bundle (no `image: minio/` left) and
+// must not come back.
 func TestInstallCmdStagesRustfsEngine(t *testing.T) {
 	cmd := InstallCmd(&RelayDeploySpec{
 		RelayName:      "relay",
@@ -119,7 +119,6 @@ func TestInstallCmdStagesRustfsEngine(t *testing.T) {
 		OperatorPubkey: strings.Repeat("b", 64),
 	})
 	for _, want := range []string{
-		"base64 -d > /tmp/fh-rustfs-patch.sh && sh /tmp/fh-rustfs-patch.sh",
 		"docker compose --env-file .env stop relay minio minio-init",
 		"docker compose --env-file .env up -d minio minio-init",
 	} {
@@ -131,10 +130,15 @@ func TestInstallCmdStagesRustfsEngine(t *testing.T) {
 		"./run.sh start", // the relay starts in its own step, after the mirror
 		"quay.io/minio",  // the dead-registry re-point is gone
 		"image: minio/",  // docker hub minio re-point is gone
+		"base64 -d",      // the compose patch ships as its own step, not in this format string
 	} {
 		if strings.Contains(cmd, banned) {
 			t.Errorf("InstallCmd must not contain %q:\n%s", banned, cmd)
 		}
+	}
+	// A verb/arg drift would emit %!s(MISSING) into the guest command.
+	if strings.Contains(cmd, "%!") || strings.Contains(cmd, "MISSING") {
+		t.Errorf("InstallCmd format/arg mismatch:\n%s", cmd)
 	}
 }
 

@@ -411,12 +411,16 @@ Seeded by `release-prepare`; each row is ✅ only on its own evidence below.
   surface at the git chown `docker compose run` and the engine `up`, well
   before `./run.sh start`; MinIO's own registries are dead — quay 401s,
   dl.min.io is 410 — so nothing pulls `minio/*` anymore). Copy them from a
-  running world's relay (the dev env's) into the fresh relay on the host:
+  running world's relay   (the dev env's) into the fresh relay on the host. Pull and save the three
+  digest-pinned images BY DIGEST — a tag-pulled image may not carry the index
+  digest the compose pins (`image: tag@sha256:…`), and a digest mismatch sends
+  the fresh relay back to the registry:
   ```bash
-  for img in ghcr.io/block/buzz:main postgres:17-alpine redis:7-alpine \
-      rustfs/rustfs:1.0.1 \
-      pgsty/mc:RELEASE.2026-09-16T00-00-00Z \
-      pgsty/silo:RELEASE.2026-09-16T00-00-00Z alpine; do
+  for img in ghcr.io/block/buzz:main postgres:17-alpine redis:7-alpine alpine \
+      rustfs/rustfs@sha256:1803faef57627e2d9c2e7d89d655d712ddded5389040054987163043fecb6a3c \
+      pgsty/silo@sha256:635197cb9f36d01bee221d34d1c7d7960f6a95c48b0b6c01d99cd13bdae51a46 \
+      pgsty/mc@sha256:cfc83108c3abb371f8fb84d99c1fdc88f8c237e022409b0081fb7c0a3be634dd; do
+    pct exec <dev-relay-vmid> -- docker pull "$img"
     pct exec <dev-relay-vmid> -- docker save "$img" | pct exec <fresh-relay-vmid> -- docker load
   done
   ```
