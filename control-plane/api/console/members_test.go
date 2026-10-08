@@ -183,15 +183,31 @@ func TestMemberNostrLoginGate(t *testing.T) {
 		t.Fatalf("non-member login must be 403, got %d %s", rec.Code, rec.Body.String())
 	}
 
-	// A forged signature is refused before membership is even consulted.
+	// A forged signature is refused on a REAL challenge: a live nonce, then
+	// a garbage sig — verifyNIP98 must be what rejects it. The relay is
+	// closed for this fixture: if sig verification ever stopped rejecting,
+	// this flow would fall through to the (unreachable) membership check and
+	// 503, failing the expected signature-failure 401.
 	f2 := newMemberFixture(t)
-	f2.relay.Close() // the sig check must fire first; the relay is irrelevant
-	body := `{"nonce":"x","pubkey":"` + f2.memberPK + `","created_at":` +
-		strconv.FormatInt(time.Now().Unix(), 10) + `,"tags":[],"sig":"deadbeef"}`
+	f2.relay.Close()
+	rec = httptest.NewRecorder()
+	f2.s.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/auth/member/challenge", nil))
+	if rec.Code != 200 {
+		t.Fatalf("challenge: %d %s", rec.Code, rec.Body.String())
+	}
+	var ch struct {
+		Nonce string `json:"nonce"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &ch); err != nil {
+		t.Fatal(err)
+	}
+	body := `{"nonce":"` + ch.Nonce + `","pubkey":"` + f2.memberPK + `","created_at":` +
+		strconv.FormatInt(time.Now().Unix(), 10) +
+		`,"tags":[["url","https://cp.example.com/auth"],["method","GET"]],"sig":"deadbeef"}`
 	rec = httptest.NewRecorder()
 	f2.s.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/auth/member/login", strings.NewReader(body)))
-	if rec.Code != 401 {
-		t.Fatalf("forged sig must be 401, got %d %s", rec.Code, rec.Body.String())
+	if rec.Code != 401 || !strings.Contains(rec.Body.String(), "signature verification failed") {
+		t.Fatalf("forged sig must be 401 (signature failure), got %d %s", rec.Code, rec.Body.String())
 	}
 
 	// Relay outage: the cached member stays admitted (grace), an uncached

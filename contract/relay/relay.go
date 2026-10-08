@@ -394,8 +394,10 @@ func isMemberFromEvents(evs []map[string]interface{}, memberPubkey string) bool 
 // IsCommunityMemberAuth reports whether memberPubkey is on the relay's NIP-43
 // membership list (kind 13534, signed by the relay's own key) — the "who may
 // use this appliance" check behind the member gate. The relay pubkey is the
-// trust anchor: a forged 13534 from any other author admits nobody, so the
-// filter pins authors=[relayPubkey].
+// trust anchor: the query pins authors=[relayPubkey] AND every listing is
+// signature-verified client-side (same discipline as the roster read) — the
+// console dials the relay over the plaintext LAN, so a forged 13534 injected
+// on-path admits nobody.
 func IsCommunityMemberAuth(dialURL, authURL string, secret []byte, relayPubkey, memberPubkey string) (bool, error) {
 	filters := []interface{}{map[string]interface{}{
 		"kinds":   []interface{}{wire.KINDNip43Membership},
@@ -411,26 +413,32 @@ func IsCommunityMemberAuth(dialURL, authURL string, secret []byte, relayPubkey, 
 
 // isCommunityMemberFromEvents is the pure membership read: per d-tag group
 // (a relay may publish one cumulative list or one listing per member), the
-// NEWEST listing decides whether it names the member — the relay republishes
-// its list on every membership change, so a stale listing that names a since-
-// removed member must not outlive the current one that drops them. The
-// author check is client-side too (belt and braces with the query's authors
-// filter): a forged 13534 from any other author admits nobody. An empty set
-// is not a member.
+// NEWEST VERIFIED listing decides whether it names the member — the relay
+// republishes its list on every membership change, so a stale listing that
+// names a since-removed member must not outlive the current one that drops
+// them. Events failing signature verification are skipped (an unverified
+// event is not the relay's word, whatever its pubkey field claims). An empty
+// set is not a member.
 func isCommunityMemberFromEvents(evs []map[string]interface{}, relayPubkey, memberPubkey string) bool {
 	newest := map[string]int64{}
 	names := map[string]bool{}
 	for _, e := range evs {
-		if pk, _ := e["pubkey"].(string); pk != relayPubkey {
+		author, _ := e["pubkey"].(string)
+		if author != relayPubkey {
 			continue
 		}
+		createdAt := eventCreatedAt(e)
 		tags, _ := parseTags(e)
-		d := tagValue(tags, "d")
-		ca := eventCreatedAt(e)
-		if prev, ok := newest[d]; ok && prev >= ca {
+		content, _ := e["content"].(string)
+		sig, _ := e["sig"].(string)
+		if _, err := wire.VerifyEvent(author, createdAt, wire.KINDNip43Membership, tags, content, sig); err != nil {
 			continue
 		}
-		newest[d] = ca
+		d := tagValue(tags, "d")
+		if prev, ok := newest[d]; ok && prev >= createdAt {
+			continue
+		}
+		newest[d] = createdAt
 		names[d] = eventNamesMember(e, memberPubkey)
 	}
 	for _, ok := range names {

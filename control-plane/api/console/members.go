@@ -39,6 +39,7 @@ const (
 	inviteTTL        = 7 * 24 * time.Hour
 	memberCheckTTL   = 10 * time.Minute
 	memberCheckGrace = 24 * time.Hour
+	memberCacheCap   = 4096
 )
 
 // MemberSession is one authenticated member: a Nostr login (pubkey set) or a
@@ -173,35 +174,38 @@ func (m *Members) IssueInvite(name, createdBy string) (string, error) {
 }
 
 // ConsumeInvite single-use consumes an invite if fresh; returns the name it
-// was minted for.
-func (m *Members) ConsumeInvite(token string) (string, bool) {
+// was minted for. A persistence failure propagates — swallowing it here
+// would resurrect the consumed invite on the next restart (single-use is
+// the invite's whole security).
+func (m *Members) ConsumeInvite(token string) (string, bool, error) {
 	sum := sha256.Sum256([]byte(token))
 	h := hex.EncodeToString(sum[:])
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	inv, ok := m.invites[h]
 	if !ok {
-		return "", false
+		return "", false, nil
 	}
 	delete(m.invites, h)
 	if err := m.save(); err != nil {
-		return "", false
+		return "", false, err
 	}
 	if inv.expires.Before(now()) {
-		return "", false
+		return "", false, nil
 	}
-	return inv.name, true
+	return inv.name, true, nil
 }
 
-// RevokeInvite drops an unconsumed invite (by its listed hash).
-func (m *Members) RevokeInvite(hash string) bool {
+// RevokeInvite drops an unconsumed invite (by its listed hash). notFound
+// distinguishes a stale hash from a persistence failure.
+func (m *Members) RevokeInvite(hash string) (notFound bool, err error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if _, ok := m.invites[hash]; !ok {
-		return false
+		return true, nil
 	}
 	delete(m.invites, hash)
-	return m.save() == nil
+	return false, m.save()
 }
 
 // IssueMemberSession mints a member session token.
@@ -238,20 +242,22 @@ func (m *Members) MemberIdentity(token string) (pubkey, name string, device bool
 	return s.pubkey, s.name, s.device, true
 }
 
-// KillSession ends one member session (logout).
-func (m *Members) KillSession(token string) {
+// KillSession ends one member session (logout). A persistence failure
+// propagates — a session silently surviving a restart is a logout that
+// isn't.
+func (m *Members) KillSession(token string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if _, ok := m.sessions[token]; !ok {
-		return
+		return nil
 	}
 	delete(m.sessions, token)
-	_ = m.save()
+	return m.save()
 }
 
 // DropMemberSessions ends every session named `name` (the operator revoking
 // a person: their device can re-enter only through a fresh invite).
-func (m *Members) DropMemberSessions(name string) int {
+func (m *Members) DropMemberSessions(name string) (int, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	n := 0
@@ -261,10 +267,10 @@ func (m *Members) DropMemberSessions(name string) int {
 			n++
 		}
 	}
-	if n > 0 {
-		_ = m.save()
+	if n == 0 {
+		return 0, nil
 	}
-	return n
+	return n, m.save()
 }
 
 // MemberInviteJSON is one listed invite (the hash, never the token).
@@ -441,6 +447,13 @@ func (s *Server) memberRelayAllowed(pubkey string) (bool, error) {
 			return cached, nil
 		}
 	} else {
+		// Bounded: a fresh signed key reaches this check on every forged
+		// login attempt through the public edge, so an uncapped map is a
+		// memory DoS on the console. Clear-when-full is the whole policy —
+		// the cost is one extra relay read per admitted member.
+		if len(s.memberCache) >= memberCacheCap {
+			s.memberCache = map[string]memberCheck{}
+		}
 		s.memberCache[pubkey] = memberCheck{ok: ok, checked: now()}
 	}
 	s.memberMu.Unlock()
@@ -531,7 +544,11 @@ func (s *Server) memberLinkLand(w http.ResponseWriter, r *http.Request, token st
 		writeErr(w, http.StatusNotFound, "member login is not enabled on this console")
 		return
 	}
-	name, ok := s.Members.ConsumeInvite(token)
+	name, ok, err := s.Members.ConsumeInvite(token)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	if !ok {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.WriteHeader(http.StatusNotFound)
@@ -583,7 +600,10 @@ func (s *Server) memberLogout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if tok := cookieValue(r, memberCookie); tok != "" {
-		s.Members.KillSession(tok)
+		if err := s.Members.KillSession(tok); err != nil {
+			writeErr(w, http.StatusInternalServerError, err.Error())
+			return
+		}
 	}
 	clearMemberCookie(w, s.memberCookieDomain())
 	writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true})
@@ -657,7 +677,12 @@ func (s *Server) memberInviteRevoke(w http.ResponseWriter, r *http.Request, hash
 		writeErr(w, http.StatusNotFound, "member login is not enabled on this console")
 		return
 	}
-	if !s.Members.RevokeInvite(hash) {
+	notFound, err := s.Members.RevokeInvite(hash)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if notFound {
 		writeErr(w, http.StatusNotFound, "no such invite")
 		return
 	}
@@ -677,7 +702,12 @@ func (s *Server) memberDrop(w http.ResponseWriter, r *http.Request, name string)
 		writeErr(w, http.StatusNotFound, "member login is not enabled on this console")
 		return
 	}
-	if n := s.Members.DropMemberSessions(name); n == 0 {
+	n, err := s.Members.DropMemberSessions(name)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if n == 0 {
 		writeErr(w, http.StatusNotFound, "no live sessions named "+name)
 		return
 	}

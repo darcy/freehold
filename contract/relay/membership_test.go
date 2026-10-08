@@ -56,6 +56,16 @@ func TestIsCommunityMemberAuthPinsTheTrustAnchor(t *testing.T) {
 		t.Fatalf("empty list must not admit: ok=%v err=%v", ok, err)
 	}
 
+	// A TAMPERED listing (its content mangled after signing) is skipped —
+	// the read verifies each event like the roster read does, so an injected
+	// or edited listing is not the relay's word.
+	tampered := list(relaySec, 100, memberPK)
+	tampered["content"] = "tampered"
+	srv = serveEvents(t, []map[string]interface{}{tampered})
+	if ok, err := IsCommunityMemberAuth(srv.URL, srv.URL, relaySec, relayPK, memberPK); ok || err != nil {
+		t.Fatalf("tampered listing must not admit: ok=%v err=%v", ok, err)
+	}
+
 	// A FORGED list (the outsider's key) must admit nobody — the filter pins
 	// authors=[relayPubkey], so the fake never matters, but pin the read too.
 	forged := []map[string]interface{}{list(outsider, 100, memberPK)}
