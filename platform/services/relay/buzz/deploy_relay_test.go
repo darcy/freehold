@@ -227,7 +227,9 @@ func TestComposePatchScriptOnBundleFixture(t *testing.T) {
 func TestMediaMoverScriptGuards(t *testing.T) {
 	s := mediaMoverScript("/srv/data/relay")
 	for _, want := range []string{
-		"docker volume inspect buzz-minio-data",                 // fresh-world skip
+		"grep -E 'buzz-minio-data$'",                            // old volume DERIVED (compose project-prefixes it)
+		"grep -E 'buzz-rustfs-data$'",                           // rustfs volume derived the same way
+		"chown -R 10001:10001 /data",                            // compose creates the volume root-owned
 		"test -f /data/" + mediaMarker,                          // post-cutover skip
 		"mc mirror --overwrite \"src/$BUCKET\" \"dst/$BUCKET\"", // object-level copy
 		"mc diff \"src/$BUCKET\" \"dst/$BUCKET\"",               // the verify gate
@@ -241,6 +243,14 @@ func TestMediaMoverScriptGuards(t *testing.T) {
 	}
 	if strings.Contains(s, "docker compose") { // engines only; compose owns the services
 		t.Errorf("mover script must not drive compose:\n%s", s)
+	}
+	for _, banned := range []string{
+		"-v buzz-minio-data:",       // bare names are orphan volumes (compose prefixes them)
+		"-v buzz-rustfs-data:/data", // every mount uses the derived $OLDVOL/$RUSTVOL
+	} {
+		if strings.Contains(s, banned) {
+			t.Errorf("mover script must not mount a bare volume name (%q):\n%s", banned, s)
+		}
 	}
 	mover := shipScript("/tmp/fh-media-mover.sh", s)
 	if strings.ContainsRune(mover, '\'') {

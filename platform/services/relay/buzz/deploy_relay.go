@@ -137,14 +137,18 @@ grep -q "buzz-rustfs-data" compose.yml
 // mediaMoverScript returns the (guest-run) one-time migration of a world's
 // old minio media volume onto the rustfs volume. Engines cannot read each
 // other's on-disk format, so the copy is object-level over S3: the old
-// volume is re-served by the pinned silo image (MinIO-format lineage — it
+// volume is re-served by the pinned silo image (MinIO-fork xl-format lineage — it
 // reads what any prior minio/silo generation wrote) and mc mirrors the
 // bucket across, verified with mc diff before the marker (and the relay)
-// come back. Idempotent at every point: mirror resumes a partial run,
-// diff gates the cutover, and the marker makes the whole step a no-op
-// afterward (post-cutover the old volume is frozen history — the relay is
-// the only writer and it now writes to the rustfs volume). Skips worlds
-// with no old volume (fresh installs) at all.
+// come back. Compose project-prefixes the volume names, so both are DERIVED
+// the same way the network is — a bare name would be an orphan volume and
+// the migration would silently skip (an upgraded world would serve an empty
+// engine green). Idempotent at every point: the chown heals the engine's
+// root-owned data dir, mirror resumes a partial run, diff gates the cutover,
+// and the marker makes the whole step a no-op afterward (post-cutover the
+// old volume is frozen history — the relay is the only writer and it now
+// writes to the rustfs volume). Skips worlds with no old volume (fresh
+// installs) at all.
 func mediaMoverScript(dir string) string {
 	return "set -e\ncd " + dir + "/deploy/compose\n" +
 		`set -a
@@ -154,13 +158,17 @@ BUZZ_S3_BUCKET="${BUZZ_S3_BUCKET:-buzz-media}"
 NET=$(docker network ls --format '{{.Name}}' | grep -E 'buzz-net$' | head -1)
 [ -n "$NET" ]
 docker network inspect "$NET" > /dev/null
-docker volume inspect buzz-minio-data > /dev/null 2>&1 || exit 0
-if docker run --rm -v buzz-rustfs-data:/data alpine test -f /data/` + mediaMarker + `; then
+RUSTVOL=$(docker volume ls --format '{{.Name}}' | grep -E 'buzz-rustfs-data$' | head -1)
+[ -n "$RUSTVOL" ]
+docker run --rm -v "$RUSTVOL":/data alpine chown -R 10001:10001 /data
+OLDVOL=$(docker volume ls --format '{{.Name}}' | grep -E 'buzz-minio-data$' | head -1)
+[ -n "$OLDVOL" ] || exit 0
+if docker run --rm -v "$RUSTVOL":/data alpine test -f /data/` + mediaMarker + `; then
   exit 0
 fi
 docker rm -f buzz-media-src > /dev/null 2>&1 || true
 docker run -d --name buzz-media-src --network "$NET" \
-  -v buzz-minio-data:/data \
+  -v "$OLDVOL":/data \
   -e MINIO_ROOT_USER="$BUZZ_S3_ACCESS_KEY" \
   -e MINIO_ROOT_PASSWORD="$BUZZ_S3_SECRET_KEY" \
   ` + mediaSrcImage + ` server /data
@@ -187,7 +195,7 @@ mc mb --ignore-existing "dst/$BUCKET"
 mc mirror --overwrite "src/$BUCKET" "dst/$BUCKET"
 mc diff "src/$BUCKET" "dst/$BUCKET"
 '
-docker run --rm -v buzz-rustfs-data:/data alpine touch /data/` + mediaMarker + `
+docker run --rm -v "$RUSTVOL":/data alpine touch /data/` + mediaMarker + `
 `
 }
 

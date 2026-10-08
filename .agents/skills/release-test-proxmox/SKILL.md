@@ -407,10 +407,11 @@ Seeded by `release-prepare`; each row is ✅ only on its own evidence below.
   test mints a NEW relay LXC that must pull `ghcr.io/block/buzz:main`,
   `postgres:17-alpine`, `redis:7-alpine`, `rustfs/rustfs:1.0.1`, `pgsty/mc`,
   `pgsty/silo`, and `alpine` — and anonymous pulls are rate-limited per-IP
-  (a pull that 401s or rate-limits → the relay deploy dies at `run.sh start`;
-  MinIO's own registries are dead — quay 401s, dl.min.io is 410 — so nothing
-  pulls `minio/*` anymore). Copy them from a running world's relay
-  (the dev env's) into the fresh relay on the host:
+  (a pull that 401s or rate-limits kills the relay deploy — the first pulls
+  surface at the git chown `docker compose run` and the engine `up`, well
+  before `./run.sh start`; MinIO's own registries are dead — quay 401s,
+  dl.min.io is 410 — so nothing pulls `minio/*` anymore). Copy them from a
+  running world's relay (the dev env's) into the fresh relay on the host:
   ```bash
   for img in ghcr.io/block/buzz:main postgres:17-alpine redis:7-alpine \
       rustfs/rustfs:1.0.1 \
