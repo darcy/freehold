@@ -1422,9 +1422,12 @@ func BuildWorldApply(spec *Spec) agent.WorldApply {
 		// 0.5. Public A records (relay/cp -> proxy) on the CP's stored DNS
 		// credential. The CP owns the cred and does DNS-01, so record
 		// management joins the CP build (it was box-side pre-split). No-op
-		// without an edge/proxy or a stored credential.
-		if err := spec.manageDomainDNS(); err != nil {
+		// without an edge/proxy or a stored credential; MANUAL DNS returns a
+		// report note (the records to create, or confirmation they resolve).
+		if note, err := spec.manageDomainDNS(); err != nil {
 			return "", fmt.Errorf("world-build manage DNS: %w", err)
+		} else if note != "" {
+			report = append(report, note)
 		}
 		// 1. The durable volume plane: re-ensure each tenant's dataset/LV onto
 		// the recorded pool (idempotent, guest-writable) and capture the
@@ -2013,6 +2016,11 @@ func (s *Spec) runMigrationScript(path string, env []string, timeout, waitDelay 
 	cmd.Env = env
 	cmd.WaitDelay = waitDelay
 	out, err := cmd.CombinedOutput()
+	// The output lands in the serve's stderr (the journal) on SUCCESS too:
+	// a marked-green migration whose steps silently didn't take was
+	// undiagnosable when only failures carried output — the live-fire on
+	// casaq needed the script's own echoes to reconstruct what ran.
+	fmt.Fprintf(os.Stderr, "migration %s output:\n%s\n", filepath.Base(path), strings.TrimSpace(string(out)))
 	if err != nil {
 		return fmt.Errorf("%s: %w: %s", path, err, strings.TrimSpace(string(out)))
 	}

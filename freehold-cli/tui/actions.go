@@ -305,7 +305,7 @@ func promptLabel(k flowKind, step int) string {
 		case 8:
 			return "deploy litellm gateway + CPA model? (y/n, blank = y)"
 		case 9:
-			return "DNS provider for the certs (e.g. route53; blank = reuse stored)"
+			return "DNS for the certs: \"manual\" (you create the records) or a provider e.g. cloudflare (blank = reuse stored)"
 		default:
 			return "DNS env KEY=VAL,KEY=VAL (blank = auto-detect, e.g. ~/.aws)"
 		}
@@ -838,28 +838,34 @@ func edgeNeedsDNS(f *tuiFlow) bool {
 // rebuild form (fields 9/10) into BOTH relay + cp slots (pre-verified against
 // the relay host), so the headless rebuild reuses it. A blank provider leaves any
 // stored credential untouched (the rebuild reuses the one already on disk).
+// "manual" stores a marker with an empty env — no pre-verify (the build prints
+// the records and resumes when they exist).
 func storeRebuildDNS(f *tuiFlow) error {
 	provider := strings.TrimSpace(f.Inputs[9])
 	if provider == "" {
 		return nil
 	}
-	if !cert.IsProvider(provider) {
-		return fmt.Errorf("unknown DNS provider %q", provider)
+	if strings.EqualFold(provider, cert.ManualProviderName) {
+		provider = cert.ManualProviderName
+	} else if !cert.IsProvider(provider) {
+		return fmt.Errorf("unknown DNS provider %q (\"manual\" or a lego provider name)", provider)
 	}
 	env := map[string]string{}
-	if v := strings.TrimSpace(f.Inputs[10]); v != "" {
-		for _, kv := range strings.Split(v, ",") {
-			k, val, ok := strings.Cut(kv, "=")
-			if !ok || strings.TrimSpace(k) == "" {
-				return fmt.Errorf("DNS env expects KEY=VAL,KEY=VAL — bad entry %q", kv)
+	if provider != cert.ManualProviderName {
+		if v := strings.TrimSpace(f.Inputs[10]); v != "" {
+			for _, kv := range strings.Split(v, ",") {
+				k, val, ok := strings.Cut(kv, "=")
+				if !ok || strings.TrimSpace(k) == "" {
+					return fmt.Errorf("DNS env expects KEY=VAL,KEY=VAL — bad entry %q", kv)
+				}
+				env[strings.TrimSpace(k)] = strings.TrimSpace(val)
 			}
-			env[strings.TrimSpace(k)] = strings.TrimSpace(val)
 		}
-	}
-	relayHost := strings.TrimSpace(f.Inputs[1])
-	if relayHost != "" {
-		if err := cert.Verify(relayHost, provider, env); err != nil {
-			return fmt.Errorf("DNS pre-verify failed: %w", err)
+		relayHost := strings.TrimSpace(f.Inputs[1])
+		if relayHost != "" {
+			if err := cert.Verify(relayHost, provider, env); err != nil {
+				return fmt.Errorf("DNS pre-verify failed: %w", err)
+			}
 		}
 	}
 	id, err := identity.Load(freeholdStateDir() + "/agent-ops")

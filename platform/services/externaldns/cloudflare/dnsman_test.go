@@ -36,3 +36,15 @@ func TestNewCloudflareRequiresToken(t *testing.T) {
 		t.Fatal("expected an error without " + EnvToken)
 	}
 }
+
+// CanManage is the capability gate: cloudflare's init registered a Manager;
+// an unregistered provider (e.g. a full-registry flag-path credential) must
+// be skippable WITHOUT building one or failing.
+func TestCanManage(t *testing.T) {
+	if !CanManage("cloudflare") {
+		t.Error("cloudflare should be registered (init)")
+	}
+	if CanManage("route53") {
+		t.Error("route53 has no registered Manager yet")
+	}
+}

@@ -55,7 +55,11 @@ The gateway has TWO shapes, one per substrate:
 *   **The edge is Caddy on k3s**, permanently the internal edge: a relay vhost and a CP vhost
     (the CP also serves `/mcp` publicly). Certificates are issued in-process (lego, DNS-01)
     and written into Caddy's volume.
-*   **DNS:** public A records via Cloudflare when the world opts in; internal names via
+*   **DNS:** certs via DNS-01 with an automated provider (Cloudflare today) or MANUAL
+    mode — the build stops and prints the exact TXT record to create, then the re-run
+    resumes that same order when it exists; public A records are managed via the
+    Cloudflare API when the world opts in, or created by hand and re-checked by every
+    build (the report lists what's missing); internal names via
     dnsmasq on the CP guest, with the gateway's dnsmasq as its upstream.
 *   **Network's runners:** the PVE host (shared), a `caddy`-scoped kube door, the resolver on
     the CP guest, a Cloudflare door per DNS zone, plus any door the CPA provisions on the fly
@@ -93,6 +97,14 @@ The gateway has TWO shapes, one per substrate:
     never appears in public DNS. Caddy stays the internal edge; both paths coexist. A cloud
     world needs no tunnel (its host already holds a public IP) — Pangolin there is a
     local-site edge (identity gating + the agent-operable dashboard), a later decision.
+*   **More DNS providers:** a provider registry (`dnsman`, hoisted out of the cloudflare
+    package) with per-provider A-record managers — Route53, Google Cloud DNS,
+    DigitalOcean — hand-rolled REST like the Cloudflare one (no SDKs; Route53's SigV4
+    signed by hand), plus a shared metadata table (credential fields + manage
+    capability) feeding the interactive ask and the doors; generalized
+    `<provider>-dns-<zone>` doors with per-provider probes (manual = no door). Cert
+    DNS-01 itself already covers every lego provider (201, generated from lego), plus
+    the manual mode.
 *   **Agent-operated exposure:** a `pangolin-api` runner so Network creates and verifies
     public resources itself, through the department model.
 *   Forward list as config, per-guest vhosts, manual cert import, Tailscale certs, a Certs
