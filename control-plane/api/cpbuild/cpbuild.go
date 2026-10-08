@@ -2135,15 +2135,17 @@ func (s *Spec) appendAgentToolsAudience(report []string) []string {
 		// restarts, so recording here heals the world for good. The URL is the
 		// CP-guest form the box config itself records (the LAN dial both the
 		// console and login boxes reach).
-		if s.CpIP != "" {
-			u := fmt.Sprintf("http://%s:%s", s.CpIP, AgentToolsPort)
-			if err := store.SetAgentToolsURL(&u); err == nil {
-				if err := store.SetAgentToolsPubkey(&audience); err == nil {
-					return append(report, "agent-tools: audience "+agenttools.ShortHex(audience)+" recorded to the console state")
-				}
-			}
+		if s.CpIP == "" {
+			return append(report, "agent-tools: audience "+agenttools.ShortHex(audience)+" (console state records none — no cp IP to record the coords against)")
 		}
-		return append(report, "agent-tools: audience "+agenttools.ShortHex(audience)+" (console state records none — pre-recording world)")
+		u := fmt.Sprintf("http://%s:%s", s.CpIP, AgentToolsPort)
+		if err := store.SetAgentToolsURL(&u); err != nil {
+			return append(report, "WARN: agent-tools: pre-recording write failed (url): "+err.Error())
+		}
+		if err := store.SetAgentToolsPubkey(&audience); err != nil {
+			return append(report, "WARN: agent-tools: pre-recording write failed (pubkey; the url landed): "+err.Error())
+		}
+		return append(report, "agent-tools: audience "+agenttools.ShortHex(audience)+" recorded to the console state")
 	}
 	switch {
 	case *rec == audience:
