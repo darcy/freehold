@@ -232,7 +232,9 @@ func TestMediaMoverScriptGuards(t *testing.T) {
 		"chown -R 10001:10001 /data",                            // compose creates the volume root-owned
 		"test -f /data/" + mediaMarker,                          // post-cutover skip
 		"mc mirror --overwrite \"src/$BUCKET\" \"dst/$BUCKET\"", // object-level copy
-		"mc diff \"src/$BUCKET\" \"dst/$BUCKET\"",               // the verify gate
+		"D=$(mc diff \"src/$BUCKET\" \"dst/$BUCKET\")",          // diff OUTPUT is the gate —
+		"if [ -n \"$D\" ]; then",                                // its exit code exits 0 on differences
+		"mirror verification failed",                            // and a failed gate never marks
 		"docker network ls --format '{{.Name}}'",                // derived, not assumed
 		"docker rm -f buzz-media-src",                           // no stray engine left
 		"server /data",                                          // old engine re-serves the volume

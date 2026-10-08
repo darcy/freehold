@@ -139,8 +139,9 @@ grep -q "buzz-rustfs-data" compose.yml
 // other's on-disk format, so the copy is object-level over S3: the old
 // volume is re-served by the pinned silo image (MinIO-fork xl-format lineage — it
 // reads what any prior minio/silo generation wrote) and mc mirrors the
-// bucket across, verified with mc diff before the marker (and the relay)
-// come back. Compose project-prefixes the volume names, so both are DERIVED
+// bucket across, verified before the marker (and the relay) come back: the
+// gate is EMPTY mc diff output — diff is a reporting command that exits 0
+// even when the buckets differ, so the exit code alone never fails. Compose project-prefixes the volume names, so both are DERIVED
 // the same way the network is — a bare name would be an orphan volume and
 // the migration would silently skip (an upgraded world would serve an empty
 // engine green). Idempotent at every point: the chown heals the engine's
@@ -193,7 +194,12 @@ mc alias set src http://buzz-media-src:9000 "$SRC_AK" "$SRC_SK"
 mc alias set dst http://minio:9000 "$DST_AK" "$DST_SK"
 mc mb --ignore-existing "dst/$BUCKET"
 mc mirror --overwrite "src/$BUCKET" "dst/$BUCKET"
-mc diff "src/$BUCKET" "dst/$BUCKET"
+D=$(mc diff "src/$BUCKET" "dst/$BUCKET")
+if [ -n "$D" ]; then
+  echo "mirror verification failed: the buckets differ" >&2
+  echo "$D" >&2
+  exit 1
+fi
 '
 docker run --rm -v "$RUSTVOL":/data alpine touch /data/` + mediaMarker + `
 `
