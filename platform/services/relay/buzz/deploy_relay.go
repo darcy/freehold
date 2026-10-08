@@ -1,6 +1,7 @@
 package deploy
 
 import (
+	"encoding/base64"
 	"fmt"
 	"os"
 	"strconv"
@@ -16,6 +17,35 @@ import (
 // 1972b7d the compose's minio images moved to pgsty/silo+mc (Docker Hub,
 // sha-pinned) — quay's minio repo went private and every pull 401s.
 const DefaultBufRef = "1972b7d256a5d0bb90eea6ef78e93d6b55bb1a12"
+
+const (
+	// rustfsImage is the pinned S3 engine the deploy patches the bundle's
+	// minio service onto. RustFS is a MinIO-compatible Apache-2.0 engine: the
+	// relay's S3 surface (rust-s3 SigV4 path-style, ListObjectVersions-driven
+	// deletion, PutBucketPolicy init, range reads, bulk deletes) is covered,
+	// and the service NAME stays `minio` so BUZZ_S3_ENDPOINT and the compose
+	// depends_on hold. Pinned tag+digest, multi-arch (amd64/arm64).
+	rustfsImage = "rustfs/rustfs:1.0.1@sha256:1803faef57627e2d9c2e7d89d655d712ddded5389040054987163043fecb6a3c"
+
+	// mediaSrcImage is the pinned engine that re-serves a world's OLD minio
+	// volume during the one-time media migration. It is the same silo pin the
+	// bundle's compose carries (MinIO-fork xl-format lineage — reads volumes
+	// written by any prior minio/silo generation); it never needs to track
+	// upstream bumps, the old volume is frozen after cutover.
+	mediaSrcImage = "pgsty/silo:RELEASE.2026-09-16T00-00-00Z@sha256:635197cb9f36d01bee221d34d1c7d7960f6a95c48b0b6c01d99cd13bdae51a46"
+
+	// mediaMoverImage is the pinned mc client the mover mirrors with.
+	mediaMoverImage = "pgsty/mc:RELEASE.2026-09-16T00-00-00Z@sha256:cfc83108c3abb371f8fb84d99c1fdc88f8c237e022409b0081fb7c0a3be634dd"
+
+	// mediaMarker is written into the rustfs volume after a verified mirror;
+	// a world whose volume carries it is post-cutover and never re-mirrored
+	// (the old volume is frozen history, and re-mirroring over live data
+	// would resurrect deleted media).
+	mediaMarker = ".media-migrated-from-minio"
+
+	// mediaMigrateTimeout bounds the mirror step (mc mirror + verify).
+	mediaMigrateTimeout uint64 = 3600
+)
 
 // checkDocker passes the B1 gate: docker + compose must exist on the target
 // (or inside its LXC).
@@ -50,6 +80,122 @@ type RelayDeployResult struct {
 func gitDataChownCmd() string {
 	return "docker compose --env-file .env -f compose.yml run --rm --user 0 " +
 		"--entrypoint chown relay -R buzz:buzz /data/git"
+}
+
+// composePatchScript returns the (guest-run) script that patches the bundle's
+// compose.yml onto the RustFS engine. The bundle is re-extracted at every
+// build, so the patch is marker-gated and re-applies after every extract.
+// It replaces ONLY the `minio` service block — the service NAME survives so
+// the relay's BUZZ_S3_ENDPOINT (http://minio:9000), the relay's depends_on,
+// and the minio-init mc job (mb + anonymous-none, both supported by RustFS)
+// hold unchanged — and adds the new data volume. Shipped base64 (the sh -c
+// exec wrapper is single-quote-free; the script itself is not).
+func composePatchScript(dir string) string {
+	return "set -e\ncd " + dir + "/deploy/compose\n" +
+		"grep -q \"rustfs/rustfs\" compose.yml && exit 0\n" +
+		`awk '
+  BEGIN { inminio = 0; replaced = 0; voladded = 0 }
+  /^  minio:$/ && replaced == 0 {
+    replaced = 1
+    inminio = 1
+    print "  minio:"
+    print "    image: ` + rustfsImage + `"
+    print "    environment:"
+    print "      RUSTFS_VOLUMES: /data"
+    print "      RUSTFS_ADDRESS: 0.0.0.0:9000"
+    print "      RUSTFS_ACCESS_KEY: ${BUZZ_S3_ACCESS_KEY:?set BUZZ_S3_ACCESS_KEY}"
+    print "      RUSTFS_SECRET_KEY: ${BUZZ_S3_SECRET_KEY:?set BUZZ_S3_SECRET_KEY}"
+    print "    volumes:"
+    print "      - buzz-rustfs-data:/data"
+    print "    healthcheck:"
+    print "      test: [\"CMD\", \"curl\", \"-f\", \"http://127.0.0.1:9000/health\"]"
+    print "      interval: 5s"
+    print "      timeout: 5s"
+    print "      retries: 12"
+    print "      start_period: 10s"
+    print "    restart: unless-stopped"
+    print "    networks:"
+    print "      - buzz-net"
+    next
+  }
+  inminio == 1 && /^  minio-init:$/ { inminio = 0 }
+  inminio == 1 { next }
+  /^networks:$/ && voladded == 0 {
+    print "  buzz-rustfs-data:"
+    print "    labels:"
+    print "      com.buzz.volume: rustfs"
+    voladded = 1
+  }
+  { print }
+' compose.yml > compose.yml.next
+mv compose.yml.next compose.yml
+grep -q "rustfs/rustfs" compose.yml
+grep -q "buzz-rustfs-data" compose.yml
+`
+}
+
+// mediaMoverScript returns the (guest-run) one-time migration of a world's
+// old minio media volume onto the rustfs volume. Engines cannot read each
+// other's on-disk format, so the copy is object-level over S3: the old
+// volume is re-served by the pinned silo image (MinIO-format lineage — it
+// reads what any prior minio/silo generation wrote) and mc mirrors the
+// bucket across, verified with mc diff before the marker (and the relay)
+// come back. Idempotent at every point: mirror resumes a partial run,
+// diff gates the cutover, and the marker makes the whole step a no-op
+// afterward (post-cutover the old volume is frozen history — the relay is
+// the only writer and it now writes to the rustfs volume). Skips worlds
+// with no old volume (fresh installs) at all.
+func mediaMoverScript(dir string) string {
+	return "set -e\ncd " + dir + "/deploy/compose\n" +
+		`set -a
+. ./.env
+set +a
+BUZZ_S3_BUCKET="${BUZZ_S3_BUCKET:-buzz-media}"
+NET=$(docker network ls --format '{{.Name}}' | grep -E 'buzz-net$' | head -1)
+[ -n "$NET" ]
+docker network inspect "$NET" > /dev/null
+docker volume inspect buzz-minio-data > /dev/null 2>&1 || exit 0
+if docker run --rm -v buzz-rustfs-data:/data alpine test -f /data/` + mediaMarker + `; then
+  exit 0
+fi
+docker rm -f buzz-media-src > /dev/null 2>&1 || true
+docker run -d --name buzz-media-src --network "$NET" \
+  -v buzz-minio-data:/data \
+  -e MINIO_ROOT_USER="$BUZZ_S3_ACCESS_KEY" \
+  -e MINIO_ROOT_PASSWORD="$BUZZ_S3_SECRET_KEY" \
+  ` + mediaSrcImage + ` server /data
+cleanup() { docker rm -f buzz-media-src > /dev/null 2>&1 || true; }
+trap cleanup EXIT
+docker run --rm --network "$NET" \
+  -e SRC_AK="$BUZZ_S3_ACCESS_KEY" -e SRC_SK="$BUZZ_S3_SECRET_KEY" \
+  --entrypoint /bin/sh ` + mediaMoverImage + ` -euc '
+for i in $(seq 1 90); do
+  mc alias set src http://buzz-media-src:9000 "$SRC_AK" "$SRC_SK" && exit 0
+  sleep 2
+done
+echo "the old media engine never answered" >&2
+exit 1
+'
+docker run --rm --network "$NET" \
+  -e SRC_AK="$BUZZ_S3_ACCESS_KEY" -e SRC_SK="$BUZZ_S3_SECRET_KEY" \
+  -e DST_AK="$BUZZ_S3_ACCESS_KEY" -e DST_SK="$BUZZ_S3_SECRET_KEY" \
+  -e BUCKET="$BUZZ_S3_BUCKET" \
+  --entrypoint /bin/sh ` + mediaMoverImage + ` -euc '
+mc alias set src http://buzz-media-src:9000 "$SRC_AK" "$SRC_SK"
+mc alias set dst http://minio:9000 "$DST_AK" "$DST_SK"
+mc mb --ignore-existing "dst/$BUCKET"
+mc mirror --overwrite "src/$BUCKET" "dst/$BUCKET"
+mc diff "src/$BUCKET" "dst/$BUCKET"
+'
+docker run --rm -v buzz-rustfs-data:/data alpine touch /data/` + mediaMarker + `
+`
+}
+
+// shipScript wraps a script for the single-quote-free exec surface: base64
+// rides the sh -c wrapper, the decoded file runs clean on the guest.
+func shipScript(path, script string) string {
+	return "echo " + base64.StdEncoding.EncodeToString([]byte(script)) +
+		" | base64 -d > " + path + " && sh " + path
 }
 
 func isHexPubkey(s string) bool {
@@ -141,14 +287,16 @@ func InstallCmd(spec *RelayDeploySpec) string {
 			"fi; done && "+
 			"(grep -qE \"=CHANGE_ME\" .env && echo \"still has CHANGE_ME placeholders in "+
 			"%s/deploy/compose/.env\" >&2 && exit 1 || true) && "+
-			// minio moved its images OFF Docker Hub (Docker Hub now denies
-			// `minio/minio`); the pinned buzz bundle still references it, so
-			// re-point the minio service + minio-init images at quay.io (the
-			// same tags, the official publish home). Double-quoted inside the
-			// single-quoted sh -c wrapper (LxcCmd); # delimits so the image
-			// tags' / don't split the pattern.
-			"(sed -i \"s#image: minio/#image: quay.io/minio/#g\" compose.yml) && "+
-			"%s && ./run.sh start",
+			// The bundle's minio service is patched onto the RustFS engine
+			// (marker-gated, survives every re-extract). The relay itself is
+			// NOT started here: the engine comes up alone (up minio
+			// minio-init) so the media mover can verify the one-time mirror
+			// before the relay ever serves from it — DeployRelay runs the
+			// mover, then ./run.sh start as its own step.
+			shipScript("/tmp/fh-rustfs-patch.sh", composePatchScript(dir))+" && "+
+			"%s && "+
+			"docker compose --env-file .env stop relay minio minio-init && "+
+			"docker compose --env-file .env up -d minio minio-init",
 		dir, port, port, owner, owner, host, host, rws, rws, rhttp, rhttp, host, host,
 		dir, gitDataChownCmd())
 }
@@ -207,7 +355,18 @@ func DeployRelay(exec provisioning.GuestExecFunc, spec *RelayDeploySpec) (*Relay
 		return nil, err
 	}
 	install := InstallCmd(spec)
-	if err := runToOK("run.sh start", install, 600); err != nil {
+	if err := runToOK("stage relay engine", install, 600); err != nil {
+		return nil, err
+	}
+	// The one-time media migration runs while the relay is still down and the
+	// rustfs engine is already up (InstallCmd staged it): a world with a live
+	// minio volume gets its bucket mirrored + verified here; fresh worlds
+	// no-op. Only after the mirror verifies does the relay start serving.
+	if err := runToOK("migrate media", shipScript("/tmp/fh-media-mover.sh", mediaMoverScript(spec.DeployDir)), mediaMigrateTimeout); err != nil {
+		return nil, err
+	}
+	start := "cd " + spec.DeployDir + "/deploy/compose && ./run.sh start"
+	if err := runToOK("run.sh start", start, 600); err != nil {
 		return nil, err
 	}
 

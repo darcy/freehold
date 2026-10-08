@@ -287,7 +287,7 @@ shells (tmux/herdr panes included) via the `freehold` CLI / SSH / doors — the 
 - **Durable-plane guest paths follow the `/srv/data` convention** (see docs/ARCHITECTURE.md's
   "Filesystem layout convention"). Every `--mpN` is born at `pct create` with an explicit
   `backup=` flag: the relay's docker-root stays at `/var/lib/docker` with `backup=1` (its
-  Postgres/Redis/MinIO/git live as named volumes under the daemon root — relocating it would
+  Postgres/Redis/RustFS/git live as named volumes under the daemon root — relocating it would
   silently exclude the relay DBs from backup); relay deploy data lands at `/srv/data/relay`,
   CP at `/srv/data/cp`, k3s volumes at `/srv/data/k8s-volumes`, all `backup=1`; a
   `/srv/nobackup` mount gets `backup=0`. The converge pipeline's plane stage is never

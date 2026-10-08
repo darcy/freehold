@@ -405,15 +405,17 @@ Seeded by `release-prepare`; each row is ✅ only on its own evidence below.
 
 - **Side-load the Buzz relay images before the first fresh build.** Each fresh
   test mints a NEW relay LXC that must pull `ghcr.io/block/buzz:main`,
-  `postgres:17-alpine`, `redis:7-alpine`, `quay.io/minio/minio:*`, and
-  `quay.io/minio/mc:*` — and anonymous pulls are rate-limited per-IP
-  (`unauthorized: access to the requested resource is not authorized` → the
-  relay deploy dies at `run.sh start`). Copy them from a running world's relay
+  `postgres:17-alpine`, `redis:7-alpine`, `rustfs/rustfs:1.0.1`, `pgsty/mc`,
+  `pgsty/silo`, and `alpine` — and anonymous pulls are rate-limited per-IP
+  (a pull that 401s or rate-limits → the relay deploy dies at `run.sh start`;
+  MinIO's own registries are dead — quay 401s, dl.min.io is 410 — so nothing
+  pulls `minio/*` anymore). Copy them from a running world's relay
   (the dev env's) into the fresh relay on the host:
   ```bash
-  for img in ghcr.io/block/buzz:main postgres:17-alpine \
-      quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z \
-      quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z redis:7-alpine; do
+  for img in ghcr.io/block/buzz:main postgres:17-alpine redis:7-alpine \
+      rustfs/rustfs:1.0.1 \
+      pgsty/mc:RELEASE.2026-09-16T00-00-00Z \
+      pgsty/silo:RELEASE.2026-09-16T00-00-00Z alpine; do
     pct exec <dev-relay-vmid> -- docker save "$img" | pct exec <fresh-relay-vmid> -- docker load
   done
   ```
