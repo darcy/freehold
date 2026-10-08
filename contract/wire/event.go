@@ -24,7 +24,8 @@ const (
 	ChannelMessage = 9
 	// KINDNip43Membership is NIP-43's relay membership list (kind 13534) —
 	// published and signed by the relay's own key; a member's pubkey rides a
-	// p tag. The trust anchor for "who may use this appliance" is the relay.
+	// `member` tag (NOT a p-tag). The trust anchor for "who may use this
+	// appliance" is the relay.
 	KINDNip43Membership = 13534
 )
 

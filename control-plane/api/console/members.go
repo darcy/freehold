@@ -603,7 +603,7 @@ func (s *Server) memberLogout(w http.ResponseWriter, r *http.Request) {
 // ---- operator-scoped member admin ----
 
 func (s *Server) membersList(w http.ResponseWriter, r *http.Request) {
-	if _, err := s.requireSession(r); err != nil {
+	if _, err := s.requireAdmin(r); err != nil {
 		writeErr(w, statusFor(err), err.Error())
 		return
 	}
@@ -624,7 +624,7 @@ type memberInviteReq struct {
 }
 
 func (s *Server) memberInviteMint(w http.ResponseWriter, r *http.Request) {
-	operator, err := s.requireSession(r)
+	operator, err := s.requireAdmin(r)
 	if err != nil {
 		writeErr(w, statusFor(err), err.Error())
 		return
@@ -656,7 +656,7 @@ func (s *Server) memberInviteMint(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) memberInviteRevoke(w http.ResponseWriter, r *http.Request, hash string) {
-	if _, err := s.requireSession(r); err != nil {
+	if _, err := s.requireAdmin(r); err != nil {
 		writeErr(w, statusFor(err), err.Error())
 		return
 	}
@@ -681,7 +681,7 @@ func (s *Server) memberInviteRevoke(w http.ResponseWriter, r *http.Request, hash
 }
 
 func (s *Server) memberDrop(w http.ResponseWriter, r *http.Request, name string) {
-	if _, err := s.requireSession(r); err != nil {
+	if _, err := s.requireAdmin(r); err != nil {
 		writeErr(w, statusFor(err), err.Error())
 		return
 	}

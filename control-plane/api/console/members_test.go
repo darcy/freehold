@@ -396,6 +396,32 @@ func TestMemberRoutesNeedTheTier(t *testing.T) {
 	}
 }
 
+// TestMemberAdminRoutesRefuseMemberSessions pins the privilege boundary: the
+// member-role session the public login flow hands relay members must never
+// mint invites (that onboards arbitrary non-members to the gated apps),
+// list members, revoke invites, or drop sessions — those are operator-only.
+func TestMemberAdminRoutesRefuseMemberSessions(t *testing.T) {
+	f := newMemberFixture(t)
+	tok, err := f.s.Auth.IssueSessionRole(f.memberPK, RoleMember)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reqs := []*http.Request{
+		httptest.NewRequest(http.MethodGet, "/api/members", nil),
+		httptest.NewRequest(http.MethodPost, "/api/members/invites", strings.NewReader(`{"name":"x"}`)),
+		httptest.NewRequest(http.MethodDelete, "/api/members/invites/x", nil),
+		httptest.NewRequest(http.MethodDelete, "/api/members/sessions/x", nil),
+	}
+	for _, req := range reqs {
+		req.AddCookie(&http.Cookie{Name: sessionCookie, Value: tok})
+		rec := httptest.NewRecorder()
+		f.s.ServeHTTP(rec, req)
+		if rec.Code != http.StatusForbidden {
+			t.Fatalf("%s %s with a member session must be 403, got %d %s", req.Method, req.URL.Path, rec.Code, rec.Body.String())
+		}
+	}
+}
+
 // TestSafeNext pins the post-login redirect validation: paths on this origin
 // and full URLs on the appliance's own registrable domain survive; anything
 // else (another site, a scheme-relative host) collapses to "".
