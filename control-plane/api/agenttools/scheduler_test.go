@@ -381,3 +381,25 @@ func TestTickOneShotFailedPostRequeuesAndPauses(t *testing.T) {
 		t.Errorf("last run = %+v, want error", last)
 	}
 }
+
+func TestTickMissingAgentPubkeyRoutedPauses(t *testing.T) {
+	store := mkStore(t)
+	now := time.Unix(1_800_000_000, 0)
+	// A pubkey-routed job whose agent row was REMOVED (manage_agent remove):
+	// the stored pubkey no longer resolves — the job must pause, not fire
+	// into the channel (and ping the owner) every slot forever.
+	if err := store.Create(&Job{ID: "j1", Owner: "ccdd", Agent: "freehold", AgentPubkey: "removed-pk",
+		Channel: "ch1", Cron: "@daily", Prompt: "p", NextRunAt: uint64(now.Unix())}); err != nil {
+		t.Fatal(err)
+	}
+	s, fired, _ := mkSched(t, store, map[string]string{"cpa": "aabb"})
+	s.Now = func() time.Time { return now }
+	s.TickNow()
+	if len(*fired) != 0 {
+		t.Fatal("a removed agent's job must not fire")
+	}
+	j, _ := store.Get("j1")
+	if !j.Paused {
+		t.Error("pubkey-routed job with a missing registry row must pause")
+	}
+}

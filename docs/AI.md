@@ -283,9 +283,10 @@ action it causes is signed, authorized, and audited by machinery that cannot rea
 *   Job **prompts sit in plaintext** in the agent-tools' `jobs.json` (0600, durable plane)
     — the scheduler must read them to fire. The privacy boundary is the console API's
     owner redaction, not encryption.
-*   Job fires and **failure notes are best-effort**: a relay outage during a fire records
-    the run as `error` (a one-shot consumes itself on a failed post — at-most-once); a
-    failure note the channel refuses is logged, not retried.
+*   Job fires and **failure notes are best-effort**: a relay outage during a
+    fire records the run as `error` — a failed post provably never went out,
+    so a one-shot re-queues (2 minutes) and pauses after 5 consecutive
+    failures; a failure note the channel refuses is logged, not retried.
 *   **Console jobs management is read-only**: pause/delete run through agents
     (`pause_job`/`delete_job`), since jobs.json is the agent-tools process's own store.
 *   Agents read the repo but can't write it.

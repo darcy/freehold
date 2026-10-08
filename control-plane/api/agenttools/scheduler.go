@@ -212,6 +212,8 @@ func (s *Scheduler) TickNow() {
 				_ = s.Jobs.Update(j.ID, func(j *Job) bool { j.Agent = name; return true })
 				j.Agent = name
 			}
+		} else {
+			pk = "" // pubkey-routed but the row is GONE (the agent was removed)
 		}
 		if pk == "" {
 			// The agent row is gone (removed, not renamed): pause the job with
