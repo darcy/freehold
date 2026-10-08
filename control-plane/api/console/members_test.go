@@ -79,8 +79,8 @@ func pkOf(t *testing.T, sec []byte) string {
 }
 
 // fakeRelayQuery answers /query with a fixed event set — the client-side
-// author check in isCommunityMemberFromEvents makes the fake's
-// filter-blindness harmless.
+// author check + signature verification in IsCommunityMemberAuth make the
+// fake's filter-blindness harmless.
 func fakeRelayQuery(t *testing.T, events []map[string]interface{}) *httptest.Server {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -90,11 +90,13 @@ func fakeRelayQuery(t *testing.T, events []map[string]interface{}) *httptest.Ser
 	return srv
 }
 
+// membershipListEvent is the relay's NIP-43 list, RELAY-SIGNED, members
+// riding `member` tags — the shape the pinned buzz relay serves.
 func membershipListEvent(t *testing.T, relaySec []byte, ts int64, members ...string) map[string]interface{} {
 	t.Helper()
 	tags := [][]string{}
 	for _, m := range members {
-		tags = append(tags, []string{"p", m})
+		tags = append(tags, []string{"member", m, "member"})
 	}
 	return signEventMap(t, relaySec, wire.KINDNip43Membership, ts, tags, "")
 }

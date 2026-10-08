@@ -28,8 +28,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
-	"freehold/contract/relay"
 )
 
 const (
@@ -422,20 +420,10 @@ func (s *Server) memberRelayAllowed(pubkey string) (bool, error) {
 	}
 	s.memberMu.Unlock()
 
+	// The ONE membership read (console login's member role uses it too):
+	// dial/auth resolution + the not-configured guard live there.
 	_ = s.Store.Reload()
-	snap := s.Store.Snapshot()
-	dial, auth := s.relayDialAuth(snap)
-	rpk := ""
-	if snap.RelayPubkey != nil {
-		rpk = *snap.RelayPubkey
-	}
-	if rpk == "" && s.Builder != nil {
-		rpk = s.Builder.RelayPK
-	}
-	if dial == "" || rpk == "" {
-		return false, errRelayUnknown
-	}
-	ok, err := relay.IsCommunityMemberAuth(dial, auth, s.ConsoleSecret, rpk, pubkey)
+	ok, err := s.isRelayMember(s.Store.Snapshot(), pubkey)
 
 	s.memberMu.Lock()
 	if err != nil {
@@ -579,7 +567,10 @@ func (s *Server) forwardAuthVerify(w http.ResponseWriter, r *http.Request) {
 	}
 	if s.Auth != nil {
 		if tok := cookieValue(r, sessionCookie); tok != "" {
-			if _, ok := s.Auth.SessionIdentity(tok); ok {
+			// Any console session role passes the gate — operator or member:
+			// both are admitted identities (the member role was verified
+			// against the relay's list at ITS login).
+			if _, _, ok := s.Auth.SessionIdentity(tok); ok {
 				w.WriteHeader(http.StatusNoContent)
 				return
 			}

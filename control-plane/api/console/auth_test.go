@@ -293,17 +293,25 @@ func TestLoginRejects(t *testing.T) {
 func TestMemberLoginAndJobRedaction(t *testing.T) {
 	// Fake relay: /query answers with the relay's membership list (ONE
 	// kind-13534 event whose `member` tags name the members — the shape the
-	// pinned buzz relay serves; the client scans them client-side).
+	// pinned buzz relay serves; the client scans them client-side AND
+	// verifies the relay's signature, so the fixture event is really signed
+	// by the relay key).
 	adminSec := adminSecret()
 	adminPK, _ := crypto.PubkeyFromSecret(adminSec)
 	memberSec := make([]byte, 32)
 	memberSec[0] = 0x99
 	memberPK, _ := crypto.PubkeyFromSecret(memberSec)
+	relaySec := make([]byte, 32)
+	relaySec[1] = 0x7e
+	relayPK, _ := crypto.PubkeyFromSecret(relaySec)
+	ts := time.Now().Unix()
+	tags := [][]string{{"member", memberPK, "member"}}
+	_, evID, evSig, _ := wire.SignEvent(relaySec, wire.KINDNip43Membership, ts, tags, "")
 	relaySrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		events := []map[string]interface{}{{
-			"id": strings.Repeat("ab", 32), "pubkey": strings.Repeat("cd", 32),
-			"created_at": time.Now().Unix(), "kind": 13534,
-			"tags":       [][]string{{"member", memberPK, "member"}}, "content": "", "sig": strings.Repeat("ef", 96),
+			"id": evID, "pubkey": relayPK,
+			"created_at": ts, "kind": 13534,
+			"tags": tags, "content": "", "sig": evSig,
 		}}
 		_ = json.NewEncoder(w).Encode(events)
 	}))
@@ -315,7 +323,7 @@ func TestMemberLoginAndJobRedaction(t *testing.T) {
 		t.Fatal(err)
 	}
 	_ = store.SetRelayURL(&relaySrv.URL)
-	rpk := strings.Repeat("cd", 32)
+	rpk := relayPK
 	_ = store.SetRelayPubkey(&rpk)
 	_ = store.Save()
 

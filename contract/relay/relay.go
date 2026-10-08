@@ -391,64 +391,6 @@ func isMemberFromEvents(evs []map[string]interface{}, memberPubkey string) bool 
 	return member
 }
 
-// IsCommunityMemberAuth reports whether memberPubkey is on the relay's NIP-43
-// membership list (kind 13534, signed by the relay's own key) — the "who may
-// use this appliance" check behind the member gate. The relay pubkey is the
-// trust anchor: the query pins authors=[relayPubkey] AND every listing is
-// signature-verified client-side (same discipline as the roster read) — the
-// console dials the relay over the plaintext LAN, so a forged 13534 injected
-// on-path admits nobody.
-func IsCommunityMemberAuth(dialURL, authURL string, secret []byte, relayPubkey, memberPubkey string) (bool, error) {
-	filters := []interface{}{map[string]interface{}{
-		"kinds":   []interface{}{wire.KINDNip43Membership},
-		"authors": []interface{}{relayPubkey},
-		"limit":   1000,
-	}}
-	evs, err := QueryEventsAuth(dialURL, authURL, secret, filters)
-	if err != nil {
-		return false, err
-	}
-	return isCommunityMemberFromEvents(evs, relayPubkey, memberPubkey), nil
-}
-
-// isCommunityMemberFromEvents is the pure membership read: per d-tag group
-// (a relay may publish one cumulative list or one listing per member), the
-// NEWEST VERIFIED listing decides whether it names the member — the relay
-// republishes its list on every membership change, so a stale listing that
-// names a since-removed member must not outlive the current one that drops
-// them. Events failing signature verification are skipped (an unverified
-// event is not the relay's word, whatever its pubkey field claims). An empty
-// set is not a member.
-func isCommunityMemberFromEvents(evs []map[string]interface{}, relayPubkey, memberPubkey string) bool {
-	newest := map[string]int64{}
-	names := map[string]bool{}
-	for _, e := range evs {
-		author, _ := e["pubkey"].(string)
-		if author != relayPubkey {
-			continue
-		}
-		createdAt := eventCreatedAt(e)
-		tags, _ := parseTags(e)
-		content, _ := e["content"].(string)
-		sig, _ := e["sig"].(string)
-		if _, err := wire.VerifyEvent(author, createdAt, wire.KINDNip43Membership, tags, content, sig); err != nil {
-			continue
-		}
-		d := tagValue(tags, "d")
-		if prev, ok := newest[d]; ok && prev >= createdAt {
-			continue
-		}
-		newest[d] = createdAt
-		names[d] = eventNamesMember(e, memberPubkey)
-	}
-	for _, ok := range names {
-		if ok {
-			return true
-		}
-	}
-	return false
-}
-
 // eventNamesMember reports whether the event's p tag names memberPubkey.
 func eventNamesMember(e map[string]interface{}, memberPubkey string) bool {
 	tags, ok := e["tags"].([]interface{})
@@ -766,33 +708,41 @@ func PublishProfileAuth(dialURL, authURL string, secret []byte, name, about stri
 // community, read from the relay's NIP-43 membership list (kind 13534, signed
 // by the relay key — the same list `buzz-admin add-member` maintains; members
 // ride `member` tags, NOT p-tags, so the event is fetched and scanned
-// client-side). Console-login's member role uses it: any relay member may
-// hold a jobs-scoped session; the admin whitelist stays the operator gate.
-// Dial + canonical auth URL separated (the relay rejects an auth whose `u`
-// is the LAN origin).
+// client-side). The relay pubkey is the trust anchor enforced HERE, not just
+// in the query: the console dials the relay over the plaintext LAN, so an
+// injected listing that names the relay key must still fail the author check
+// AND signature verification (mergeRoster's discipline) before its tags are
+// trusted. Console-login's member role and the member gate both use it: any
+// relay member may hold a jobs-scoped session; the admin whitelist stays the
+// operator gate. Dial + canonical auth URL separated (the relay rejects an
+// auth whose `u` is the LAN origin).
 func IsCommunityMemberAuth(dialURL, authURL string, authSecret []byte, relayPubkey, memberPubkey string) (bool, error) {
 	if relayPubkey == "" || memberPubkey == "" {
 		return false, fmt.Errorf("relay pubkey or member pubkey missing")
 	}
 	events, err := QueryEventsAuth(dialURL, authURL, authSecret, []interface{}{map[string]interface{}{
-		"kinds": []interface{}{13534}, "authors": []interface{}{relayPubkey}, "limit": 1,
+		"kinds": []interface{}{wire.KINDNip43Membership}, "authors": []interface{}{relayPubkey}, "limit": 1,
 	}})
 	if err != nil {
 		return false, err
 	}
 	for _, ev := range events {
-		raw, ok := ev["tags"].([]interface{})
-		if !ok {
+		author, _ := ev["pubkey"].(string)
+		if author != relayPubkey {
 			continue
 		}
-		for _, t := range raw {
-			row, ok := t.([]interface{})
-			if !ok || len(row) < 2 {
+		createdAt := eventCreatedAt(ev)
+		tags, _ := parseTags(ev)
+		content, _ := ev["content"].(string)
+		sig, _ := ev["sig"].(string)
+		if _, err := wire.VerifyEvent(author, createdAt, wire.KINDNip43Membership, tags, content, sig); err != nil {
+			continue
+		}
+		for _, t := range tags {
+			if len(t) < 2 {
 				continue
 			}
-			kind, _ := row[0].(string)
-			pk, _ := row[1].(string)
-			if kind == "member" && pk == memberPubkey {
+			if t[0] == "member" && t[1] == memberPubkey {
 				return true, nil
 			}
 		}
