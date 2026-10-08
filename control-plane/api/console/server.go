@@ -428,6 +428,14 @@ func (s *Server) worldBuild(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "world-build: "+err.Error())
 		return
 	}
+	// The build's stages write the console state FILE (agent-tools coords on a
+	// young world, services) through their own handle — reload so this
+	// process's Snapshot (world-migrate/exec, /api/world) sees them now, not
+	// after the next restart.
+	if rerr := s.Store.Reload(); rerr != nil {
+		writeErr(w, http.StatusInternalServerError, "world-build: state reload: "+rerr.Error())
+		return
+	}
 	// Hand back the world coords the build resolved (relay/cp/k3s vmids + IPs).
 	// A teardown clears the operator box's recorded coords, so the build caller
 	// must write these back to its profile or the next uninstall cannot find the

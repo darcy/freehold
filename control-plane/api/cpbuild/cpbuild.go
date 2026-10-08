@@ -1436,6 +1436,17 @@ func BuildWorldApply(spec *Spec) agent.WorldApply {
 			}
 			report = append(report, "relay booted + stack deployed")
 		}
+		// 2.2. The operator's Buzz profile (kind 0) — the event that makes the
+		// desktop app skip its first-run onboarding (starter channels, private
+		// Welcome, built-in welcome-team agents). Published HERE, the moment the
+		// relay answers on its LAN dial and before the public edge exists: the
+		// app connects the instant the relay is reachable, and its onboarding
+		// gate fails OPEN (a missed profile check runs the full onboarding —
+		// starter channels, Fizz + the welcome kickoff, and the app's own
+		// kind:0, which would then make this stage skip as "already present"
+		// forever). Seeding before anything can connect is the only ordering
+		// that holds. Reads first; never overwrites.
+		report = spec.stageOperatorProfile(report)
 		// 2.4. Re-assert the CONSOLE identity's relay membership on EVERY build.
 		// A relay rebuild/reseed can drop it, and then every console-signed
 		// publish (the runner channels, agent rosters, agent-tools seeding) 403s
@@ -1662,9 +1673,9 @@ func BuildWorldApply(spec *Spec) agent.WorldApply {
 				}
 			}
 		}
-		// 8.5. The operator's Buzz profile (kind 0) — the event that makes the
-		// desktop app skip its first-run onboarding (starter channels, private
-		// Welcome, built-in welcome-team agents). Reads first; never overwrites.
+		// 8.5. Self-heal re-check of 2.2 — a transient miss on the early stage
+		// (the relay API was still settling) degrades to the stock onboarding;
+		// the stage is read-first so this is a no-op on a healthy build.
 		report = spec.stageOperatorProfile(report)
 		// 9. The release pulse: the CPA posts the world's RUNNING version to
 		// Pulse — a stable build its own release's notes + link, a dev build
@@ -2079,9 +2090,26 @@ func (s *Spec) appendAgentToolsAudience(report []string) []string {
 		return append(report, "WARN: agent-tools: console state unreadable: "+err.Error())
 	}
 	rec := store.AgentToolsPubkey()
-	switch {
-	case rec == nil || *rec == "":
+	if rec == nil || *rec == "" {
+		// Pre-recording world: write the coords NOW. The console restarts on
+		// every update redeploy with the BOX config's flags, and a young
+		// world's config has no agent_tools_pubkey yet (only a login records
+		// it) — the restarted console would then 503 world-migrate/world-exec
+		// until a login happened to save them. The state file persists across
+		// restarts, so recording here heals the world for good. The URL is the
+		// CP-guest form the box config itself records (the LAN dial both the
+		// console and login boxes reach).
+		if s.CpIP != "" {
+			u := fmt.Sprintf("http://%s:%s", s.CpIP, AgentToolsPort)
+			if err := store.SetAgentToolsURL(&u); err == nil {
+				if err := store.SetAgentToolsPubkey(&audience); err == nil {
+					return append(report, "agent-tools: audience "+agenttools.ShortHex(audience)+" recorded to the console state")
+				}
+			}
+		}
 		return append(report, "agent-tools: audience "+agenttools.ShortHex(audience)+" (console state records none — pre-recording world)")
+	}
+	switch {
 	case *rec == audience:
 		return append(report, "agent-tools: audience "+agenttools.ShortHex(audience)+" matches the console record")
 	default:
