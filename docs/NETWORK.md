@@ -92,11 +92,46 @@ The gateway has TWO shapes, one per substrate:
 
 ## Future
 
-*   **Pangolin, the public path:** a Pangolin VPS (Gerbil + Traefik) with **Newt** on the
-    gateway dialing *out*, so nothing at home accepts unsolicited traffic and the home IP
-    never appears in public DNS. Caddy stays the internal edge; both paths coexist. A cloud
-    world needs no tunnel (its host already holds a public IP) — Pangolin there is a
-    local-site edge (identity gating + the agent-operable dashboard), a later decision.
+*   **The launch surface — the services agents stand up, reachable by default.** When an
+    agent creates a service for its user (a homelab agent deploying a family calendar),
+    reaching it is a Network capability with a default and an advanced tier, never a
+    hand-built edge:
+    *   **The gate (the default auth layer).** The console serves a MEMBER identity tier
+        beside operator auth — the appliance's users, not its operator. Two ways in,
+        both ending in a `fh_member` cookie: NIP-07 Nostr login admitted only when the
+        pubkey is on the relay's own NIP-43 membership list (the same identity the member
+        already chats with — the relay's list is the only user store), and single-use
+        device-link invites (the operator mints a link, the click binds a session to the
+        device — the no-Nostr path for the people the appliance serves). Exposed apps gate
+        through Caddy `forward_auth` against the console's `/auth/verify`; the operator
+        session passes the same gate. An app with its own auth opts out per-record
+        (`auth: app`), and an ungated public exposure is an operator-only choice — agents
+        structurally cannot mint a world-facing domain without the gate.
+    *   **The registry + expose.** A Network-scoped agenttools verb (`expose_app` /
+        `unexpose_app`) records `{name, fqdn, target, visibility (family|public|lan),
+        auth (gate|app|none), owner}` and renders the Caddy vhost; the same record feeds
+        the launcher. Visibility defaults to family (gated, reachable from anywhere);
+        `public` is operator-only; `lan` never leaves the subnet (the resolver answers it
+        internally, no public DNS).
+    *   **Pangolin as the default public path.** The public DNS story flips: a wildcard
+        `*.cp.domain` points at the Pangolin VPS and per-app names ride the tunnel, so the
+        home IP appears nowhere in public DNS and nothing at home accepts unsolicited
+        traffic (Newt dials out from the gateway — asserted at boot and re-asserted by
+        every build, like the nftables ruleset). Apps go behind it first; relay/cp keep
+        the direct Caddy edge. A cloud world uses the same chain (Newt on its gateway
+        dials out) — one shape on every substrate. The Pangolin VPS itself is provisioned
+        through the created-host lifecycle (the Vultr provider path with a
+        pangolin-compose payload instead of PVE-on-Debian) and destroyed by `uninstall` —
+        it is a bill, and the profile records it. Per-host certs issue at expose time
+        (HTTP-01 through the tunnel); the VPS never holds the DNS provider's credentials.
+    *   **The portal.** `cp.domain` becomes the landing page: launcher tiles from the
+        registry (the apps the agents built and manage) + "talk to your agents" (the
+        relay) + login; the operator console stays behind its own operator login.
+    *   **The advanced tier.** A custom domain is the same machinery with a different
+        hostname: the registry takes a full fqdn, certs are per-host, and the user's DNS
+        is theirs to point. Verify-before-design: whether Network drives Pangolin's REST
+        API (the `pangolin-api` runner) or a Traefik file-provider door decides the
+        expose verb's write path.
 *   **More DNS providers:** a provider registry (`dnsman`, hoisted out of the cloudflare
     package) with per-provider A-record managers — Route53, Google Cloud DNS,
     DigitalOcean — hand-rolled REST like the Cloudflare one (no SDKs; Route53's SigV4

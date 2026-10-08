@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>freehold · sign in</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  body { margin:0; min-height:100vh; display:flex; align-items:center; justify-content:center;
+         font-family: ui-monospace, "SFMono-Regular", Menlo, monospace;
+         background:#0d1117; color:#c9d1d9; padding:16px; }
+  .card { max-width:26rem; width:100%; padding:2rem; background:#161b22;
+          border:1px solid #21262d; border-radius:8px; }
+  h1 { font-size:16px; letter-spacing:2px; margin:0 0 .6rem; color:#e6edf3; }
+  h1 span { color:#58a6ff; }
+  p { font-size:13px; color:#8b949e; line-height:1.5; margin:.4rem 0; }
+  button { background:#21262d; border:1px solid #30363d; color:#c9d1d9; border-radius:6px;
+           padding:8px 14px; font:inherit; cursor:pointer; }
+  button:hover { background:#30363d; }
+  #err { color:#ff7b72; font-size:12px; margin-top:.8rem; display:none; word-break:break-word; }
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>freehold <span>&middot;</span> sign in</h1>
+  <p>Members sign in with Nostr — the same identity you already use to talk with the agents. Your key never leaves your device.</p>
+  <p>No Nostr key? Use the invite link that was sent to you.</p>
+  <button id="login">Sign in with Nostr</button>
+  <div id="err"></div>
+</div>
+<script>
+const errBox = document.getElementById("err");
+function fail(msg) { errBox.textContent = msg; errBox.style.display = "block"; }
+const next = new URLSearchParams(location.search).get("next") || "";
+document.getElementById("login").onclick = async () => {
+  if (!window.nostr) { fail("No Nostr extension found (NIP-07). Use the invite link you were sent instead."); return; }
+  try {
+    const ch = await (await fetch("/api/auth/member/challenge")).json();
+    if (!ch.nonce) throw new Error("no challenge");
+    const ev = await window.nostr.signEvent({
+      kind: 27235,
+      created_at: Math.floor(Date.now() / 1000),
+      tags: [["url", location.origin + "/auth"], ["method", "GET"]],
+      content: ch.nonce,
+    });
+    const res = await fetch("/api/auth/member/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ nonce: ch.nonce, pubkey: ev.pubkey, created_at: ev.created_at, tags: ev.tags, sig: ev.sig, next: next }),
+    });
+    const j = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(j.error || ("HTTP " + res.status));
+    location.href = j.next || "/";
+  } catch (e) { fail(String(e.message || e)); }
+};
+</script>
+</body>
+</html>

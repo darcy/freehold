@@ -22,6 +22,10 @@ const (
 	GroupMembers   = 39002
 	MemoryKind     = 30174
 	ChannelMessage = 9
+	// KINDNip43Membership is NIP-43's relay membership list (kind 13534) —
+	// published and signed by the relay's own key; a member's pubkey rides a
+	// p tag. The trust anchor for "who may use this appliance" is the relay.
+	KINDNip43Membership = 13534
 )
 
 // canonicalEventBytes serializes the NIP-01 id array [0, pubkey, created_at,
