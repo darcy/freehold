@@ -25,7 +25,7 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
         │  signed, addressable, audited
         │  NO LLM, NO router, NO key vault in either
         ▼
-   Target: pct LXC (relay/CP) | qm VM (VPS host) | k8s (MVP only)
+   Target: pct LXC (relay/CP/gateway) | pct LXC on a VPS host | k8s (MVP only)
         │
         └──backups──► freehold snapshot (the plane) · freehold export (the data bundle)
                       · freehold backup (restic → sftp/B2/any URI) | PBS | TrueNAS
@@ -255,7 +255,8 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     (CP bootstrap); `freehold build` runs the world through the CP:
     door → runner → durable plane → boot the CP LXC → **`install`** (box one)
     = the CP only (console + co-located runner) — no secrets are collected.
-    `freehold install` requires **`--name` + `--host`**: it scopes the
+    `freehold install` requires **`--name`**, and **`--host` unless the host
+    provider creates it**: it scopes the
     config + state to `profiles/<name>/` instead of the base home, records the
     host + access mode in that profile, and names the guest LXCs
     `<name>-<relay|cp|k3s>`. A life-cycle gate **mints** when no profile exists,
@@ -298,8 +299,8 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     alt-screen (`tea.NewProgram(m, WithAltScreen(), …)`); `freehold` with no
     args enters it, a subcommand routes to the CLI.
 
-*   **Six views**, cycled with `Tab` / `Shift-Tab`: Services · Agents ·
-    Runners · DATA · DNS · Certs. Keys in running mode: `q` quit, `r`
+*   **Seven views**, cycled with `Tab` / `Shift-Tab`: Services · Agents ·
+    Jobs · Runners · DATA · DNS · Certs. Keys in running mode: `q` quit, `r`
     recheck the world, `w` open the web console, `l` log in with the operator nsec,
     `p`/`x`/`g` provision/revoke/grant, `s` edit the operator settings
     (today: the agent pods' timezone). Build/teardown run from the shell.
@@ -401,9 +402,20 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     `providers/proxmox/` is the Proxmox VE substrate: guest create/exec/list,
     LVM/ZFS/thin-pool storage, the PVE `local-lvm` pointer discipline, and the
     pct stage/DNS command builders (`providers/proxmox/drive/` holds the
-    storage driver). A provider is substrate ops, not a lifecycle — there is no
-    `provider.Install()`; the composition roots (`freehold-cli/`,
+    storage driver). `providers/vultr/` is the created-host substrate: the
+    Vultr API client + the PVE-on-Debian install (a cloud instance has no
+    nested virt — LXC-only). A provider is substrate ops, not a lifecycle —
+    there is no `provider.Install()`; the composition roots (`freehold-cli/`,
     `control-plane/`) decide the sequence and inject the provider.
+*   **The HOST-provisioner seam** (`platform/provisioning` + `providers/registry`):
+    each substrate declares what its host needs from the operator (`Needs()` —
+    the credential prompted no-echo, the plain answers, the substrate
+    defaults) and owns the host lifecycle (`Prepare`/`InstallDoorKey`/
+    `Destroy`) — the reached-host shape (proxmox: the operator's box, the
+    paste-gate door) and the created-host shape (vultr: the instance born
+    with the door key + PVE installed, destroyed via the API) are the two
+    implementations. The installer asks the registry's provider generically —
+    no substrate names or asks live there.
 
 *   **`platform/migrations/`** enumerates the CP's shipped migration scripts
     (`<stateDir>/migrations/scripts/<epoch>.sh`) and tracks completion with
@@ -588,13 +600,17 @@ resident-runner mode, the retired-name guard — is in `docs/AI.md` ("Runners an
 
 *   **The control plane console is a Go server + CP CLI** (`control-plane/api/console/`
     + `control-plane/api/cmd/freehold-console`): the `/api/*` routes (auth/overview/world/teardown/
-    provision/rotate/revoke/grant/DNS/agents/portal) with the SAME security
-    guards — NIP-98 operator login (challenge/session), `HttpOnly;
+    provision/rotate/revoke/grant/DNS/agents/jobs/portal) with the SAME security
+    guards — NIP-98 login (challenge/session), `HttpOnly;
     SameSite=Strict` session cookies, single-use portal tokens, login
     freshness windows, the DNS-rebinding `Origin` guard, and the
-    loopback-only-until-authn bind guard. It also carries the box-side CP CLI
-    verbs (`provision`/`grant`/`adopt`/`add-secret`/`identity`), so the deploy
-    and the rebuild engine ship + drive a Go console end to end. The console
+    loopback-only-until-authn bind guard. Login carries a ROLE: an **operator**
+    (the admin whitelist — the full admin/ops surface) or a **member** (any relay
+    community member — the scheduled-jobs read of their own rows only; every
+    admin route refuses a member session). The scheduled-jobs read is
+    owner-redacted: prompts and labels ride only the owner's own rows. It also
+    carries the box-side CP CLI verbs (`provision`/`grant`/`adopt`/`add-secret`/`identity`),
+    so the deploy and the rebuild engine ship + drive a Go console end to end. The console
     is the CP's own identity (0600, minted on the box at first serve — never
     shipped) that signs readiness probes against each runner — no side door,
     the runner still fails closed. `contract/console` is the Go client that
@@ -800,7 +816,6 @@ funnel for substrate and service work (`pct`, `qm`, `zfs`, `lvm`, `systemctl`,
 | Kind | Example target | Connector | State |
 | --- | --- | --- | --- |
 | `pct` LXC | relay (`<name>-relay`) | `pve` | `lxc.<role>` |
-| `qm` KVM | VPS host (`vps:<id>`) | `ssh` (KeyPath) | `vm.<id>` |
 | `pct` LXC | k3s (`<name>-k3s`) | `k8s` | `lxc.k3s` |
 | `pct` LXC | control plane | `local` | `cp.<role>` |
 | `vm` | … | `api` | `provider.<name>` |

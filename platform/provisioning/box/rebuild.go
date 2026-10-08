@@ -104,9 +104,28 @@ type Flags struct {
 	// Empty = this build's own (version.Version + derived channel).
 	Version string
 	Channel string
-	// OperatorName is the operator's display name in Buzz (asked at install,
-	// published as their kind:0 profile at build). Empty renders "Operator".
+	// OperatorName is the operator's display name in Buzz — published as their
+	// kind:0 profile at build. Empty renders "Operator".
 	OperatorName string
+	// Provider is the host-provisioner seam's registry key ("proxmox" |
+	// "vultr"; "" = the default). The provider owns every host-specific
+	// need — credentials, answers, defaults, the door UX — and the installer
+	// asks generically from Needs().
+	Provider string
+	// HostAnswers are the provider's NON-SECRET answers (region/plan/…),
+	// persisted in the profile's [host_provider] for a re-adopt. Secrets
+	// never land here.
+	HostAnswers map[string]string
+	// HostSecrets are the provider's secret needs (the guided no-echo paste
+	// / the headless env) — in memory only, never persisted, never logged.
+	HostSecrets map[string]string
+	// HostID is the created host's instance handle ("" = a reached host
+	// like proxmox, which predates the world). Recorded so uninstall can
+	// destroy what the provider bills for.
+	HostID string
+	// HostsGateway: the HOST itself is the world's gateway (the provider's
+	// HostsGateway()) — host nftables, no gateway guest.
+	HostsGateway bool
 }
 
 // Bins are the resolved sibling binary paths. Go has no
@@ -193,6 +212,19 @@ type Engine struct {
 	// installed (direct root SSH). When set, RunBootstrap swaps Provider for
 	// it and verifies over SSH instead of serving a local runner.
 	ProviderFactory func() (provisioning.Provider, func(), error)
+
+	// InstallDoorKey is the PROVIDER's door UX — the paste gate (proxmox)
+	// or the append-over-the-born-with-key (an api provider). The
+	// composition root wires it from the HostProvider + HostSession; nil
+	// falls back to the built-in doorGate prompt. key may be "" on a
+	// re-adopt whose package was reused — the provider decides what that
+	// means for its host.
+	InstallDoorKey func(key string) error
+
+	// HostSession is the provider's provisioning handle (answers, the door
+	// line, the host transports). Set by the composition root before
+	// RunBootstrap; the door stage hands it to InstallDoorKey.
+	HostSession *provisioning.HostSession
 }
 
 // HostExecFunc adapts the engine's self-exec transport into the provider's
@@ -216,6 +248,7 @@ func FlagsFromConfig(cfg *config.Config) Flags {
 	f := Flags{
 		Name:           cfg.Name,
 		Host:           cfg.Host,
+		AccessMode:     cfg.AccessMode,
 		Target:         cfg.Runner.Target,
 		Addr:           cfg.Runner.Addr,
 		OperatorPubkey: cfg.OperatorPubkey,
@@ -224,6 +257,17 @@ func FlagsFromConfig(cfg *config.Config) Flags {
 		ConfigPath:     config.ConfigPath(),
 		RelayDomain:    cfg.RelayHost(),
 		CpDomain:       cfg.CPHost(),
+	}
+	if cfg.HostProvider.Provider != "" || cfg.HostProvider.ID != "" {
+		f.Provider = cfg.HostProvider.Provider
+		f.HostID = cfg.HostProvider.ID
+		f.HostsGateway = cfg.HostProvider.Gateway
+		if len(cfg.HostProvider.Answers) > 0 {
+			f.HostAnswers = map[string]string{}
+			for k, v := range cfg.HostProvider.Answers {
+				f.HostAnswers[k] = v
+			}
+		}
 	}
 	if cfg.Proxy.Ip != nil {
 		f.ProxyIP = *cfg.Proxy.Ip
@@ -407,7 +451,20 @@ func (e *Engine) RunBootstrap() error {
 	if err != nil {
 		return err
 	}
-	if doorKey != "" {
+	if e.InstallDoorKey != nil {
+		// The provider owns the door UX (proxmox: the paste gate; an api
+		// provider appends over the key its host was born with). A
+		// re-adopt's reused package mints no fresh key — the recovered line
+		// rides, so the provider re-asserts it on a host whose uninstall
+		// stripped it (the reuse-path gap).
+		key := doorKey
+		if key == "" {
+			key = e.recoverDoorKey()
+		}
+		if err := e.InstallDoorKey(key); err != nil {
+			return err
+		}
+	} else if doorKey != "" {
 		if err := e.doorGate(doorKey); err != nil {
 			return err
 		}
@@ -476,16 +533,29 @@ func (e *Engine) RunBootstrap() error {
 	// derive bumps to the next clean /24; --gateway-cidr is honored
 	// untouched; --gateway-vlan skips only the PROBE (a tagged L2 is its
 	// own domain — nothing to collide with), the derive itself still runs.
-	if e.F.Mint && e.F.GatewayCIDR == "" {
-		if e.F.GatewayVlan == 0 {
-			cidr, err := e.deriveGatewayCIDR()
-			if err != nil {
-				return err
+	if e.F.GatewayCIDR == "" {
+		switch {
+		case e.F.Mint:
+			if e.F.GatewayVlan == 0 {
+				cidr, err := e.deriveGatewayCIDR()
+				if err != nil {
+					return err
+				}
+				e.F.GatewayCIDR = cidr
+			} else {
+				e.F.GatewayCIDR = DefaultGatewayCIDR(e.F.ProxyIP)
 			}
-			e.F.GatewayCIDR = cidr
-		} else {
+		case e.F.HostsGateway:
+			// A HALF-BUILT re-adopt (the config predates the gateway
+			// stage) has no recorded gateway — and a created cloud host's
+			// bridge is private: no LAN to collide with, the made-up /24
+			// is always safe. The stage below MUST run (the host's vmbr0
+			// + ruleset are the cp guest's birth prerequisites).
 			e.F.GatewayCIDR = DefaultGatewayCIDR(e.F.ProxyIP)
 		}
+		// A full re-adopt rides the recorded gateway (seeded) — a
+		// pre-gateway flat-LAN world stays flat (no recorded gateway AND
+		// live LAN guests: forcing one mid-life would collide).
 	}
 
 	// 5.7. the freehold-subnet gateway (docs/NETWORK.md): the internal subnet
@@ -520,15 +590,26 @@ func (e *Engine) RunBootstrap() error {
 	// (its IP must be recorded BEFORE deploy-cp so the CP guest's /etc/hosts
 	// pin reaches it; the agent-tools roster also needs the relay live).
 	// 9.0. the gateway boots FIRST — the CP (and every later guest) takes its
-	// default route from it; torn down last by the world teardown.
+	// default route from it; torn down last by the world teardown. On a
+	// hosted gateway (the provider's HostsGateway — a created cloud host)
+	// there is no guest: the host itself is asserted into the shape (bridge
+	// + nftables + resolver), needing no record — `uninstall` destroys the
+	// host through the provider instead.
 	if e.F.GatewayCIDR != "" {
-		if err := e.stageBootstrap("gateway"); err != nil {
-			return err
+		if e.F.HostsGateway {
+			if err := e.stageHostGateway(); err != nil {
+				return err
+			}
+			fmt.Fprintf(e.Out, "  ✓ host is the gateway — subnet %s behind the public edge\n", e.F.GatewayCIDR)
+		} else {
+			if err := e.stageBootstrap("gateway"); err != nil {
+				return err
+			}
+			if _, err := e.stageRecordLxc("gateway"); err != nil {
+				return err
+			}
+			fmt.Fprintln(e.Out, "  ✓ gateway LXC booted + recorded")
 		}
-		if _, err := e.stageRecordLxc("gateway"); err != nil {
-			return err
-		}
-		fmt.Fprintln(e.Out, "  ✓ gateway LXC booted + recorded")
 	}
 	fmt.Fprintln(e.Out, "  · booting the cp LXC (create → docker; can take minutes)…")
 	if err := e.stageBootstrap("cp"); err != nil {
@@ -1077,16 +1158,44 @@ func (e *Engine) stageVerify() error {
 
 // stageVerifyTransient checks the door over the injected transient provider: a
 // single host exec that must echo the marker. Replaces the served-runner probe.
+// An auth refusal gets ONE recovery round through the provider's door UX (the
+// paste gate, or the api provider's append) before failing — a re-adopt whose
+// host line was stripped (or whose recreated instance never saw the key) lands
+// here.
 func (e *Engine) stageVerifyTransient() error {
 	if e.Provider == nil {
 		return fmt.Errorf("no transient provider wired — cannot verify the door")
 	}
-	out, err := e.Provider.GuestExec("", "echo freehold-door-ok", 60)
-	if err != nil {
-		return fmt.Errorf("the door check failed: %w", err)
+	probe := func() (bool, string, error) {
+		out, err := e.Provider.GuestExec("", "echo freehold-door-ok", 60)
+		if err != nil {
+			return false, "", fmt.Errorf("the door check failed: %w", err)
+		}
+		if out == nil || out.ExitCode == nil || *out.ExitCode != 0 || !strings.Contains(out.Stdout, "freehold-door-ok") {
+			return false, out.Stdout, nil
+		}
+		return true, "", nil
 	}
-	if out == nil || out.ExitCode == nil || *out.ExitCode != 0 || !strings.Contains(out.Stdout, "freehold-door-ok") {
-		return fmt.Errorf("the door check failed:\n%s", out.Stdout)
+	ok, out, err := probe()
+	if err != nil {
+		return err
+	}
+	if !ok && e.InstallDoorKey != nil {
+		// One recovery round through the provider's door UX (idempotent):
+		// a re-adopt whose host line was stripped, or a recreated
+		// instance that never saw the substrate key, lands here. Any
+		// provider error IS the actionable message.
+		if key := e.recoverDoorKey(); key != "" {
+			if derr := e.InstallDoorKey(key); derr != nil {
+				return derr
+			}
+			if ok2, _, err2 := probe(); err2 == nil && ok2 {
+				return nil
+			}
+		}
+	}
+	if !ok {
+		return fmt.Errorf("the door check failed:\n%s", out)
 	}
 	return nil
 }
@@ -1209,6 +1318,18 @@ func (e *Engine) fromAnswers() *config.Config {
 		v := e.F.OperatorIdentity
 		cfg.OperatorIdentity = &v
 	}
+	// The world's host + its provider: recorded at install so `uninstall`
+	// destroys what the provider bills for and a re-adopt re-creates the
+	// same shape. mergeFromAnswers keeps a prior one when the answers carry
+	// none (an update's flags never re-create).
+	if e.F.Provider != "" || e.F.HostID != "" {
+		cfg.HostProvider = config.HostSpec{
+			Provider: e.F.Provider,
+			ID:       e.F.HostID,
+			Gateway:  e.F.HostsGateway,
+			Answers:  e.F.HostAnswers,
+		}
+	}
 	return cfg
 }
 
@@ -1222,6 +1343,20 @@ func mergeFromAnswers(ans *config.Config, prev *config.Config) *config.Config {
 	}
 	cfg := *ans
 	cfg.Plane = prev.Plane
+	// The access mode is an install-time fact: an update's zero answers keep
+	// the recorded one (a hosted-gateway world updated from flags that never
+	// carry it must not silently drop to ssh-root-proxmox).
+	if ans.AccessMode != "" {
+		cfg.AccessMode = ans.AccessMode
+	} else {
+		cfg.AccessMode = prev.AccessMode
+	}
+	// The host + its provider are the same kind of durable fact.
+	if ans.HostProvider.Provider != "" || ans.HostProvider.ID != "" {
+		cfg.HostProvider = ans.HostProvider
+	} else {
+		cfg.HostProvider = prev.HostProvider
+	}
 	// The runner identity never changes after install (re-adopt preserves it),
 	// and a box without the local package cannot re-derive its pubkey — keep
 	// the recorded runner whenever the answers carry none (a thin-box build
@@ -1436,6 +1571,14 @@ func (e *Engine) FinalSave() error {
 // without it the interactive pipeline prompts, and --yes takes the
 // reuse-detected / carve-default path.
 func (e *Engine) stagePlacement() (*placement, error) {
+	// A hosted-gateway world is a created cloud host: no ZFS, no VG,
+	// nothing to detect or carve — the dir backend IS the plane (host dirs
+	// under /srv/data/planes bind-mounted into the guests; restic backs
+	// them up). ponytail: keyed on the hosted shape; a hosted provider with
+	// real block storage declares its plane kind through the seam instead.
+	if e.F.HostsGateway {
+		return &placement{pool: "local", kind: planebase.KindDir}, nil
+	}
 	resolveArgs := []string{"storage", "resolve",
 		"--addr", e.F.Addr, "--agent-dir", OpsDir(), "--target", e.F.Target,
 		"--transient", "--host", e.F.Host,
@@ -1720,6 +1863,11 @@ func (e *Engine) stageBootstrap(role string) error {
 		"--hostname", hostname,
 		"--target", e.F.Target,
 		"--domain", e.F.RelayDomain,
+		// The provider-resolved substrate (the dir backend on a created
+		// cloud host, local-lvm on a LAN box): the self-stage's own flag
+		// default is the AUTHORS' host — never let it win.
+		"--storage", e.F.StorageName,
+		"--bridge", e.F.Bridge,
 		"--rootfs-gb", strconv.FormatUint(uint64(e.F.RootfsGB), 10),
 		"--memory-mb", strconv.FormatUint(uint64(e.F.MemoryMB), 10),
 		"--operator-pubkey", e.F.OperatorPubkey,
@@ -1971,6 +2119,40 @@ func (e *Engine) stageGatewayNft(cidr string, cfg *config.Config) error {
 
 // edgeOf returns the bare IP of a CIDR-or-bare address ("" when empty).
 func edgeOf(ip string) string { return config.StripCIDR(ip) }
+
+// stageHostGateway asserts the hosted-gateway shape on the host itself (the
+// api-vultr mode): the internal bridge (the host owns the subnet's .1 — the
+// guests' default route), ip_forward, the nftables ruleset with its input
+// policy, and the subnet resolver. Persisted via /etc/network/interfaces.d +
+// enabled units — a reboot keeps the world served (the LAN world's
+// unpersisted host-route gap does not exist here: the host IS the router).
+// The public NIC is never touched, so there is no bridge-move lockout.
+func (e *Engine) stageHostGateway() error {
+	if e.Provider == nil {
+		return fmt.Errorf("no provisioning provider wired — cannot configure the host gateway")
+	}
+	cidr := e.F.GatewayCIDR
+	bridge := e.F.Bridge
+	if cfg, _ := config.Load(e.F.ConfigPath); cfg != nil {
+		if cfg.Gateway.Cidr != nil && *cfg.Gateway.Cidr != "" {
+			cidr = *cfg.Gateway.Cidr
+		}
+		if cfg.Plane.Bridge != "" {
+			bridge = cfg.Plane.Bridge
+		}
+	}
+	if bridge == "" {
+		bridge = "vmbr0"
+	}
+	script := config.HostGatewayScript(cidr, edgeOf(e.F.ProxyIP),
+		config.InternalIPFor(cidr, "k3s"), config.InternalIPFor(cidr, "cp"),
+		config.InternalIPFor(cidr, "relay"), bridge)
+	out, err := e.Provider.GuestExec("", script, 300)
+	if err != nil {
+		return fmt.Errorf("host gateway: %w", err)
+	}
+	return bootstrap.ExpectOK(out, "host gateway")
+}
 
 // stageRecordLxc persists the real post-boot coordinates into the config ON
 // DISK: load FRESH, resolve vmid+ip through the runner, mutate, save, return
@@ -2478,6 +2660,7 @@ func (e *Engine) worldConfigJSON(cfg *config.Config) string {
 		GatewayCIDR:    gwCIDR,
 		GatewayVlan:    gwVlan,
 		GatewayLxc:     derefU32(cfg.Lxc.Gateway.Vmid),
+		HostedGateway:  cfg.HostProvider.Gateway,
 		RunnerAddr:     config.CoLocatedRunnerMCPAddr,
 		RunnerPK:       cfg.Runner.Pubkey,
 		RunnerTarget:   cfg.Runner.Target,

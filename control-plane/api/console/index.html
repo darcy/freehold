@@ -67,6 +67,15 @@
 <div id="err" class="muted"></div>
 
 <div class="card">
+  <b>scheduled jobs</b>
+  <div class="small" style="margin-top:4px">Agent-created schedules, fired by the control plane as mentions. Prompts are visible only to their owner — every other row (the operator's included) is metadata: owner, agent, channel, schedule, run status. Create, pause or delete jobs by asking an agent.</div>
+  <table style="margin-top:8px">
+    <thead><tr><th>owner</th><th>agent</th><th>channel</th><th>schedule</th><th>last run</th><th>created</th></tr></thead>
+    <tbody id="job-rows"></tbody>
+  </table>
+</div>
+
+<div class="card">
   <b>settings</b>
   <div class="row" style="margin-top:8px">
     <input id="set-tz" placeholder="timezone (IANA name, e.g. America/Chicago — blank = UTC)">
@@ -274,6 +283,36 @@ async function loadSettings() {
     if (res.settings) $("#set-tz").value = res.settings.operator_tz || "";
   } catch (e) { /* not logged in yet — the save button surfaces errors */ }
 }
+
+// Scheduled jobs: the redacted fold (an owner's own rows carry the prompt;
+// everything else is metadata). Best-effort like the settings — a member or
+// pre-login viewer just sees their rows or nothing.
+async function loadJobs() {
+  const empty = '<tr><td colspan="6" class="muted">no scheduled jobs — ask an agent to create one</td></tr>';
+  try {
+    const res = await api("/api/jobs");
+    const rows = (res.jobs || []).map((j) => {
+      const sched = j.at ? "once @ " + new Date(j.at * 1000).toISOString().slice(0, 16) + "Z"
+        : (j.cron || "—") + (j.tz ? " " + j.tz : "") + (j.paused ? " (paused)" : "");
+      const last = j.last_run
+        ? esc(j.last_run.status) + ' <span class="muted">' + new Date(j.last_run.fired_at * 1000).toISOString().slice(0, 16) + "Z" +
+          (j.last_run.detail ? " · " + esc(j.last_run.detail) : "") + "</span>"
+        : '<span class="muted">—</span>';
+      const mine = j.prompt !== undefined;
+      return `<tr>
+        <td><div>${esc(String(j.owner || "").slice(0, 16))}…</div>${mine ? '<div class="muted">“' + esc(j.label || j.id) + '”: ' + esc(j.prompt) + "</div>" : ""}</td>
+        <td>${esc(j.agent)}</td>
+        <td class="muted">${esc(String(j.channel).slice(0, 13))}…</td>
+        <td>${esc(sched)}</td>
+        <td>${last}</td>
+        <td class="muted">${j.created_at ? new Date(j.created_at * 1000).toISOString().slice(0, 10) : "—"}</td>
+      </tr>`;
+    }).join("");
+    $("#job-rows").innerHTML = rows || empty;
+  } catch (e) {
+    $("#job-rows").innerHTML = empty; /* not logged in / no jobs dir */
+  }
+}
 $("#set-save").onclick = async () => {
   try {
     await api("/api/settings", { operator_tz: $("#set-tz").value.trim() });
@@ -344,11 +383,12 @@ $("#fill-submit").onclick = async () => {
 
 refresh().catch((e) => { $("#err").textContent = "error: " + e.message; });
 loadSettings();
+loadJobs();
 </script>
 <div id="login-overlay" style="display:none;position:fixed;inset:0;z-index:9;background:rgba(10,10,12,.92);align-items:center;justify-content:center">
   <div style="max-width:36rem;padding:2rem">
-    <h2>operator login required</h2>
-    <p class="muted">This console is authenticated (NIP-98). Log in with your own key — the nsec never touches this box:</p>
+    <h2>console login required</h2>
+    <p class="muted">This console is authenticated (NIP-98). Log in with your own key — the nsec never touches this box. Operators (the admin whitelist) get the full surface; any relay member gets the scheduled-jobs view of their own jobs:</p>
     <pre id="login-cmd"></pre>
     <p class="muted">…then paste the full printed cookie line below:</p>
     <input id="login-cookie" placeholder="fh_session=…; Path=/; HttpOnly; SameSite=Strict" style="width:100%;box-sizing:border-box">

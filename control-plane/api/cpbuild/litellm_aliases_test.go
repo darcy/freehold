@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -22,28 +23,30 @@ import (
 
 // litellmFixture seeds a Spec's sealed litellm store (console identity + the
 // master/provider keys + the provider choice, AAD "litellm" — the box's
-// CPSecretBlob shape). Empty prefix/model seeds a store that predates the
-// choice (the freehold-default fallback path).
+// CPSecretBlob shape), rooted at the CONSOLE state dir — the store's ONE home
+// (litellmStorePath), not the Spec's own StateDir. Empty prefix/model seeds a
+// store that predates the choice (the freehold-default fallback path).
 func litellmFixture(t *testing.T, stateDir, master, provider, prefix, model string) {
 	t.Helper()
+	consoleRoot := (&Spec{StateDir: stateDir}).consoleStateRoot()
 	secret := make([]byte, 32)
 	secret[0] = 7
 	pub, err := crypto.X25519PublicKey(secret)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.MkdirAll(stateDir+"/console", 0o700); err != nil {
+	if err := os.MkdirAll(consoleRoot+"/console", 0o700); err != nil {
 		t.Fatal(err)
 	}
 	id := fmt.Sprintf(`{"enc_secret_hex":%q}`, hex.EncodeToString(secret))
-	if err := os.WriteFile(stateDir+"/console/identity.json", []byte(id), 0o600); err != nil {
+	if err := os.WriteFile(consoleRoot+"/console/identity.json", []byte(id), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	env := map[string]string{"master": master, "provider": provider}
 	if prefix != "" || model != "" {
 		env["provider-prefix"], env["provider-model"] = prefix, model
 	}
-	if err := cert.SaveCreds(stateDir+"/world-secrets/litellm.json", "litellm", env,
+	if err := cert.SaveCreds(consoleRoot+"/world-secrets/litellm.json", "litellm", env,
 		crypto.Seal, pub, "litellm"); err != nil {
 		t.Fatal(err)
 	}
@@ -115,7 +118,8 @@ func TestStageLitellmAliases(t *testing.T) {
 	srv, postsFn := fakeGateway(t, nil, http.StatusOK)
 	defer srv.Close()
 
-	stateDir := t.TempDir()
+	root := t.TempDir()
+	stateDir := filepath.Join(root, "agent-tools")
 	litellmFixture(t, stateDir, "master-key", "provider-key", "openai", "gpt-4o")
 	spec := &Spec{StateDir: stateDir, LitellmBaseURL: srv.URL + "/v1"}
 
@@ -203,7 +207,8 @@ func TestStageLitellmAliasesLegacyStore(t *testing.T) {
 	srv, postsFn := fakeGateway(t, nil, http.StatusOK)
 	defer srv.Close()
 
-	stateDir := t.TempDir()
+	root := t.TempDir()
+	stateDir := filepath.Join(root, "agent-tools")
 	litellmFixture(t, stateDir, "master-key", "provider-key", "", "")
 	spec := &Spec{StateDir: stateDir, LitellmBaseURL: srv.URL + "/v1"}
 	if err := spec.stageLitellmAliases(); err != nil {
@@ -225,7 +230,8 @@ func TestStageLitellmAliasesLegacyStore(t *testing.T) {
 func TestStageLitellmAliasesFailsLoudly(t *testing.T) {
 	newStateDir := func(t *testing.T) string {
 		t.Helper()
-		stateDir := t.TempDir()
+		root := t.TempDir()
+		stateDir := filepath.Join(root, "agent-tools")
 		litellmFixture(t, stateDir, "master-key", "provider-key", "openai", "gpt-4o")
 		return stateDir
 	}

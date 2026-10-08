@@ -8,6 +8,7 @@ package install
 
 import (
 	"bufio"
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -17,6 +18,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/x/term"
 	"github.com/spf13/cobra"
@@ -25,9 +27,11 @@ import (
 	"freehold/contract/crypto"
 	"freehold/contract/wire"
 	"freehold/freehold-cli/internal/stages"
+	"freehold/platform/provisioning"
 	"freehold/platform/provisioning/box"
 	"freehold/providers/proxmox"
 	"freehold/providers/proxmox/drive"
+	"freehold/providers/registry"
 )
 
 // installConfigPath is the config path the install writes: the selected
@@ -158,6 +162,23 @@ func seedFromProfile(f *box.Flags, cfg *config.Config) {
 	if f.GatewayVlan == 0 && cfg.Gateway.Vlan != nil && *cfg.Gateway.Vlan >= 0 {
 		f.GatewayVlan = *cfg.Gateway.Vlan
 	}
+	// The recorded host + its provider: the re-adopt verifies + reuses a
+	// created instance (a gone one re-creates in the host stage). Without
+	// this, a re-adopt would mint a SECOND instance while the first keeps
+	// billing with the plane on it.
+	if cfg.HostProvider.Provider != "" {
+		f.Provider = cfg.HostProvider.Provider
+		f.HostID = cfg.HostProvider.ID
+		f.HostsGateway = cfg.HostProvider.Gateway
+		for k, v := range cfg.HostProvider.Answers {
+			if f.HostAnswers == nil {
+				f.HostAnswers = map[string]string{}
+			}
+			if _, ok := f.HostAnswers[k]; !ok {
+				f.HostAnswers[k] = v
+			}
+		}
+	}
 	if f.OperatorPubkey == "" {
 		f.OperatorPubkey = cfg.OperatorPubkey
 	}
@@ -181,19 +202,36 @@ func runInstallCmd(cmd *cobra.Command) error {
 	name := f.Name
 	out := cmd.OutOrStdout()
 
-	// A fresh plane has nothing to resolve from, so headless needs the full
-	// answer set; with gaps (and no --non-interactive), fall back to the guided
-	// flow — the parsed flags ride in: what the operator already answered is a
-	// prompt default, never silently dropped.
-	if !f.Yes && (name == "" || f.Host == "" || f.RelayDomain == "" || f.CpDomain == "" ||
-		f.ProxyIP == "" || f.OperatorPubkey == "") {
+	// The provider resolves from the RECORDED profile first: the headless
+	// re-adopt gate must gate against the RIGHT provider's needs (a vultr
+	// world without --provider would otherwise be demanded --host/--proxy-ip
+	// — needs it does not declare), and the recorded answers must beat the
+	// provider's defaults (a 404 re-create re-creates the recorded SHAPE).
+	if p := config.Resolve(name); p != nil {
+		if prev, _ := config.Load(p.ConfigPath); prev != nil {
+			seedFromProfile(&f, prev)
+		}
+	}
+
+	// The provider gates the headless answer set: its Needs() decide what
+	// install cannot derive (proxmox: the host + the edge address; a
+	// created-host provider: its key + answers). Gaps (and no
+	// --non-interactive) fall back to the guided flow — the parsed flags
+	// ride in: what the operator already answered is a prompt default,
+	// never silently dropped.
+	prov, perr := registry.ByName(f.Provider)
+	if perr != nil {
+		return perr
+	}
+	missing := missingAnswers(prov, &f)
+	if !f.Yes && (name == "" || f.RelayDomain == "" || f.CpDomain == "" || f.OperatorPubkey == "" || len(missing) > 0) {
 		return runInstall(cmd.InOrStdin(), out, f, cmd)
 	}
 	if name == "" {
 		return fmt.Errorf("install needs --name (the world/profile name — isolates this world's config and state)")
 	}
-	if f.Host == "" {
-		return fmt.Errorf("install needs --host (the environment freehold reaches, e.g. root@192.168.30.224)")
+	if len(missing) > 0 {
+		return fmt.Errorf("install --non-interactive needs %s (the provider %q's unanswered needs; secrets ride the env)", strings.Join(missing, ", "), prov.Name())
 	}
 	action, err := gateInstall(name)
 	if err != nil {
@@ -228,6 +266,10 @@ func runInstallCmd(cmd *cobra.Command) error {
 	if err := seedOperatorLedger(&f); err != nil {
 		return err
 	}
+	session, err := ensureHost(&f, out, nil)
+	if err != nil {
+		return err
+	}
 	if err := stages.HostSideLiveCheck(name, f.Host); err != nil {
 		return err
 	}
@@ -241,6 +283,8 @@ func runInstallCmd(cmd *cobra.Command) error {
 	}
 	eng.Provider = proxmox.New(eng.HostExecFunc())
 	eng.ProviderFactory = stages.TransientFactory(eng)
+	eng.HostSession = session
+	eng.InstallDoorKey = func(key string) error { return prov.InstallDoorKey(eng.HostSession, key) }
 	eng.Out = out
 	eng.Stdin = bufio.NewReader(cmd.InOrStdin())
 	return eng.RunBootstrap()
@@ -305,9 +349,6 @@ func runInstall(in io.Reader, out io.Writer, flagIn box.Flags, cmd *cobra.Comman
 		pickRunnerPort(&f)
 	}
 	applyInstallDefaults(&f, action == lifecycleMint)
-	if err := stages.HostSideLiveCheck(name, f.Host); err != nil {
-		return err
-	}
 	consent := "no"
 	if f.ConfirmStorage {
 		consent = "yes"
@@ -332,6 +373,15 @@ func runInstall(in io.Reader, out io.Writer, flagIn box.Flags, cmd *cobra.Comman
 		fmt.Fprintln(out, "aborted.")
 		return nil
 	}
+	// AFTER consent: on a created-host mint the next step creates a BILLED
+	// instance.
+	session, err := ensureHost(&f, out, ui)
+	if err != nil {
+		return err
+	}
+	if err := stages.HostSideLiveCheck(name, f.Host); err != nil {
+		return err
+	}
 	bins, err := defaultBins()
 	if err != nil {
 		return err
@@ -342,30 +392,69 @@ func runInstall(in io.Reader, out io.Writer, flagIn box.Flags, cmd *cobra.Comman
 	}
 	eng.Provider = proxmox.New(eng.HostExecFunc())
 	eng.ProviderFactory = stages.TransientFactory(eng)
+	eng.HostSession = session
+	prov, perr := registry.ByName(f.Provider)
+	if perr != nil {
+		return perr
+	}
+	eng.InstallDoorKey = func(key string) error { return prov.InstallDoorKey(eng.HostSession, key) }
 	eng.Out = out
 	eng.Stdin = ui.in
 	return eng.RunBootstrap()
 }
 
-// collectAnswers gathers the install inputs (host, runner, domains, identity,
-// storage) into ready-to-run box.Flags. seed is the surviving profile config on
-// a re-adopt (nil when minting); flags are what the operator already answered
+// collectAnswers gathers the install inputs into ready-to-run box.Flags:
+// the core asks (world identity, domains, operator) are the installer's; the
+// PROVIDER's Needs() drive the substrate asks (the host address, the edge's
+// LAN address, a created host's credentials + region/plan — secrets pasted
+// no-echo, never stored). seed is the surviving profile config on a
+// re-adopt (nil when minting); flags are what the operator already answered
 // on the command line — a set flag is the prompt's default (Enter keeps it).
 func collectAnswers(ui *installerUI, seed *config.Config, flags box.Flags) (box.Flags, error) {
 	fmt.Fprintln(ui.out, "  A few details about your world. Defaults in [brackets].")
-	hostDef := "root@192.168.30.224"
+	// The substrate is chosen up front: the provider owns the asks that
+	// follow (its Needs()) — a reached host (proxmox) is named; a created
+	// host (vultr) is described to its API. A re-adopt rides the recorded
+	// provider — asking would offer a default that contradicts the profile.
+	prov, err := registry.ByName(flags.Provider)
+	if err != nil {
+		return box.Flags{}, err
+	}
+	if flags.Provider == "" && seed != nil && seed.HostProvider.Provider != "" {
+		if prov, err = registry.ByName(seed.HostProvider.Provider); err != nil {
+			return box.Flags{}, err
+		}
+	} else if flags.Provider == "" {
+		var ans string
+		ans, err = ui.ask("Provider ("+strings.Join(registry.Names(), " | ")+")", "proxmox")
+		if err != nil {
+			return box.Flags{}, err
+		}
+		if prov, err = registry.ByName(strings.TrimSpace(ans)); err != nil {
+			return box.Flags{}, err
+		}
+	}
+	// A re-adopt's recorded answers (and host) seed the asks.
+	var recorded map[string]string
+	var seedHost string
+	if seed != nil {
+		recorded = seed.HostProvider.Answers
+		seedHost = seed.Host
+	}
+
+	hostDef := needDefault(prov, provisioning.NeedHost, recorded, seedHost, flags.Host)
+	if hostDef == "" || hostDef == needDefault(prov, provisioning.NeedHost, recorded, seedHost, "") {
+		// --host-answer host= seeds the ask the same way --host does.
+		if v := flags.HostAnswers[provisioning.NeedHost]; v != "" {
+			hostDef = v
+		}
+	}
 	relayDef, cpDef, proxyDef := "", "", ""
 	if seed != nil {
-		if seed.Host != "" {
-			hostDef = seed.Host
-		}
 		relayDef, cpDef = seed.RelayHost(), seed.CPHost()
 		if seed.Proxy.Ip != nil {
 			proxyDef = *seed.Proxy.Ip
 		}
-	}
-	if flags.Host != "" {
-		hostDef = flags.Host
 	}
 	if flags.RelayDomain != "" {
 		relayDef = flags.RelayDomain
@@ -376,9 +465,67 @@ func collectAnswers(ui *installerUI, seed *config.Config, flags box.Flags) (box.
 	if flags.ProxyIP != "" {
 		proxyDef = flags.ProxyIP
 	}
-	host, err := ui.ask("Host (address the runner will SSH into)", hostDef)
-	if err != nil {
-		return box.Flags{}, err
+
+	var host, proxyIP string
+	var consent bool
+	answers, secrets := map[string]string{}, map[string]string{}
+	// The asks keep the guided flow's established order: the host, the
+	// provider's own needs, the domains, the edge address, the guest sizes,
+	// the identity, the display name, and the storage consent last.
+	askNeed := func(need provisioning.HostNeed) error {
+		switch need.Name {
+		case provisioning.NeedHost:
+			var err error
+			if host, err = ui.ask(need.Label, hostDef); err != nil {
+				return err
+			}
+		case provisioning.NeedProxyIP:
+			var err error
+			if proxyIP, err = ui.ask(need.Label, proxyDef); err != nil {
+				return err
+			}
+		case provisioning.NeedConfirmStorage:
+			var err error
+			if consent, err = ui.confirm(need.Label, false); err != nil {
+				return err
+			}
+		default:
+			if need.Secret {
+				if env := os.Getenv(need.Name); env != "" {
+					secrets[need.Name] = env
+					fmt.Fprintf(ui.out, "  %s: (from %s — not shown)\n", need.Label, need.Name)
+					return nil
+				}
+				v, serr := ui.askSecret(need.Label)
+				if serr != nil {
+					return serr
+				}
+				secrets[need.Name] = v
+				return nil
+			}
+			def := need.Default
+			if recorded != nil && recorded[need.Name] != "" {
+				def = recorded[need.Name]
+			}
+			if flags.HostAnswers[need.Name] != "" {
+				def = flags.HostAnswers[need.Name]
+			}
+			v, err := ui.ask(need.Label, def)
+			if err != nil {
+				return err
+			}
+			answers[need.Name] = v
+		}
+		return nil
+	}
+	// pass 1: the host + the provider's own needs (secrets first — the
+	// operator pastes before anything long runs).
+	for _, need := range prov.Needs() {
+		if need.Name == provisioning.NeedHost || (need.Name != provisioning.NeedProxyIP && need.Name != provisioning.NeedConfirmStorage) {
+			if err := askNeed(need); err != nil {
+				return box.Flags{}, err
+			}
+		}
 	}
 	relayDomain, err := ui.ask("Relay domain (must resolve to your host)", relayDef)
 	if err != nil {
@@ -388,9 +535,13 @@ func collectAnswers(ui *installerUI, seed *config.Config, flags box.Flags) (box.
 	if err != nil {
 		return box.Flags{}, err
 	}
-	proxyIP, err := ui.ask("the ONE LAN address — the gateway's (CIDR, e.g. 192.168.30.8/24) — REQUIRED; everything public resolves here", proxyDef)
-	if err != nil {
-		return box.Flags{}, err
+	// pass 2: the edge address.
+	for _, need := range prov.Needs() {
+		if need.Name == provisioning.NeedProxyIP {
+			if err := askNeed(need); err != nil {
+				return box.Flags{}, err
+			}
+		}
 	}
 	rootfs, err := ui.askUint32("LXC rootfs size (GB)", 16)
 	if err != nil {
@@ -400,11 +551,16 @@ func collectAnswers(ui *installerUI, seed *config.Config, flags box.Flags) (box.
 	if err != nil {
 		return box.Flags{}, err
 	}
-	if relayDomain == "" || cpDomain == "" || proxyIP == "" {
-		return box.Flags{}, fmt.Errorf("relay/CP domains and the proxy IP are required")
+	if relayDomain == "" || cpDomain == "" {
+		return box.Flags{}, fmt.Errorf("relay/CP domains are required")
 	}
-	if !strings.Contains(proxyIP, "/") {
-		return box.Flags{}, fmt.Errorf("proxy static IP must be CIDR (host/prefix) — got %q", proxyIP)
+	if needPresent(prov, provisioning.NeedProxyIP) {
+		if proxyIP == "" {
+			return box.Flags{}, fmt.Errorf("the proxy IP is required")
+		}
+		if !strings.Contains(proxyIP, "/") {
+			return box.Flags{}, fmt.Errorf("proxy static IP must be CIDR (host/prefix) — got %q", proxyIP)
+		}
 	}
 	pk, opDir, err := resolveOperatorIdentity(ui, seed, flags)
 	if err != nil {
@@ -424,29 +580,35 @@ func collectAnswers(ui *installerUI, seed *config.Config, flags box.Flags) (box.
 	if err != nil {
 		return box.Flags{}, err
 	}
-	consent, err := ui.confirm("If this host has no usable storage, may freehold create a new one? (freehold never erases existing data)", false)
-	if err != nil {
-		return box.Flags{}, err
+	// pass 3: the storage consent, last (it is about the host's disks, and
+	// a created-host provider that never touches them never asks it).
+	for _, need := range prov.Needs() {
+		if need.Name == provisioning.NeedConfirmStorage {
+			if err := askNeed(need); err != nil {
+				return box.Flags{}, err
+			}
+		}
 	}
 	// The runner MCP port (an implementation detail — picked free, not asked)
 	// and the gateway subnet (derived; --gateway-cidr/--gateway-vlan override)
 	// are filled by the caller.
 	f := box.Flags{
-		Host:               host,
-		RelayDomain:        relayDomain,
-		CpDomain:           cpDomain,
-		ProxyIP:            proxyIP,
-		OperatorPubkey:     pk,
-		OperatorIdentity:   opDir,
-		OperatorName:       displayName,
-		SizeGB:             drive.TenantLVSizeGB,
-		PoolSizeGB:         drive.FreshPoolSizeGB,
-		RootfsGB:           rootfs,
-		MemoryMB:           memory,
-		RelayGw:            "192.168.30.1",
-		Bridge:             "vmbr0",
-		ConfigPath:         installConfigPath(),
-		ConfirmStorage:     consent,
+		Provider:         prov.Name(),
+		HostAnswers:      answers,
+		HostSecrets:      secrets,
+		Host:             host,
+		RelayDomain:      relayDomain,
+		CpDomain:         cpDomain,
+		ProxyIP:          proxyIP,
+		OperatorPubkey:   pk,
+		OperatorIdentity: opDir,
+		OperatorName:     displayName,
+		SizeGB:           drive.TenantLVSizeGB,
+		PoolSizeGB:       drive.FreshPoolSizeGB,
+		RootfsGB:         rootfs,
+		MemoryMB:         memory,
+		ConfigPath:       installConfigPath(),
+		ConfirmStorage:   consent,
 	}
 	// The flag fields the prompts don't cover ride through verbatim — dropping
 	// them here would make --local-port/--gateway-cidr/--gateway-vlan vanish
@@ -471,7 +633,64 @@ func collectAnswers(ui *installerUI, seed *config.Config, flags box.Flags) (box.
 // freehold-subnet (a re-adopt rides the recorded gateway — a pre-gateway
 // world stays flat; forcing one mid-life would collide with its live LAN
 // guests).
+// needDefault resolves a plain need's guided default: the flag answer, the
+// profile's recorded answer, the seed host, then the provider's own default.
+func needDefault(prov provisioning.HostProvider, name string, recorded map[string]string, seedHost, flagVal string) string {
+	if flagVal != "" {
+		return flagVal
+	}
+	if name == provisioning.NeedHost && seedHost != "" {
+		return seedHost
+	}
+	if recorded != nil && recorded[name] != "" {
+		return recorded[name]
+	}
+	for _, n := range prov.Needs() {
+		if n.Name == name {
+			return n.Default
+		}
+	}
+	return ""
+}
+
+// needPresent reports whether the provider declares a need at all (the
+// installer's required-field validation only applies when it does).
+func needPresent(prov provisioning.HostProvider, name string) bool {
+	for _, n := range prov.Needs() {
+		if n.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
 func applyInstallDefaults(f *box.Flags, mint bool) {
+	prov, perr := registry.ByName(f.Provider)
+	if perr != nil {
+		f.AccessMode = "ssh-root-proxmox"
+	} else {
+		f.Provider = prov.Name()
+		f.AccessMode = prov.AccessMode()
+		f.HostsGateway = prov.HostsGateway()
+		// The provider's substrate defaults fill what the operator/flags
+		// left unset (vultr: the dir storage; proxmox: local-lvm/vmbr0).
+		for k, v := range prov.Defaults() {
+			switch k {
+			case "storage":
+				if f.StorageName == "" {
+					f.StorageName = v
+				}
+			case "bridge":
+				if f.Bridge == "" {
+					f.Bridge = v
+				}
+			case "relay_gw":
+				if f.RelayGw == "" {
+					f.RelayGw = v
+				}
+			}
+		}
+	}
 	if f.StorageName == "" {
 		f.StorageName = "local-lvm"
 	}
@@ -494,11 +713,6 @@ func applyInstallDefaults(f *box.Flags, mint bool) {
 	// recorded gateway was seeded before this runs. RunBootstrap re-validates
 	// before any config write.
 	f.Mint = mint
-	// Proxmox-over-root-SSH is the only implemented access mode today;
-	// provider-API modes (api-vultr) arrive with the Access seam (PR3).
-	if f.AccessMode == "" {
-		f.AccessMode = "ssh-root-proxmox"
-	}
 }
 
 // pickRunnerPort pins the runner MCP bind for a MINT: the default port unless
@@ -549,6 +763,19 @@ func flagsFromCmd(cmd *cobra.Command) box.Flags {
 	f.Channel, _ = cmd.Flags().GetString("channel")
 	f.SizeGB, _ = cmd.Flags().GetUint64("size-gb")
 	f.PoolSizeGB, _ = cmd.Flags().GetUint64("pool-size-gb")
+	if v, _ := cmd.Flags().GetString("provider"); v != "" {
+		f.Provider = v
+	}
+	if ha, _ := cmd.Flags().GetStringArray("host-answer"); len(ha) > 0 {
+		f.HostAnswers = map[string]string{}
+		for _, a := range ha {
+			name, val, ok := strings.Cut(a, "=")
+			if !ok || name == "" || val == "" {
+				continue
+			}
+			f.HostAnswers[name] = val
+		}
+	}
 	return f
 }
 
@@ -589,9 +816,13 @@ func addInstallFlags(cmd *cobra.Command) {
 	cmd.Flags().String("display-name", "", "Operator display name in Buzz (default \"Operator\"; published as the kind:0 profile that skips the desktop app's first-run onboarding)")
 	cmd.Flags().Uint32("rootfs-gb", 16, "LXC rootfs size in GB")
 	cmd.Flags().Uint32("memory-mb", 2048, "LXC memory in MB")
-	cmd.Flags().String("relay-gw", "192.168.30.1", "Gateway for static guest IPs")
-	cmd.Flags().String("storage", "local-lvm", "PVE LXC storage")
-	cmd.Flags().String("bridge", "vmbr0", "PVE LXC network bridge")
+	// The substrate defaults (storage/bridge/relay-gw) belong to the
+	// PROVIDER (Defaults()) — the flags stay empty so an unset flag lets
+	// the provider govern (a flag default here would defeat it: vultr has
+	// no local-lvm).
+	cmd.Flags().String("relay-gw", "", "Gateway for static guest IPs (default: the provider's)")
+	cmd.Flags().String("storage", "", "LXC rootfs storage (default: the provider's)")
+	cmd.Flags().String("bridge", "", "LXC network bridge (default: the provider's)")
 	cmd.Flags().String("thin-pool", "", "Plane placement: existing pool to reuse, or a new name to carve")
 	cmd.Flags().String("plane-pool", "", "Select the storage backend to use by name (VG or zpool)")
 	cmd.Flags().Bool("confirm-shared-pool", false, "Consent to share a thin pool that already holds live volumes")
@@ -602,6 +833,234 @@ func addInstallFlags(cmd *cobra.Command) {
 	cmd.Flags().String("channel", "", "Release channel to record on the CP (stable|dev; default: derived from the build). Install deploys the LOCAL build; it does not fetch")
 	cmd.Flags().String("version", "", "Version to record on the CP (default: this build's version). Install deploys the LOCAL build; it does not fetch")
 	cmd.Flags().Bool("non-interactive", false, "Run headless: fail actionably instead of prompting")
+	cmd.Flags().String("provider", "", "The host provider (registry key: "+strings.Join(registry.Names(), " | ")+") — a created-host provider mints the world's host; the default (proxmox) reaches yours")
+	cmd.Flags().StringArray("host-answer", nil, "A provider need's non-secret answer, name=value (repeatable; secrets ride their env var; defaults come from the provider)")
+}
+
+// ---- the host-provider lifecycle (generic; no substrate names) --------------
+
+// missingAnswers fills the HEADLESS answer set from the env + --host-answer
+// + the provider's own defaults, and returns what is still missing (the
+// caller either falls back to the guided flow or errors actionably). Secret
+// needs ride their env var; plain needs take --host-answer, then the
+// provider default; the conventional core needs ride the core flags.
+func missingAnswers(prov provisioning.HostProvider, f *box.Flags) []string {
+	var missing []string
+	if f.HostAnswers == nil {
+		f.HostAnswers = map[string]string{}
+	}
+	if f.HostSecrets == nil {
+		f.HostSecrets = map[string]string{}
+	}
+	for _, need := range prov.Needs() {
+		switch need.Name {
+		case provisioning.NeedHost:
+			// The advertised --host-answer forms work: an explicit answer
+			// maps onto the core flag when the flag itself is unset.
+			if f.Host == "" && f.HostAnswers[need.Name] != "" {
+				f.Host = f.HostAnswers[need.Name]
+			}
+			if f.Host == "" {
+				missing = append(missing, "--host (or --host-answer host=…)")
+			}
+		case provisioning.NeedProxyIP:
+			if f.ProxyIP == "" && f.HostAnswers[need.Name] != "" {
+				f.ProxyIP = f.HostAnswers[need.Name]
+			}
+			if f.ProxyIP == "" {
+				missing = append(missing, "--proxy-ip (or --host-answer proxy_ip=…)")
+			}
+		case provisioning.NeedConfirmStorage:
+			// Optional consent; unset is a valid answer.
+		default:
+			if need.Secret {
+				if v := os.Getenv(need.Name); v != "" {
+					f.HostSecrets[need.Name] = v
+				} else {
+					missing = append(missing, need.Name+" (env)")
+				}
+				continue
+			}
+			if f.HostAnswers[need.Name] == "" && need.Default != "" {
+				f.HostAnswers[need.Name] = need.Default
+			}
+		}
+	}
+	return missing
+}
+
+// doorPubkeyLine renders this box's DOOR key's authorized_keys line — the
+// key the provider's host must carry (born-with for a created host, pasted
+// for a reached one).
+func doorPubkeyLine() (string, error) {
+	if err := box.EnsureIdentity(box.OpsDir()); err != nil {
+		return "", err
+	}
+	pem, err := box.DoorKeyPEM()
+	if err != nil {
+		return "", err
+	}
+	return crypto.ExtractED25519PublicKeyLine(pem)
+}
+
+// tempDoorKey writes the DOOR private key to a 0600 temp file.
+func tempDoorKey() (string, func(), error) {
+	pem, err := box.DoorKeyPEM()
+	if err != nil {
+		return "", nil, err
+	}
+	return proxmox.WriteTempKey(pem)
+}
+
+// buildSession assembles the provider's provisioning handle: the answers
+// (secrets included — memory only), the door line, and the installer-owned
+// transports. ExecOnHost dials the session's CURRENT host over the DOOR key
+// — a created host sets session.Host before its install scripts run.
+func buildSession(f *box.Flags, ui *installerUI) (*provisioning.HostSession, error) {
+	line, err := doorPubkeyLine()
+	if err != nil {
+		return nil, fmt.Errorf("door key: %w", err)
+	}
+	answers := map[string]string{}
+	for k, v := range f.HostAnswers {
+		answers[k] = v
+	}
+	for k, v := range f.HostSecrets {
+		answers[k] = v
+	}
+	session := &provisioning.HostSession{
+		Answers:  answers,
+		DoorLine: line,
+		Host:     f.Host,
+		World:    f.Name,
+	}
+	session.ExecOnHost = func(script string, timeoutSecs uint64) error {
+		ip := strings.TrimPrefix(session.Host, "root@")
+		keyPath, cleanup, err := tempDoorKey()
+		if err != nil {
+			return err
+		}
+		defer cleanup()
+		out, err := proxmox.SSHExec(ip, keyPath)(script, timeoutSecs)
+		if err != nil {
+			return err
+		}
+		if out.ExitCode == nil || *out.ExitCode != 0 {
+			return fmt.Errorf("host script failed: %s", strings.TrimSpace(out.Stderr))
+		}
+		return nil
+	}
+	// The handle persists the INSTANT the create succeeds — a process
+	// killed mid-prepare (a tool timeout, a crash) must not leave a billed
+	// instance no tooling can see.
+	session.OnCreated = func(id string) {
+		f.HostID = id
+		if rerr := recordHostHandle(f, &provisioning.Host{ID: id}, uiOut(ui)); rerr != nil {
+			fmt.Fprintf(uiOut(ui), "  (the instance %s is LIVE AND BILLING and its handle could not be recorded: %v — note the id by hand)\n", id, rerr)
+		} else {
+			fmt.Fprintf(uiOut(ui), "  recorded: %s host %s (the handle survives a mid-install death)\n", f.Provider, id)
+		}
+	}
+	session.Print = func(format string, args ...any) { fmt.Fprintf(uiOut(ui), format, args...) }
+	if ui != nil {
+		session.Prompt = ui.Prompt
+		session.Interactive = true
+	}
+	return session, nil
+}
+
+// uiOut resolves the writer behind a possibly-nil ui (headless keeps the
+// provider's prints flowing).
+func uiOut(ui *installerUI) io.Writer {
+	if ui == nil {
+		return os.Stdout
+	}
+	return ui.out
+}
+
+// ensureHost runs the provider's Prepare: a mint creates the host (and
+// installs what it needs); a re-adopt verifies or re-creates the recorded
+// one. Fills Host/ProxyIP/HostID from the answer, and records the handle
+// IMMEDIATELY when one is created — a mid-prepare failure must never
+// strand a billed host the tooling cannot see.
+func ensureHost(f *box.Flags, out io.Writer, ui *installerUI) (*provisioning.HostSession, error) {
+	prov, err := registry.ByName(f.Provider)
+	if err != nil {
+		return nil, err
+	}
+	if f.HostSecrets == nil {
+		f.HostSecrets = map[string]string{}
+	}
+	// Fill the headless answer set (env + --host-answer + defaults); the
+	// missing list is the caller's gate — here every answer is already in.
+	_ = missingAnswers(prov, f)
+	session, err := buildSession(f, ui)
+	if err != nil {
+		return nil, err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+	defer cancel()
+	host, err := prov.Prepare(ctx, session, f.HostID)
+	if err != nil {
+		// A post-create failure (the address wait, the PVE install) still
+		// leaves a BILLED instance — the session carries its handle the
+		// moment the create succeeded; record it before surfacing the
+		// failure, so the stranded host is always recoverable by tooling.
+		if session.CreatedID != "" {
+			f.Host = session.Host
+			f.HostID = session.CreatedID
+			if rerr := recordHostHandle(f, &provisioning.Host{ID: session.CreatedID}, out); rerr != nil {
+				return session, fmt.Errorf("%w\n  (AND the handle could not be recorded: %v — note the id %s by hand)", err, rerr, session.CreatedID)
+			}
+			return session, fmt.Errorf("%w\n  (the instance's handle is recorded in the profile — a re-run re-adopts it instead of minting a second one)", err)
+		}
+		return session, err
+	}
+	if host == nil {
+		return nil, fmt.Errorf("provider %q prepared no host", prov.Name())
+	}
+	f.Host = session.Host
+	f.HostID = host.ID
+	if !needPresent(prov, provisioning.NeedProxyIP) && host.IP != "" {
+		// A created host DERIVES the edge address (the instance's IP) —
+		// there is no LAN to name.
+		f.ProxyIP = host.IP + "/32"
+	}
+	if host.ID != "" {
+		if err := recordHostHandle(f, host, out); err != nil {
+			return session, fmt.Errorf("host %s is LIVE AND BILLING but its handle could not be recorded to %s (%w) — record it by hand before re-running, or destroy it in the provider's console", host.ID, f.ConfigPath, err)
+		}
+	}
+	return session, nil
+}
+
+// recordHostHandle persists the [host_provider] record (and, once known,
+// the host address) into the profile config without disturbing anything
+// else on disk — the pipeline's own merges keep prev's fields; this only
+// ever fills the host block.
+func recordHostHandle(f *box.Flags, host *provisioning.Host, out io.Writer) error {
+	cfg, err := config.Load(f.ConfigPath)
+	if err != nil {
+		return err
+	}
+	if cfg == nil {
+		cfg = &config.Config{Name: f.Name, AccessMode: f.AccessMode}
+	}
+	cfg.AccessMode = f.AccessMode
+	cfg.HostProvider = config.HostSpec{
+		Provider: f.Provider,
+		ID:       host.ID,
+		Gateway:  f.HostsGateway,
+		Answers:  f.HostAnswers,
+	}
+	if f.Host != "" {
+		cfg.Host = f.Host
+	}
+	if err := cfg.Save(f.ConfigPath); err != nil {
+		return err
+	}
+	fmt.Fprintf(out, "  recorded: %s host %s (%s)\n", f.Provider, host.ID, f.Host)
+	return nil
 }
 
 // ---- operator identity + storage (shared helpers install needs) -------------
@@ -749,6 +1208,18 @@ func (u *installerUI) ask(label, def string) (string, error) {
 	}
 	if strings.TrimSpace(line) == "" {
 		return def, nil
+	}
+	return strings.TrimSpace(line), nil
+}
+
+// Prompt prints a label and reads a line — the provider-facing primitive
+// (the door paste-gate's "press ENTER / 'r' / 'q" loop). No default, no
+// re-ask; the caller interprets the answer.
+func (u *installerUI) Prompt(label string) (string, error) {
+	fmt.Fprintf(u.out, "%s: ", label)
+	line, err := u.readLine()
+	if err != nil {
+		return "", err
 	}
 	return strings.TrimSpace(line), nil
 }

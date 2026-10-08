@@ -8,7 +8,8 @@ design must match: **no kind is designed against an assumption.**
 
 Buzz is a self-hosted Nostr-format workspace where humans and agents share rooms. It is a
 Rust monorepo: relay (Axum, WS + REST), Postgres (events + FTS), Redis (pub/sub, presence),
-S3/MinIO (Blossom media), plus CLI/ACP/desktop clients.
+S3/RustFS (Blossom media — the relay's S3 engine; the compose's `minio` service is RustFS
+under the same service name), plus CLI/ACP/desktop clients.
 
 - A **community** is the workspace selected by the request host. In the default single-relay
   setup, **one relay URL = exactly one community** — which is precisely relay-as-scope: our
@@ -20,9 +21,12 @@ S3/MinIO (Blossom media), plus CLI/ACP/desktop clients.
 
 ## 2. Install & operations (deploy/compose)
 
-- Production bundle: `deploy/compose` — Postgres, Redis, MinIO, git volume, optional
-  Caddy/TLS. `./run.sh start`; TLS via `BUZZ_COMPOSE_TLS=true` (Let's Encrypt); liveness at
-  `/_liveness`. `./run.sh backup-hint` ships a backup checklist.
+- Production bundle: `deploy/compose` — Postgres, Redis, RustFS (the `minio` service), git
+  volume, optional Caddy/TLS. `./run.sh start`; TLS via `BUZZ_COMPOSE_TLS=true` (Let's
+  Encrypt); liveness at `/_liveness`. `./run.sh backup-hint` ships a backup checklist.
+  The freehold deploy patches the bundle's minio service onto RustFS (the MinIO image
+  registries are dead: quay + Docker Hub anonymous pulls 401, dl.min.io is 410) and
+  mirrors a world's old media volume across on first deploy after.
 - Secrets that must be stable across restarts: `BUZZ_RELAY_PRIVATE_KEY` (the relay's signing
   key — **required for member administration**), `BUZZ_GIT_HOOK_HMAC_SECRET`, DB/Redis/S3.
 - `BUZZ_AUTO_MIGRATE=true` (or `buzz-admin migrate`) to bootstrap a fresh DB; `RELAY_OWNER_PUBKEY`

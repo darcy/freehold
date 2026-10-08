@@ -32,6 +32,9 @@ A world converges on one `freehold build`.
     (`docs/AI.md`, `docs/COMPUTE.md`).
 *   **Harden the base** — console as a systemd unit, runner crash restart, relay roster
     reconcile after redeploy, the live-grant roster break (`docs/FREEHOLD.md`).
+*   **Scheduled jobs everywhere** — every agent offers and manages jobs (`create_job` et al.),
+    the CP fires them as console-identity mentions, and the console web + TUI show the
+    owner-redacted run state (`docs/AI.md`).
 *   **Scoped per-agent LiteLLM keys** and a resource baseline (`docs/AI.md`); **runner-client
     in every guest** (`docs/COMPUTE.md`).
 

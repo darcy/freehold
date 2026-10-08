@@ -129,13 +129,39 @@ type PollResult struct {
 // requester uses the unfiltered path — a #p-filtered query hangs for some
 // identities, verified live).
 func PollStream(relayURL string, secret []byte, channelID string, since int64) ([]PollResult, error) {
-	return poll(relayURL, secret, channelID, "", since)
+	return pollAuth(relayURL, relayURL, secret, channelID, "", since)
+}
+
+// PollStreamAuth is PollStream with a separate NIP-98 auth URL: dial the
+// relay directly (the LAN origin pre-Caddy) while SIGNING the canonical
+// public URL — the relay rejects an auth whose `u` is the LAN origin.
+func PollStreamAuth(dialURL, authURL string, secret []byte, channelID string, since int64) ([]PollResult, error) {
+	return pollAuth(dialURL, authURL, secret, channelID, "", since)
 }
 
 // PollStreamP polls for messages by mention_pubkey (p-tag) newer than since
 // (the executor uses the p-filtered path, which works for its identity).
 func PollStreamP(relayURL string, secret []byte, channelID, mentionPubkey string, since int64) ([]PollResult, error) {
-	return poll(relayURL, secret, channelID, mentionPubkey, since)
+	return pollAuth(relayURL, relayURL, secret, channelID, mentionPubkey, since)
+}
+
+func pollAuth(dialURL, authURL string, secret []byte, channelID, p string, since int64) ([]PollResult, error) {
+	filter := map[string]interface{}{
+		"kinds": []interface{}{StreamMsgKind},
+		"#h":    []interface{}{channelID},
+		"since": since,
+		"limit": 100,
+	}
+	if p != "" {
+		filter["#p"] = []interface{}{p}
+	}
+	events, err := relay.QueryEventsAuth(dialURL, authURL, secret, []interface{}{filter})
+	if err != nil {
+		return nil, err
+	}
+	out := collectVerified(events)
+	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt < out[j].CreatedAt })
+	return out, nil
 }
 
 func publishSigned(relayURL string, secret []byte, kind uint32, tags [][]string, content string) error {
@@ -154,25 +180,6 @@ func publishSignedAuth(dialURL, authURL string, secret []byte, kind uint32, tags
 	}
 	evBytes, _ := json.Marshal(ev)
 	return relay.PublishEventJSONAuth(dialURL, authURL, secret, string(evBytes))
-}
-
-func poll(relayURL string, secret []byte, channelID, p string, since int64) ([]PollResult, error) {
-	filter := map[string]interface{}{
-		"kinds": []interface{}{StreamMsgKind},
-		"#h":    []interface{}{channelID},
-		"since": since,
-		"limit": 100,
-	}
-	if p != "" {
-		filter["#p"] = []interface{}{p}
-	}
-	events, err := relay.QueryEvents(relayURL, secret, []interface{}{filter})
-	if err != nil {
-		return nil, err
-	}
-	out := collectVerified(events)
-	sort.Slice(out, func(i, j int) bool { return out[i].CreatedAt < out[j].CreatedAt })
-	return out, nil
 }
 
 // collectVerified locally signature-verifies every event.

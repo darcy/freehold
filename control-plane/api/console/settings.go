@@ -16,7 +16,7 @@ import (
 // re-open discipline as dnsList/overview): an out-of-band `freehold-console
 // settings` write is visible without a serve restart.
 func (s *Server) settingsGet(w http.ResponseWriter, r *http.Request) {
-	if _, err := s.requireSession(r); err != nil {
+	if _, err := s.requireAdmin(r); err != nil {
 		writeErr(w, statusFor(err), err.Error())
 		return
 	}
@@ -36,7 +36,7 @@ func (s *Server) settingsGet(w http.ResponseWriter, r *http.Request) {
 // validated at this trust boundary (a bad IANA name would silently UTC every
 // agent pod); empty clears it (pods run UTC).
 func (s *Server) settingsSet(w http.ResponseWriter, r *http.Request) {
-	if _, err := s.requireSession(r); err != nil {
+	if _, err := s.requireAdmin(r); err != nil {
 		writeErr(w, statusFor(err), err.Error())
 		return
 	}

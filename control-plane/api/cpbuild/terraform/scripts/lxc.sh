@@ -43,7 +43,7 @@ NET="name=eth0,bridge=vmbr0,ip=dhcp,type=veth"
 if [ "$IP" != "-" ] && [ "$GW" != "-" ]; then NET="name=eth0,bridge=vmbr0,ip=${IP},gw=${GW},type=veth"; fi
 [ -n "$MP" ] && MP=" $MP" || MP=""
 pct create "$VMID" "local:vztmpl/${TPL}" \
-  --rootfs "local-lvm:${ROOTFS}" --memory "$MEM" --hostname "$HOSTNAME" \
+  --rootfs "${LXC_STORAGE:-local-lvm}:${ROOTFS}" --memory "$MEM" --hostname "$HOSTNAME" \
   --unprivileged 1 --onboot 1 --features fuse=1,keyctl=1,nesting=1 \
   --net0 "$NET"${MP} 2>&1 | tail -1
 # Pods (runc sandboxes) write net sysctls through /proc/sys — read-only in a

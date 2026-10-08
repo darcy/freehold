@@ -153,6 +153,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.runnerChannel(w, r, name)
 	case path == "/api/agents" && method == http.MethodGet:
 		s.agentsList(w, r)
+	case path == "/api/jobs" && method == http.MethodGet:
+		s.jobsList(w, r)
 	case path == "/api/agents" && method == http.MethodPost:
 		s.agentsRegister(w, r)
 	case strings.HasPrefix(path, "/api/agents/") && method == http.MethodDelete:
@@ -219,26 +221,58 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusUnauthorized, "signature verification failed")
 		return
 	}
+	// Two roles log in: an operator (the admin whitelist — the full admin/ops
+	// surface) and a member (any relay community member — the scheduled-jobs
+	// read of their own rows). Everyone else is refused.
+	role := RoleOperator
 	if !s.Auth.isAdmin(req.Pubkey) {
-		writeErr(w, http.StatusForbidden, "not an operator (admin whitelist)")
-		return
+		snap := s.Store.Snapshot()
+		member, merr := s.isRelayMember(snap, req.Pubkey)
+		if merr != nil {
+			writeErr(w, http.StatusInternalServerError, "relay membership check failed: "+merr.Error())
+			return
+		}
+		if !member {
+			writeErr(w, http.StatusForbidden, "not an operator (admin whitelist) and not a relay member")
+			return
+		}
+		role = RoleMember
 	}
-	token, err := s.Auth.IssueSession(req.Pubkey)
+	token, err := s.Auth.IssueSessionRole(req.Pubkey, role)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	setSessionCookie(w, token)
-	writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "pubkey": req.Pubkey})
+	writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "pubkey": req.Pubkey, "role": role})
+}
+
+// isRelayMember checks the relay's community membership list (kind 13534,
+// relay-signed) for the pubkey — the member-role gate for console login.
+// Dialed + signed over the console's own dial/auth URL pair (an auth whose
+// `u` is the LAN origin is refused by the relay).
+func (s *Server) isRelayMember(snap state.ControlPlaneState, pubkey string) (bool, error) {
+	if snap.RelayURL == nil || snap.RelayPubkey == nil || len(s.ConsoleSecret) != 32 {
+		return false, fmt.Errorf("relay not configured (need relay_url + relay_pubkey + the console identity)")
+	}
+	dial, auth := s.relayDialAuth(snap)
+	return relay.IsCommunityMemberAuth(dial, auth, s.ConsoleSecret, *snap.RelayPubkey, pubkey)
 }
 
 func (s *Server) portalToken(w http.ResponseWriter, r *http.Request) {
-	pk, err := s.requireSessionPubkey(r)
+	if s.Auth == nil {
+		writeErr(w, statusFor(errAuthNotConfigured), errAuthNotConfigured.Error())
+		return
+	}
+	pk, role, err := s.sessionFor(r)
 	if err != nil {
 		writeErr(w, statusFor(err), err.Error())
 		return
 	}
-	token, err := s.Auth.IssuePortal(pk)
+	if role == "" {
+		role = RoleOperator
+	}
+	token, err := s.Auth.IssuePortalRole(pk, role)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -251,12 +285,12 @@ func (s *Server) portalLand(w http.ResponseWriter, r *http.Request, token string
 		writeErr(w, http.StatusNotFound, "console auth is not configured")
 		return
 	}
-	pk, ok := s.Auth.ConsumePortal(token)
+	pk, role, ok := s.Auth.ConsumePortal(token)
 	if !ok {
 		writeErr(w, http.StatusNotFound, "unknown, expired, or already-used portal token")
 		return
 	}
-	session, err := s.Auth.IssueSession(pk)
+	session, err := s.Auth.IssueSessionRole(pk, role)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -269,7 +303,7 @@ func (s *Server) portalLand(w http.ResponseWriter, r *http.Request, token string
 // ---- world / overview ----
 
 func (s *Server) world(w http.ResponseWriter, r *http.Request) {
-	operator, err := s.requireSessionPubkey(r)
+	operator, err := s.requireAdmin(r)
 	if err != nil {
 		writeErr(w, statusFor(err), err.Error())
 		return
@@ -410,7 +444,7 @@ func (s *Server) stateDir() string {
 // its runner credential (Builder set). No relay dependency: unlike
 // agent-tools, this does NOT read the relay roster to authorize.
 func (s *Server) worldBuild(w http.ResponseWriter, r *http.Request) {
-	if _, err := s.requireSession(r); err != nil {
+	if _, err := s.requireAdmin(r); err != nil {
 		writeErr(w, statusFor(err), err.Error())
 		return
 	}
@@ -449,10 +483,10 @@ func (s *Server) worldBuild(w http.ResponseWriter, r *http.Request) {
 // container goes. The CP's managed state (runners + secrets, agent registry,
 // DNS store) is cleared AFTER the runner-driven teardown — clearing it first
 // would remove the very co-located runner this runs through. Operator-scoped:
-// requireSession only admits a pubkey from the console's admin whitelist
-// (server.go login's isAdmin gate), i.e. an operator. Compute-only.
+// requireAdmin only admits a session stamped with the operator role (the
+// login's admin whitelist), i.e. an operator. Compute-only.
 func (s *Server) worldTeardown(w http.ResponseWriter, r *http.Request) {
-	if _, err := s.requireSession(r); err != nil {
+	if _, err := s.requireAdmin(r); err != nil {
 		writeErr(w, statusFor(err), err.Error())
 		return
 	}
@@ -488,9 +522,9 @@ func (s *Server) worldTeardown(w http.ResponseWriter, r *http.Request) {
 // worldExec runs one command through the CP's co-located runner — the
 // drive-through-CP exec a thin login box uses, now session-authed here instead
 // of operator-signed on the agent-tools MCP (no relay roster). Operator-scoped
-// like worldBuild: requireSession only admits an admin-whitelisted operator.
+// like worldBuild: requireAdmin only admits an operator-role session.
 func (s *Server) worldExec(w http.ResponseWriter, r *http.Request) {
-	if _, err := s.requireSession(r); err != nil {
+	if _, err := s.requireAdmin(r); err != nil {
 		writeErr(w, statusFor(err), err.Error())
 		return
 	}
@@ -527,7 +561,7 @@ func (s *Server) worldExec(w http.ResponseWriter, r *http.Request) {
 // execute them itself. It signs as the console identity — the serve's local
 // admin peer — over the same signed-header scheme, no relay roster.
 func (s *Server) worldMigrate(w http.ResponseWriter, r *http.Request) {
-	if _, err := s.requireSession(r); err != nil {
+	if _, err := s.requireAdmin(r); err != nil {
 		writeErr(w, statusFor(err), err.Error())
 		return
 	}
@@ -582,7 +616,7 @@ func (s *Server) worldMigrate(w http.ResponseWriter, r *http.Request) {
 // host door (DOOR_SPEC) through the co-located runner — the session-authed
 // mirror of the toolset's world_authorize_door/world_revoke_door.
 func (s *Server) worldDoor(w http.ResponseWriter, r *http.Request) {
-	if _, err := s.requireSession(r); err != nil {
+	if _, err := s.requireAdmin(r); err != nil {
 		writeErr(w, statusFor(err), err.Error())
 		return
 	}
@@ -652,7 +686,7 @@ var stdSecrets = []string{"dns-relay", "dns-cp", "litellm", "operator", "cert-se
 // secretsList reports which CP-owned secrets are present on disk (the idempotent
 // inventory `build` uses to ask the operator only for what's missing).
 func (s *Server) secretsList(w http.ResponseWriter, r *http.Request) {
-	if _, err := s.requireSessionPubkey(r); err != nil {
+	if _, err := s.requireAdmin(r); err != nil {
 		writeErr(w, statusFor(err), err.Error())
 		return
 	}
@@ -675,7 +709,7 @@ func (s *Server) secretsList(w http.ResponseWriter, r *http.Request) {
 // writable; the blob is written verbatim (never opened here — the cert /
 // litellm steps open it in memory at build).
 func (s *Server) secretsWrite(w http.ResponseWriter, r *http.Request) {
-	if _, err := s.requireSessionPubkey(r); err != nil {
+	if _, err := s.requireAdmin(r); err != nil {
 		writeErr(w, statusFor(err), err.Error())
 		return
 	}
@@ -725,7 +759,7 @@ func wsOf(url string) string {
 }
 
 func (s *Server) overview(w http.ResponseWriter, r *http.Request) {
-	if _, err := s.requireSession(r); err != nil {
+	if _, err := s.requireAdmin(r); err != nil {
 		writeErr(w, statusFor(err), err.Error())
 		return
 	}
@@ -951,7 +985,7 @@ func (s *Server) probeReadiness(addr, runnerPubkey string) interface{} {
 // ---- teardown ----
 
 func (s *Server) teardown(w http.ResponseWriter, r *http.Request) {
-	if _, err := s.requireSession(r); err != nil {
+	if _, err := s.requireAdmin(r); err != nil {
 		writeErr(w, statusFor(err), err.Error())
 		return
 	}
@@ -1102,7 +1136,7 @@ func (s *Server) relayDialFor(snapURL *string) string {
 }
 
 func (s *Server) provision(w http.ResponseWriter, r *http.Request) {
-	if _, err := s.requireSession(r); err != nil {
+	if _, err := s.requireAdmin(r); err != nil {
 		writeErr(w, statusFor(err), err.Error())
 		return
 	}
@@ -1268,7 +1302,7 @@ func (s *Server) capabilityPortAbove(builder *cpbuild.Spec) int {
 }
 
 func (s *Server) rotate(w http.ResponseWriter, r *http.Request) {
-	if _, err := s.requireSession(r); err != nil {
+	if _, err := s.requireAdmin(r); err != nil {
 		writeErr(w, statusFor(err), err.Error())
 		return
 	}
@@ -1372,7 +1406,7 @@ func (s *Server) rotate(w http.ResponseWriter, r *http.Request) {
 // State is read fresh from disk: the capability was recorded by the
 // agent-tools process (out-of-band from this serve's startup snapshot).
 func (s *Server) enrollConfirm(w http.ResponseWriter, r *http.Request) {
-	if _, err := s.requireSession(r); err != nil {
+	if _, err := s.requireAdmin(r); err != nil {
 		writeErr(w, statusFor(err), err.Error())
 		return
 	}
@@ -1425,7 +1459,7 @@ func (s *Server) restartDoor(name string, port int) error {
 }
 
 func (s *Server) revoke(w http.ResponseWriter, r *http.Request) {
-	if _, err := s.requireSession(r); err != nil {
+	if _, err := s.requireAdmin(r); err != nil {
 		writeErr(w, statusFor(err), err.Error())
 		return
 	}
@@ -1455,7 +1489,7 @@ func (s *Server) revoke(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) grant(w http.ResponseWriter, r *http.Request) {
-	if _, err := s.requireSession(r); err != nil {
+	if _, err := s.requireAdmin(r); err != nil {
 		writeErr(w, statusFor(err), err.Error())
 		return
 	}
@@ -1542,7 +1576,7 @@ func (s *Server) grant(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) revokeGrant(w http.ResponseWriter, r *http.Request) {
-	if _, err := s.requireSession(r); err != nil {
+	if _, err := s.requireAdmin(r); err != nil {
 		writeErr(w, statusFor(err), err.Error())
 		return
 	}
@@ -1621,7 +1655,7 @@ func (s *Server) revokeGrant(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) runnerAddr(w http.ResponseWriter, r *http.Request) {
-	if _, err := s.requireSession(r); err != nil {
+	if _, err := s.requireAdmin(r); err != nil {
 		writeErr(w, statusFor(err), err.Error())
 		return
 	}
@@ -1648,7 +1682,7 @@ func (s *Server) runnerAddr(w http.ResponseWriter, r *http.Request) {
 // ---- DNS ----
 
 func (s *Server) dnsList(w http.ResponseWriter, r *http.Request) {
-	if _, err := s.requireSession(r); err != nil {
+	if _, err := s.requireAdmin(r); err != nil {
 		writeErr(w, statusFor(err), err.Error())
 		return
 	}
@@ -1693,7 +1727,7 @@ type dnsReq struct {
 }
 
 func (s *Server) dnsUpsert(w http.ResponseWriter, r *http.Request) {
-	if _, err := s.requireSession(r); err != nil {
+	if _, err := s.requireAdmin(r); err != nil {
 		writeErr(w, statusFor(err), err.Error())
 		return
 	}
@@ -1723,7 +1757,7 @@ func (s *Server) dnsUpsert(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) dnsRemove(w http.ResponseWriter, r *http.Request) {
-	if _, err := s.requireSession(r); err != nil {
+	if _, err := s.requireAdmin(r); err != nil {
 		writeErr(w, statusFor(err), err.Error())
 		return
 	}
@@ -1763,7 +1797,7 @@ func (s *Server) syncResolver() error {
 // ---- runner channel view ----
 
 func (s *Server) runnerChannel(w http.ResponseWriter, r *http.Request, name string) {
-	if _, err := s.requireSession(r); err != nil {
+	if _, err := s.requireAdmin(r); err != nil {
 		writeErr(w, statusFor(err), err.Error())
 		return
 	}
@@ -1846,8 +1880,56 @@ func isProfileMessage(e map[string]interface{}) bool {
 
 // ---- agents ----
 
+// jobsList is the scheduled-jobs read — the ONE route a member role reaches.
+// Ownership is the privacy boundary: an owner's own rows carry the prompt and
+// label; every other row is metadata only (owner npub, agent npub, channel,
+// schedule, last run, created date) — the operator included. A member sees
+// ONLY their own rows; the operator (and the loopback posture) sees all.
+func (s *Server) jobsList(w http.ResponseWriter, r *http.Request) {
+	pk, role, err := s.sessionFor(r)
+	if err != nil {
+		writeErr(w, statusFor(err), err.Error())
+		return
+	}
+	if err := checkOrigin(r, s.PublicOrigin); err != nil {
+		writeErr(w, http.StatusForbidden, err.Error())
+		return
+	}
+	if s.AgentToolsDir == "" {
+		writeJSON(w, http.StatusOK, map[string]interface{}{"jobs": []interface{}{}})
+		return
+	}
+	jobs, err := agenttools.LoadJobsReadOnly(filepath.Join(s.AgentToolsDir, agenttools.JobsFile))
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	isOperator := s.Auth == nil || role == RoleOperator
+	out := make([]map[string]interface{}, 0, len(jobs))
+	for _, j := range jobs {
+		mine := pk != "" && j.Owner == pk
+		if !isOperator && !mine {
+			continue // a member sees only their own jobs
+		}
+		row := map[string]interface{}{
+			"id": j.ID, "owner": j.Owner, "agent": j.Agent, "channel": j.Channel,
+			"cron": j.Cron, "at": j.At, "tz": j.TZ,
+			"created_at": j.CreatedAt, "next_run_at": j.NextRunAt, "paused": j.Paused,
+		}
+		if last := j.LastRun(); last != nil {
+			row["last_run"] = last
+		}
+		if mine {
+			row["label"] = j.Label
+			row["prompt"] = j.Prompt
+		}
+		out = append(out, row)
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"jobs": out})
+}
+
 func (s *Server) agentsList(w http.ResponseWriter, r *http.Request) {
-	if _, err := s.requireSession(r); err != nil {
+	if _, err := s.requireAdmin(r); err != nil {
 		writeErr(w, statusFor(err), err.Error())
 		return
 	}
@@ -1913,7 +1995,7 @@ type agentReq struct {
 }
 
 func (s *Server) agentsRegister(w http.ResponseWriter, r *http.Request) {
-	if _, err := s.requireSession(r); err != nil {
+	if _, err := s.requireAdmin(r); err != nil {
 		writeErr(w, statusFor(err), err.Error())
 		return
 	}
@@ -1948,7 +2030,7 @@ func (s *Server) agentsRegister(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) agentsRemove(w http.ResponseWriter, r *http.Request, name string) {
-	if _, err := s.requireSession(r); err != nil {
+	if _, err := s.requireAdmin(r); err != nil {
 		writeErr(w, statusFor(err), err.Error())
 		return
 	}

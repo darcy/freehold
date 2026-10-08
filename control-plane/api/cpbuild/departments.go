@@ -729,6 +729,18 @@ func (s *Spec) doorToken(secret, ns string) ([]byte, error) {
 	return raw, nil
 }
 
+// litellmStorePath is the CP litellm store's ONE home: the CONSOLE's
+// world-secrets (the build's PutSecret lands there), never the Spec's own
+// StateDir — the two differ on the agent-tools server, whose litellm readers
+// (the per-agent key mint on every create/pod re-apply, the litellm door
+// keys, the rename re-key) must find the same store the build seeded — and
+// whose writes must not mint a second store under the agent-tools root. The
+// same invariant as sealedOwnerPath.
+func (s *Spec) litellmStorePath() (root, path string) {
+	root = s.consoleStateRoot()
+	return root, filepath.Join(root, "world-secrets", "litellm.json")
+}
+
 // litellmDoorKeys opens the CP's durable litellm store in memory and returns
 // the gateway master key, the provider key, and the operator's first-build
 // provider choice (prefix + model — the build's picker recorded them as
@@ -737,11 +749,11 @@ func (s *Spec) doorToken(secret, ns string) ([]byte, error) {
 // that predates the choice rode the freehold default (fireworks glm), which
 // the curated table recovers.
 func (s *Spec) litellmDoorKeys() (master, provider []byte, prefix, model string, err error) {
-	path := filepath.Join(s.StateDir, "world-secrets", "litellm.json")
+	root, path := s.litellmStorePath()
 	if !cert.CredExists(path) {
 		return nil, nil, "", "", fmt.Errorf("no CP litellm store at %s yet — the litellm-api-admin door waits for the services phase", path)
 	}
-	secret, err := s.consoleEncSecret()
+	secret, err := s.consoleEncSecretAt(root)
 	if err != nil {
 		return nil, nil, "", "", err
 	}
@@ -912,14 +924,16 @@ func litellmAgentKeyEnvKey(pod string) string {
 }
 
 // litellmStoreEnv opens the CP's durable litellm store in memory and returns
-// its path, the console sealing secret, and the env map, so callers can add
-// entries (per-agent keys) and re-seal. Plaintext lives in memory only.
+// its path (console-rooted — litellmStorePath), the console sealing secret,
+// and the env map, so callers can add entries (per-agent keys) and re-seal.
+// Plaintext lives in memory only.
 func (s *Spec) litellmStoreEnv() (path string, secret []byte, env map[string]string, err error) {
-	path = filepath.Join(s.StateDir, "world-secrets", "litellm.json")
+	root, storePath := s.litellmStorePath()
+	path = storePath
 	if !cert.CredExists(path) {
 		return "", nil, nil, fmt.Errorf("no CP litellm store at %s yet", path)
 	}
-	if secret, err = s.consoleEncSecret(); err != nil {
+	if secret, err = s.consoleEncSecretAt(root); err != nil {
 		return "", nil, nil, err
 	}
 	open := func(sec, aad, blob []byte) ([]byte, error) { return crypto.Open(sec, aad, blob) }
@@ -1062,7 +1076,7 @@ func (s *Spec) revokeAgentLitellmKey(name string) error {
 // functional drifts). A world without a store, or a key never minted, is a
 // no-op (the create under the new name mints fresh).
 func (s *Spec) moveLitellmKeyRecord(oldPod, newPod string) error {
-	path := filepath.Join(s.StateDir, "world-secrets", "litellm.json")
+	_, path := s.litellmStorePath()
 	if !cert.CredExists(path) {
 		return nil
 	}

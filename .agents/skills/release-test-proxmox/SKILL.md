@@ -405,15 +405,22 @@ Seeded by `release-prepare`; each row is ✅ only on its own evidence below.
 
 - **Side-load the Buzz relay images before the first fresh build.** Each fresh
   test mints a NEW relay LXC that must pull `ghcr.io/block/buzz:main`,
-  `postgres:17-alpine`, `redis:7-alpine`, `quay.io/minio/minio:*`, and
-  `quay.io/minio/mc:*` — and anonymous pulls are rate-limited per-IP
-  (`unauthorized: access to the requested resource is not authorized` → the
-  relay deploy dies at `run.sh start`). Copy them from a running world's relay
-  (the dev env's) into the fresh relay on the host:
+  `postgres:17-alpine`, `redis:7-alpine`, `rustfs/rustfs:1.0.1`, `pgsty/mc`,
+  `pgsty/silo`, and `alpine` — and anonymous pulls are rate-limited per-IP
+  (a pull that 401s or rate-limits kills the relay deploy — the first pulls
+  surface at the git chown `docker compose run` and the engine `up`, well
+  before `./run.sh start`; MinIO's own registries are dead — quay 401s,
+  dl.min.io is 410 — so nothing pulls `minio/*` anymore). Copy them from a
+  running world's relay   (the dev env's) into the fresh relay on the host. Pull and save the three
+  digest-pinned images BY DIGEST — a tag-pulled image may not carry the index
+  digest the compose pins (`image: tag@sha256:…`), and a digest mismatch sends
+  the fresh relay back to the registry:
   ```bash
-  for img in ghcr.io/block/buzz:main postgres:17-alpine \
-      quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z \
-      quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z redis:7-alpine; do
+  for img in ghcr.io/block/buzz:main postgres:17-alpine redis:7-alpine alpine \
+      rustfs/rustfs@sha256:1803faef57627e2d9c2e7d89d655d712ddded5389040054987163043fecb6a3c \
+      pgsty/silo@sha256:635197cb9f36d01bee221d34d1c7d7960f6a95c48b0b6c01d99cd13bdae51a46 \
+      pgsty/mc@sha256:cfc83108c3abb371f8fb84d99c1fdc88f8c237e022409b0081fb7c0a3be634dd; do
+    pct exec <dev-relay-vmid> -- docker pull "$img"
     pct exec <dev-relay-vmid> -- docker save "$img" | pct exec <fresh-relay-vmid> -- docker load
   done
   ```

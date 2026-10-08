@@ -49,6 +49,18 @@ variable "pool" {
   type    = string
   default = "local-lvm"
 }
+# The plane kind ("" = the LVM/ZFS carve; "dir" = the VPS host-dirs plane,
+# plane.sh no-ops). The LXC rootfs storage NAME (lxc.sh reads it as
+# LXC_STORAGE): local-lvm on the LAN world; a dir-backend world passes its
+# dir storage.
+variable "plane_kind" {
+  type    = string
+  default = ""
+}
+variable "rootfs_storage" {
+  type    = string
+  default = "local-lvm"
+}
 variable "vg" {
   type    = string
   default = "pve"
@@ -115,7 +127,7 @@ resource "null_resource" "plane" {
     lv_size = var.lv_size_gb
   }
   provisioner "local-exec" {
-    command = "${path.module}/scripts/plane.sh ${var.domain_dash} \"${var.vg}\" \"${var.thin_pool}\" \"${var.lv_size_gb}\""
+    command = "PLANE_KIND=${var.plane_kind} ${path.module}/scripts/plane.sh ${var.domain_dash} \"${var.vg}\" \"${var.thin_pool}\" \"${var.lv_size_gb}\""
   }
   # no destroy: the durable plane survives teardown by design (--data path).
 }
@@ -135,7 +147,7 @@ resource "null_resource" "lxc_cp" {
   depends_on = [null_resource.plane]
   triggers   = { vmid = var.vmid_cp, template = var.template, host = var.host_cp, mem = var.memory_mb, root = var.rootfs_gb }
   provisioner "local-exec" {
-    command = "${path.module}/scripts/lxc.sh ${var.vmid_cp} \"${var.template}\" ${var.node_name} ${var.host_cp} ${var.memory_mb} ${var.rootfs_gb} - - '${local.mount_cp}' apply"
+    command = "LXC_STORAGE=${var.rootfs_storage} ${path.module}/scripts/lxc.sh ${var.vmid_cp} \"${var.template}\" ${var.node_name} ${var.host_cp} ${var.memory_mb} ${var.rootfs_gb} - - '${local.mount_cp}' apply"
   }
 }
 
@@ -143,7 +155,7 @@ resource "null_resource" "lxc_relay" {
   depends_on = [null_resource.plane]
   triggers   = { vmid = var.vmid_relay, template = var.template, host = var.host_relay, mem = var.memory_mb, root = var.rootfs_gb }
   provisioner "local-exec" {
-    command = "${path.module}/scripts/lxc.sh ${var.vmid_relay} \"${var.template}\" ${var.node_name} ${var.host_relay} ${var.memory_mb} ${var.rootfs_gb} - - '${local.mount_relay}' apply"
+    command = "LXC_STORAGE=${var.rootfs_storage} ${path.module}/scripts/lxc.sh ${var.vmid_relay} \"${var.template}\" ${var.node_name} ${var.host_relay} ${var.memory_mb} ${var.rootfs_gb} - - '${local.mount_relay}' apply"
   }
 }
 
@@ -151,7 +163,7 @@ resource "null_resource" "lxc_k3s" {
   depends_on = [null_resource.plane]
   triggers   = { vmid = var.vmid_k3s, template = var.template, host = var.host_k3s, mem = var.memory_mb, root = var.rootfs_gb }
   provisioner "local-exec" {
-    command = "${path.module}/scripts/lxc.sh ${var.vmid_k3s} \"${var.template}\" ${var.node_name} ${var.host_k3s} ${var.memory_mb} ${var.rootfs_gb} ${local.k3s_cidr} ${var.k3s_gw} '${local.mount_k3s}' apply"
+    command = "LXC_STORAGE=${var.rootfs_storage} ${path.module}/scripts/lxc.sh ${var.vmid_k3s} \"${var.template}\" ${var.node_name} ${var.host_k3s} ${var.memory_mb} ${var.rootfs_gb} ${local.k3s_cidr} ${var.k3s_gw} '${local.mount_k3s}' apply"
   }
 }
 

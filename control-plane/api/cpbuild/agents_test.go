@@ -1,12 +1,16 @@
 package cpbuild
 
 import (
+	"encoding/hex"
+	"fmt"
+	"os"
 	"path/filepath"
 	"reflect"
 	"testing"
 
 	"freehold/agents"
 	"freehold/contract/console"
+	"freehold/contract/crypto"
 	"freehold/control-plane/api/agent"
 )
 
@@ -62,7 +66,7 @@ func TestCPANameOrDefault(t *testing.T) {
 // threads) + the CPA.
 func TestRespondAllowlist(t *testing.T) {
 	root := t.TempDir()
-	s := &Spec{OwnerPub: "op", CpaName: "boss", AgentIdentityDir: root}
+	s := &Spec{OwnerPub: "op", CpaName: "boss", AgentIdentityDir: root, StateDir: root + "/agent-tools"}
 	for _, name := range append([]string{"boss"}, agents.DepartmentNames()...) {
 		if _, err := agent.EnsureIdentity(filepath.Join(root, "agents", sanitizeDir(name))); err != nil {
 			t.Fatalf("mint %s identity: %v", name, err)
@@ -72,14 +76,30 @@ func TestRespondAllowlist(t *testing.T) {
 	if cpa == "" {
 		t.Fatal("CPA identity pubkey unreadable")
 	}
-	want := "op," + cpa
+	// The console identity (the scheduled-jobs fire path) rides every
+	// allowlist: seed it under the state root the Spec derives.
+	consoleSec := make([]byte, 32)
+	consoleSec[0] = 0x77
+	consolePK, err := crypto.PubkeyFromSecret(consoleSec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	consoleDir := filepath.Join(root, "control-plane")
+	if err := os.MkdirAll(filepath.Join(consoleDir, "console"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	idJSON := fmt.Sprintf(`{"nostr_secret_hex":%q}`, hex.EncodeToString(consoleSec))
+	if err := os.WriteFile(filepath.Join(consoleDir, "console", "identity.json"), []byte(idJSON), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	want := "op," + cpa + "," + consolePK
 	for _, dep := range agents.DepartmentNames() {
 		want += "," + s.identityPubkey(dep)
 	}
 	if got := s.respondAllowlist("network"); got != want {
 		t.Fatalf("department allowlist = %q, want %q", got, want)
 	}
-	if got := s.respondAllowlist("helper"); got != "op,"+cpa {
-		t.Fatalf("custom allowlist = %q, want op + the CPA", got)
+	if got := s.respondAllowlist("helper"); got != "op,"+cpa+","+consolePK {
+		t.Fatalf("custom allowlist = %q, want op + the CPA + the console identity", got)
 	}
 }

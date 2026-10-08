@@ -639,6 +639,7 @@ func doorKeyWaiting(out string) string {
 func (m *Model) refreshLocal() {
 	m.refreshRunners(m.cfg)
 	m.buildAgents(m.cfg)
+	m.buildJobs()
 	// buildAgents fetched the world facts (plane/certs/domains) — re-run the
 	// Certs + DATA views so a management/login-only box renders them from the
 	// CP (the boot check runs before auto-login, when the facts aren't loaded
