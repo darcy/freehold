@@ -704,24 +704,40 @@ func PublishProfileAuth(dialURL, authURL string, secret []byte, name, about stri
 	return PublishEventJSONAuth(dialURL, authURL, secret, string(evBytes))
 }
 
-// IsCommunityMember reports whether pubkey is a member of the relay's
-// community, by querying the relay-signed NIP-43 membership list events
-// (kind 13534) p-tagging them — the same list `buzz-admin add-member`
-// publishes. Console-login's member role uses it: any relay member may hold a
-// jobs-scoped session; the admin whitelist stays the operator gate.
-func IsCommunityMember(relayURL string, authSecret []byte, relayPubkey, memberPubkey string) (bool, error) {
+// IsCommunityMemberAuth reports whether pubkey is a member of the relay's
+// community, read from the relay's NIP-43 membership list (kind 13534, signed
+// by the relay key — the same list `buzz-admin add-member` maintains; members
+// ride `member` tags, NOT p-tags, so the event is fetched and scanned
+// client-side). Console-login's member role uses it: any relay member may
+// hold a jobs-scoped session; the admin whitelist stays the operator gate.
+// Dial + canonical auth URL separated (the relay rejects an auth whose `u`
+// is the LAN origin).
+func IsCommunityMemberAuth(dialURL, authURL string, authSecret []byte, relayPubkey, memberPubkey string) (bool, error) {
 	if relayPubkey == "" || memberPubkey == "" {
 		return false, fmt.Errorf("relay pubkey or member pubkey missing")
 	}
-	filter := map[string]interface{}{
-		"kinds":   []interface{}{13534},
-		"authors": []interface{}{relayPubkey},
-		"#p":      []interface{}{memberPubkey},
-		"limit":   1,
-	}
-	events, err := QueryEvents(relayURL, authSecret, []interface{}{filter})
+	events, err := QueryEventsAuth(dialURL, authURL, authSecret, []interface{}{map[string]interface{}{
+		"kinds": []interface{}{13534}, "authors": []interface{}{relayPubkey}, "limit": 1,
+	}})
 	if err != nil {
 		return false, err
 	}
-	return len(events) > 0, nil
+	for _, ev := range events {
+		raw, ok := ev["tags"].([]interface{})
+		if !ok {
+			continue
+		}
+		for _, t := range raw {
+			row, ok := t.([]interface{})
+			if !ok || len(row) < 2 {
+				continue
+			}
+			kind, _ := row[0].(string)
+			pk, _ := row[1].(string)
+			if kind == "member" && pk == memberPubkey {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
 }

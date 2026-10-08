@@ -2679,6 +2679,17 @@ func BuildCreateAgentFn(spec *Spec) agent.CreateAgentFn {
 						}
 					}
 				}
+				// The CONSOLE identity rides every channel too — it is the
+				// scheduled-jobs fire identity (its mentions wake the agent).
+				// Signed by the CPA (the owner); a world where the console and
+				// operator coincide skips the duplicate.
+				if consolePK := spec.consolePubkey(); consolePK != "" && consolePK != spec.OwnerPub {
+					if member, merr := relay.IsMemberAuth(spec.relayDial(), authURL, cpaSec, channelID, consolePK); merr != nil || !member {
+						if err := relay.PutUserChannelAuth(spec.relayDial(), authURL, cpaSec, channelID, consolePK); err != nil {
+							return "", fmt.Errorf("add console identity to #freehold: %w", err)
+						}
+					}
+				}
 				joined = append(joined, channelRef{channelID, channelName})
 				continue
 			}
@@ -2694,6 +2705,15 @@ func BuildCreateAgentFn(spec *Spec) agent.CreateAgentFn {
 					if perr != nil && created {
 						return "", fmt.Errorf("add operator to %s: %w", channelName, perr)
 					}
+				}
+			}
+			// The console identity (the scheduled-jobs fire identity) rides
+			// every agent channel — best-effort like the CPA add below: a
+			// pre-existing private channel its signer doesn't own refuses,
+			// and the fire path reports the refusal at create/fire time.
+			if consolePK := spec.consolePubkey(); consolePK != "" && consolePK != spec.OwnerPub {
+				if member, merr := relay.IsMemberAuth(spec.relayDial(), authURL, nSec, channelID, consolePK); merr != nil || !member {
+					_ = relay.PutUserChannelAuth(spec.relayDial(), authURL, nSec, channelID, consolePK)
 				}
 			}
 			joined = append(joined, channelRef{channelID, channelName})

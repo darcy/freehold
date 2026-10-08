@@ -2,6 +2,7 @@ package agenttools
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -344,5 +345,39 @@ func TestSchedulerRunDisabledWithoutSecret(t *testing.T) {
 	case <-done:
 	case <-time.After(time.Second):
 		t.Fatal("Run did not return")
+	}
+}
+
+func TestTickOneShotFailedPostRequeuesAndPauses(t *testing.T) {
+	store := mkStore(t)
+	now := time.Unix(1_800_000_000, 0)
+	if err := store.Create(&Job{ID: "j1", Owner: "ccdd", Agent: "cpa", Channel: "ch1",
+		At: uint64(now.Unix()), Prompt: "remind me"}); err != nil {
+		t.Fatal(err)
+	}
+	s, _, _ := mkSched(t, store, map[string]string{"cpa": "aabb"})
+	clock := now
+	s.Now = func() time.Time { return clock }
+	s.Post = func(channel, mention, content string) error {
+		return errors.New("event publish returned HTTP 400: refused")
+	}
+	for i := 0; i < 4; i++ {
+		s.TickNow()
+		j, _ := store.Get("j1")
+		if j.Paused {
+			t.Fatalf("job paused after %d failures, want re-queue until 5", i+1)
+		}
+		if j.At != uint64(clock.Add(oneShotRetry).Unix()) {
+			t.Fatalf("attempt %d: At = %d, want re-queued +%v", i+1, j.At, oneShotRetry)
+		}
+		clock = clock.Add(oneShotRetry)
+	}
+	s.TickNow()
+	j, _ := store.Get("j1")
+	if !j.Paused {
+		t.Error("5 consecutive failed posts must pause the job")
+	}
+	if last := j.LastRun(); last == nil || last.Status != RunError {
+		t.Errorf("last run = %+v, want error", last)
 	}
 }

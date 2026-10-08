@@ -249,11 +249,14 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 
 // isRelayMember checks the relay's community membership list (kind 13534,
 // relay-signed) for the pubkey — the member-role gate for console login.
+// Dialed + signed over the console's own dial/auth URL pair (an auth whose
+// `u` is the LAN origin is refused by the relay).
 func (s *Server) isRelayMember(snap state.ControlPlaneState, pubkey string) (bool, error) {
 	if snap.RelayURL == nil || snap.RelayPubkey == nil || len(s.ConsoleSecret) != 32 {
 		return false, fmt.Errorf("relay not configured (need relay_url + relay_pubkey + the console identity)")
 	}
-	return relay.IsCommunityMember(*snap.RelayURL, s.ConsoleSecret, *snap.RelayPubkey, pubkey)
+	dial, auth := s.relayDialAuth(snap)
+	return relay.IsCommunityMemberAuth(dial, auth, s.ConsoleSecret, *snap.RelayPubkey, pubkey)
 }
 
 func (s *Server) portalToken(w http.ResponseWriter, r *http.Request) {

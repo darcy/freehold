@@ -76,6 +76,10 @@ type Job struct {
 	CreatedAt uint64 `json:"created_at"`
 	NextRunAt uint64 `json:"next_run_at"`
 	Paused    bool   `json:"paused,omitempty"`
+	// Retry counts consecutive failed POSTS on a one-shot (the relay refused
+	// or errored the publish — the fire provably never went out, so the job
+	// re-queues instead of consuming itself). Five in a row pauses the job.
+	Retry int `json:"retry,omitempty"`
 	// Runs is the capped run ledger, oldest first.
 	Runs []JobRun `json:"runs,omitempty"`
 }

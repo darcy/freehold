@@ -128,7 +128,7 @@ func (s *Scheduler) poll(channel string, since int64) ([]delegate.PollResult, er
 	if s.Poll != nil {
 		return s.Poll(channel, since)
 	}
-	return delegate.PollStream(s.DialURL, s.Secret, channel, since)
+	return delegate.PollStreamAuth(s.DialURL, s.authURL(), s.Secret, channel, since)
 }
 
 func (s *Scheduler) authURL() string {
@@ -304,8 +304,18 @@ func (s *Scheduler) TickNow() {
 			_ = s.Jobs.recordRun(j.ID, JobRun{FiredAt: nowUnix, Status: RunError,
 				Detail: "fire failed: " + err.Error()})
 			if oneShotDone {
-				// The one-shot consumed itself on a failed post — at-most-once.
-				// The error run is the record; the asker re-asks if it matters.
+				// A failed post provably never went out — re-queue the one-shot
+				// instead of consuming it; five consecutive failures pause the
+				// job (a permanently refusing channel must not hot-loop).
+				_ = s.Jobs.Update(j.ID, func(j *Job) bool {
+					j.Retry++
+					if j.Retry >= 5 {
+						j.Paused = true
+						return true
+					}
+					j.At = nowUnix + uint64(oneShotRetry.Seconds())
+					return true
+				})
 			}
 			continue
 		}
@@ -354,6 +364,7 @@ func (s *Scheduler) resolveOpenRuns(now time.Time, byPK map[string]string) {
 			// Still inside the window — but an early reply closes it now.
 			msgs, err := s.poll(j.Channel, firedAt)
 			if err != nil {
+				log.Printf("scheduled jobs: reply poll for %s failed: %v", j.ID, err)
 				continue // transient; the next tick re-checks
 			}
 			if agentReplied(msgs, agentPK, firedAt) {

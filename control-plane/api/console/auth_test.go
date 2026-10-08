@@ -291,34 +291,23 @@ func TestLoginRejects(t *testing.T) {
 // (with the prompt), the operator sees every row metadata-only (never a
 // prompt), and a member session is refused the admin surface.
 func TestMemberLoginAndJobRedaction(t *testing.T) {
-	// Fake relay: /query answers with a relay-signed-shaped 13534 event array
-	// (the client only checks the array; the member npub is in the request's
-	// #p filter, which we echo).
-	relaySrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var filters []map[string]interface{}
-		_ = json.NewDecoder(r.Body).Decode(&filters)
-		want := ""
-		if len(filters) > 0 {
-			if ps, ok := filters[0]["#p"].([]interface{}); ok && len(ps) > 0 {
-				want, _ = ps[0].(string)
-			}
-		}
-		var events []map[string]interface{}
-		if want != "" {
-			events = append(events, map[string]interface{}{
-				"id": strings.Repeat("ab", 32), "pubkey": strings.Repeat("cd", 32),
-				"created_at": time.Now().Unix(), "kind": 13534, "tags": [][]string{{"p", want}}, "content": "", "sig": strings.Repeat("ef", 96),
-			})
-		}
-		_ = json.NewEncoder(w).Encode(events)
-	}))
-	defer relaySrv.Close()
-
+	// Fake relay: /query answers with the relay's membership list (ONE
+	// kind-13534 event whose `member` tags name the members — the shape the
+	// pinned buzz relay serves; the client scans them client-side).
 	adminSec := adminSecret()
 	adminPK, _ := crypto.PubkeyFromSecret(adminSec)
 	memberSec := make([]byte, 32)
 	memberSec[0] = 0x99
 	memberPK, _ := crypto.PubkeyFromSecret(memberSec)
+	relaySrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		events := []map[string]interface{}{{
+			"id": strings.Repeat("ab", 32), "pubkey": strings.Repeat("cd", 32),
+			"created_at": time.Now().Unix(), "kind": 13534,
+			"tags":       [][]string{{"member", memberPK, "member"}}, "content": "", "sig": strings.Repeat("ef", 96),
+		}}
+		_ = json.NewEncoder(w).Encode(events)
+	}))
+	defer relaySrv.Close()
 
 	dir := t.TempDir()
 	store, err := state.Open(dir)
