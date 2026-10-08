@@ -145,6 +145,15 @@ func (s *Spec) tfVars() ([]string, error) {
 	if s.PlanePool != "" {
 		vars = append(vars, "-var", "vg="+s.PlanePool)
 	}
+	// The rootfs storage name + plane kind ride only when recorded: the LAN
+	// defaults are the scripts' own, and an explicit empty -var would defeat
+	// them.
+	if s.StorageName != "" && s.StorageName != "local-lvm" {
+		vars = append(vars, "-var", "rootfs_storage="+s.StorageName)
+	}
+	if s.PlaneKind != "" {
+		vars = append(vars, "-var", "plane_kind="+s.PlaneKind)
+	}
 	if s.SizeGB > 0 {
 		vars = append(vars, "-var", "lv_size_gb="+strconv.FormatUint(s.SizeGB, 10))
 	}

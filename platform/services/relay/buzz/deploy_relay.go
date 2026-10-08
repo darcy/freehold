@@ -12,8 +12,10 @@ import (
 	"freehold/platform/provisioning/deploy"
 )
 
-// DefaultBufRef is the pinned block/buzz ref to fetch.
-const DefaultBufRef = "f956e6fe06a76e50cbd8fba1a162482e752e7f1a"
+// DefaultBufRef is the pinned block/buzz ref to fetch. On main past
+// 1972b7d the compose's minio images moved to pgsty/silo+mc (Docker Hub,
+// sha-pinned) — quay's minio repo went private and every pull 401s.
+const DefaultBufRef = "1972b7d256a5d0bb90eea6ef78e93d6b55bb1a12"
 
 // checkDocker passes the B1 gate: docker + compose must exist on the target
 // (or inside its LXC).

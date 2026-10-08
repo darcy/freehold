@@ -323,6 +323,8 @@ var storageEnsureCmd = &cobra.Command{
 		case planebase.KindLvmThin:
 			mounts, err = drive.ResolveLvmMounts(exec, pool, domain, t,
 				mustU64(cmd, "size-gb"), mustU64(cmd, "pool-size-gb"), thinPool)
+		case planebase.KindDir:
+			mounts, err = drive.ResolveDirMounts(exec, domain, t)
 		}
 		if err != nil {
 			return err
@@ -330,6 +332,9 @@ var storageEnsureCmd = &cobra.Command{
 		kindOut := "zfs"
 		if kind == planebase.KindLvmThin {
 			kindOut = "lvmth"
+		}
+		if kind == planebase.KindDir {
+			kindOut = "dir"
 		}
 		fmt.Printf("STORAGE-BACKEND: %s %s\n", kindOut, pool)
 		for _, m := range mounts {
@@ -512,8 +517,10 @@ func parseKind(exec proxmox.ExecFunc, kindFlag string) (planebase.BackendKind, *
 		return planebase.KindZfs, nil, nil
 	case "lvmth":
 		return planebase.KindLvmThin, nil, nil
+	case "dir":
+		return planebase.KindDir, nil, nil
 	default:
-		return "", nil, fmt.Errorf("unknown storage backend kind: %s (expected zfs|lvmth)", kindFlag)
+		return "", nil, fmt.Errorf("unknown storage backend kind: %s (expected zfs|lvmth|dir)", kindFlag)
 	}
 	action, err := drive.ResolveProxmox(exec, false, nil)
 	if err != nil {

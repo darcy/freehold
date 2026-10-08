@@ -17,6 +17,7 @@ import (
 	"freehold/contract/config"
 	"freehold/contract/console"
 	"freehold/contract/crypto"
+	"freehold/contract/litellm"
 	"freehold/freehold-cli/internal/certcred"
 	"freehold/freehold-cli/internal/common"
 	oplogin "freehold/freehold-cli/login"
@@ -492,7 +493,31 @@ func (e *buildEngine) litellmSecretMaterial(cfg *config.Config) (string, string,
 		}
 	}
 	if e.F.Yes {
-		return "", "", gatewaySetup{}, fmt.Errorf("the litellm gateway needs a provider + model, collected interactively — run `freehold build` once without --non-interactive (the AI department retargets it later through litellm-api-admin)")
+		// Headless: the provider rides the env (the secret discipline —
+		// values ride env, never argv). LITELLM_PROVIDER names the curated
+		// provider (anthropic, fireworks_ai, …); its key rides
+		// LITELLM_PROVIDER_KEY; LITELLM_MODEL overrides the provider's
+		// default. The AI department retargets the gateway later through
+		// litellm-api-admin.
+		provName := strings.TrimSpace(os.Getenv("LITELLM_PROVIDER"))
+		key := strings.TrimSpace(os.Getenv("LITELLM_PROVIDER_KEY"))
+		switch {
+		case provName == "" && key == "":
+			return "", "", gatewaySetup{}, fmt.Errorf("the litellm gateway needs a provider + model, collected interactively — run `freehold build` once without --non-interactive (or set LITELLM_PROVIDER + LITELLM_PROVIDER_KEY; the AI department retargets it later through litellm-api-admin)")
+		case provName == "":
+			return "", "", gatewaySetup{}, fmt.Errorf("LITELLM_PROVIDER is unset (the curated slug: anthropic|fireworks_ai|openai|gemini|…)")
+		case key == "":
+			return "", "", gatewaySetup{}, fmt.Errorf("LITELLM_PROVIDER_KEY is unset — the %s gateway needs its API key (env, never argv)", provName)
+		}
+		p := litellm.Get(provName)
+		if p == nil {
+			return "", "", gatewaySetup{}, fmt.Errorf("unknown LITELLM_PROVIDER %q (the curated set: fireworks_ai, openai, anthropic, gemini, …)", provName)
+		}
+		model := strings.TrimSpace(os.Getenv("LITELLM_MODEL"))
+		if model == "" {
+			model = p.DefaultModel
+		}
+		return masterKey, postgresPw, gatewaySetup{Provider: p.Prefix, Model: model, Key: key}, nil
 	}
 	gw, err := e.collectGatewaySetup()
 	if err != nil {

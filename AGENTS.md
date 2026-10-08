@@ -100,7 +100,7 @@ task is resumable without re-deriving where it stopped.
 
 `.envs.yml` at the repo root (gitignored — it maps this operator box's profiles) is the
 source of truth for what each world is. Role keys — `dev`, `test-<provider>-<env>`
-(`test-proxmox-rebuild`, `test-proxmox-live`; Vultr slots in later), `prod` — each hold a
+(`test-proxmox-rebuild`, `test-proxmox-live`; Vultr slots in when its e2e lands), `prod` — each hold a
 list of profile names (`freehold profiles`). A world is reached through the agent's own
 shells (tmux/herdr panes included) via the `freehold` CLI / SSH / doors — the file governs
 *which* worlds, not *how*.
@@ -119,7 +119,7 @@ shells (tmux/herdr panes included) via the `freehold` CLI / SSH / doors — the 
   codebase — a fix that lives only on the box isn't done until the PR merges and the update
   flow delivers it.
 - **test — release e2e only**, via `release-test-proxmox` (Fresh/Rebuild/Live; Proxmox
-  now, Vultr later), reached only after the dev deploy (`test-dev`) is green. Never a dev
+  now; the Vultr e2e is next), reached only after the dev deploy (`test-dev`) is green. Never a dev
   sandbox. Fresh is disposable; Rebuild/Live persist
   between releases.
 - **prod — review/debug only.** Observe, diagnose, report. No changes without the
@@ -149,19 +149,27 @@ shells (tmux/herdr panes included) via the `freehold` CLI / SSH / doors — the 
     and product direction.
 - `freehold-cli/` — the local operator surface (top-level Go module): the `freehold` CLI
   + TUI, `login`/profiles, and the `install` surface. It gets a control plane up in an
-  environment (Proxmox today; Vultr/Hetzner providers come later) and a door to it; the
+  environment (Proxmox or a Vultr VPS today; Hetzner next) and a door to it; the
   shared provisioning engine lives in `platform/provisioning/box`. It drives the server
   only through the CP API or sibling binaries — it never links `control-plane/`. World
-  bring-up after install is `freehold build` from any box via the CP. `install` **requires `--name`
-  + `--host`**: the profile name scopes config + state to `profiles/<name>/` and prefixes
-  the guest LXCs `<name>-<role>`; the host is recorded in the profile (so a later
-  `uninstall --name` resolves it without the flag). A fresh plane also needs the relay/CP
-  domains + the proxy IP (the guided flow prompts), plus the operator's Buzz display name
+  bring-up after install is `freehold build` from any box via the CP. `install` **requires
+  `--name`** (the profile name scopes config + state to `profiles/<name>/` and prefixes
+  the guest LXCs `<name>-<role>`), and `--host` **unless the host provider creates it** —
+  a `--provider vultr` install derives it from the instance it creates (the profile
+  records it, so a later `uninstall --name` resolves it without the flag). The provider
+  owns its needs and the guided flow prompts for them (a created host's API key pasted
+  no-echo, never stored; headless reads the env / `--host-answer`); the substrate
+  defaults (storage/bridge/relay-gw) are the provider's too. A fresh
+  plane also needs the relay/CP
+  domains + the proxy IP where the provider doesn't derive it (the guided flow prompts), plus the operator's Buzz display name
   (`--display-name`) — the kind:0 profile the build publishes from it is what makes the
   desktop app skip its stock first-run onboarding. Re-running an existing name whose CP is
   **absent re-adopts** the plane's runner (identity preserved — the door rotates, never the
   Nostr/enc key), while a **live** CP is refused (reconcile with `freehold build`, drop it
-  with `teardown`/`uninstall`, or join it with `freehold login`). There is no `bootstrap`
+  with `teardown`/`uninstall`, or join it with `freehold login`). On an api-vultr world a
+  default uninstall leaves the instance RUNNING AND BILLING — the profile is kept as its
+  handle; `VULTR_API_KEY=... freehold uninstall --destroy-host` stops the bill. There is no
+  `bootstrap`
   alias — `install --non-interactive` is the headless surface. A world with no recorded name
   keeps the domain-derived LXC names, and durable-plane names stay domain-keyed.
 - **GitHub Releases** (not a repo file) — the released versions, their notes, and assets; the

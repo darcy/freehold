@@ -1,0 +1,300 @@
+package vultr
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+
+	"freehold/platform/provisioning"
+)
+
+// stubClientFor swaps the session client for one pointed at the test
+// server (the provider builds its own client from the session's key).
+func stubClientFor(t *testing.T, h http.Handler) {
+	t.Helper()
+	srv := httptest.NewServer(h)
+	t.Cleanup(srv.Close)
+	orig := clientForBuilder
+	clientForBuilder = func(s *provisioning.HostSession) (*Client, error) {
+		return &Client{Token: s.Answers["VULTR_API_KEY"], BaseURL: srv.URL, HTTP: srv.Client()}, nil
+	}
+	t.Cleanup(func() { clientForBuilder = orig })
+}
+
+func recordingSession(printed *[]string) (*provisioning.HostSession, *[]string) {
+	var scripts []string
+	s := &provisioning.HostSession{
+		// Mirrors production: the guided answers + the world name — the
+		// provider derives the label; no label answer is ever asked.
+		Answers:  map[string]string{"VULTR_API_KEY": "tok", "region": "ewr", "plan": "vc2-4c-8gb"},
+		World:    "demo",
+		DoorLine: "ssh-ed25519 AAA door",
+		Host:     "",
+		ExecOnHost: func(script string, timeoutSecs uint64) error {
+			scripts = append(scripts, script)
+			return nil
+		},
+		Print: func(format string, args ...any) {
+			if printed != nil {
+				*printed = append(*printed, strings.TrimSpace(format))
+			}
+		},
+	}
+	return s, &scripts
+}
+
+func TestVultrNeedsDeclareKeyAndAnswers(t *testing.T) {
+	needs := (HostProvider{}).Needs()
+	var hasSecret, hasRegion, hasPlan bool
+	for _, n := range needs {
+		switch n.Name {
+		case "VULTR_API_KEY":
+			hasSecret = n.Secret
+		case "region":
+			hasRegion = n.Default != ""
+		case "plan":
+			hasPlan = n.Default != ""
+		case provisioning.NeedHost, provisioning.NeedProxyIP, provisioning.NeedConfirmStorage:
+			t.Errorf("a created-host provider must not need %q (it derives them)", n.Name)
+		}
+	}
+	if !hasSecret || !hasRegion || !hasPlan {
+		t.Fatalf("needs incomplete: %+v", needs)
+	}
+	if (HostProvider{}).HostsGateway() != true {
+		t.Error("the vultr host IS the gateway")
+	}
+	if d := (HostProvider{}).Defaults(); d["storage"] != "local" {
+		t.Errorf("the dir storage default missing: %v", d)
+	}
+}
+
+func TestVultrPrepareMintRunsPVEInstall(t *testing.T) {
+	creates := 0
+	stubClientFor(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/v2/ssh-keys" && r.Method == http.MethodGet:
+			w.Write([]byte(`{"ssh_keys":[]}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v2/ssh-keys":
+			// Pin the WIRE SHAPE: Vultr's create takes the key as
+			// `ssh_key` (the field its own list decode reads) — a wrong
+			// field passes hermetic stubs and 400s against the real API.
+			var kb map[string]string
+			if err := json.NewDecoder(r.Body).Decode(&kb); err != nil {
+				t.Errorf("ssh-key create body: %v", err)
+			}
+			if kb["ssh_key"] != "ssh-ed25519 AAA door" || kb["name"] == "" {
+				t.Errorf("ssh-key create body shape: %v", kb)
+			}
+			w.Write([]byte(`{"ssh_key":{"id":"k1"}}`))
+		case r.URL.Path == "/v2/regions":
+			w.Write([]byte(`{"regions":[{"id":"ewr"},{"id":"lax"}]}`))
+		case r.URL.Path == "/v2/plans":
+			w.Write([]byte(`{"plans":[{"id":"vc2-4c-8gb"}]}`))
+		case r.URL.Path == "/v2/os":
+			// The catalog the image derives from — the REAL shape (arch
+			// "x64"; the drift trap: Ubuntu behind a memorable id).
+			w.Write([]byte(`{"os":[{"id":1743,"name":"Ubuntu 22.04 x64","arch":"x64","family":"ubuntu"},{"id":2625,"name":"Debian 13 x64 (trixie)","arch":"x64","family":"debian"},{"id":2136,"name":"Debian 12 x64 (bookworm)","arch":"x64","family":"debian"}]}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v2/instances":
+			creates++
+			var body map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Errorf("create body: %v", err)
+			}
+			// The label is derived from the world (findable in the
+			// console when the stranded-handle recovery points at it);
+			// the image is the CATALOG's newest Debian, never a drifted id.
+			if body["label"] != "freehold-demo" || body["hostname"] != "freehold-demo" {
+				t.Errorf("create body label shape: %v", body)
+			}
+			if body["os_id"] != float64(2625) {
+				t.Errorf("create body os_id must derive from the catalog: %v", body["os_id"])
+			}
+			w.Write([]byte(`{"instance":{"id":"i-9"}}`))
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v2/instances/i-9"):
+			w.Write([]byte(`{"instance":{"status":"active","main_ip":"203.0.113.9"}}`))
+		default:
+			t.Errorf("unexpected call %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	s, scripts := recordingSession(nil)
+	host, err := (HostProvider{}).Prepare(context.Background(), s, "")
+	if err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	if host.ID != "i-9" || host.IP != "203.0.113.9" {
+		t.Fatalf("host: %+v", host)
+	}
+	if s.Host != "root@203.0.113.9" {
+		t.Fatalf("session host not set for ExecOnHost: %q", s.Host)
+	}
+	if creates != 1 {
+		t.Fatalf("expected one instance create, got %d", creates)
+	}
+	// The sshd wait + the PVE install both ride the session transport.
+	if len(*scripts) != 2 || !strings.Contains((*scripts)[1], "pve-install-ok") {
+		t.Fatalf("the PVE install must run through the session transport: %v", *scripts)
+	}
+	if s.CreatedID != "i-9" {
+		t.Fatalf("the created handle must ride the session the moment create succeeds: %q", s.CreatedID)
+	}
+}
+
+func TestVultrPrepareReAdoptAlive(t *testing.T) {
+	stubClientFor(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v2/instances/i-live") {
+			w.Write([]byte(`{"instance":{"status":"active","main_ip":"203.0.113.5"}}`))
+			return
+		}
+		t.Errorf("a live re-adopt must not touch the API beyond the verify: %s %s", r.Method, r.URL.Path)
+	}))
+	s, scripts := recordingSession(nil)
+	host, err := (HostProvider{}).Prepare(context.Background(), s, "i-live")
+	if err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	if host.ID != "i-live" || host.IP != "203.0.113.5" {
+		t.Fatalf("host: %+v", host)
+	}
+	// "alive" is not "ready": the re-adopt still runs the (idempotent) PVE
+	// ensure — an installed host short-circuits inside the script. Two
+	// scripts: the sshd probe, then the ensure.
+	if len(*scripts) != 2 || !strings.Contains((*scripts)[1], "pve-install-ok") {
+		t.Fatalf("a live re-adopt must ensure PVE through the transport: %v", *scripts)
+	}
+}
+
+func TestVultrPrepareRefusesOnLookupFailure(t *testing.T) {
+	stubClientFor(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			w.WriteHeader(http.StatusTooManyRequests)
+			w.Write([]byte(`{"error":"rate limited"}`))
+			return
+		}
+		t.Errorf("a failed verify must never create: %s %s", r.Method, r.URL.Path)
+	}))
+	s, _ := recordingSession(nil)
+	if _, err := (HostProvider{}).Prepare(context.Background(), s, "i-x"); err == nil {
+		t.Fatal("a rate-limited verify must fail loudly, not mint a second instance")
+	}
+}
+
+func TestVultrPreparePostCreateFailureCarriesHandle(t *testing.T) {
+	// The instance is created, then the PVE install fails (the transport
+	// refuses): the session must STILL carry the created handle — the
+	// caller records it, so a failed first mint never strands the bill.
+	old := sshdWaitTimeout
+	sshdWaitTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { sshdWaitTimeout = old })
+	stubClientFor(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/v2/ssh-keys" && r.Method == http.MethodGet:
+			w.Write([]byte(`{"ssh_keys":[]}`))
+		case r.URL.Path == "/v2/ssh-keys" && r.Method == http.MethodPost:
+			// Pin the WIRE SHAPE: Vultr's create takes the key as `ssh_key`
+			// (the field name its own list decode uses) — a wrong field
+			// passes hermetic stubs and 400s against the real API.
+			var body map[string]string
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Errorf("ssh-key create body: %v", err)
+			}
+			if body["ssh_key"] != "ssh-ed25519 AAA door" || body["name"] == "" {
+				t.Errorf("ssh-key create body shape: %v", body)
+			}
+			w.Write([]byte(`{"ssh_key":{"id":"k1"}}`))
+		case r.URL.Path == "/v2/regions":
+			// The catalog the create validates against.
+			w.Write([]byte(`{"regions":[{"id":"ewr","city":"New Jersey"},{"id":"lax","city":"Los Angeles"}]}`))
+		case r.URL.Path == "/v2/plans":
+			w.Write([]byte(`{"plans":[{"id":"vc2-4c-8gb"},{"id":"voc-m-1c-8gb-50s"}]}`))
+		case r.Method == http.MethodPost && r.URL.Path == "/v2/instances":
+			w.Write([]byte(`{"instance":{"id":"i-stranded"}}`))
+		case r.Method == http.MethodGet && strings.HasPrefix(r.URL.Path, "/v2/instances/i-stranded"):
+			w.Write([]byte(`{"instance":{"status":"active","main_ip":"203.0.113.11"}}`))
+		case r.URL.Path == "/v2/regions":
+			w.Write([]byte(`{"regions":[{"id":"ewr"}]}`))
+		case r.URL.Path == "/v2/plans":
+			w.Write([]byte(`{"plans":[{"id":"vc2-4c-8gb"}]}`))
+		case r.URL.Path == "/v2/os":
+			w.Write([]byte(`{"os":[{"id":2440,"name":"Debian 13 x64","arch":"x86_64","family":"debian"}]}`))
+		default:
+			// This box's port-watcher probes new listeners with GET /
+			// (observed live) — environment noise, not the client.
+			if r.Method != http.MethodGet || r.URL.Path != "/" {
+				t.Errorf("unexpected call %s %s", r.Method, r.URL.Path)
+			}
+		}
+	}))
+	s, scripts := recordingSession(nil)
+	s.ExecOnHost = func(script string, timeoutSecs uint64) error {
+		*scripts = append(*scripts, script)
+		return errors.New("ssh: connection refused")
+	}
+	_, err := (HostProvider{}).Prepare(context.Background(), s, "")
+	if err == nil {
+		t.Fatal("a failing transport must fail the PVE install")
+	}
+	if !strings.Contains(err.Error(), "i-stranded") {
+		t.Fatalf("the failure must name the billed instance: %v", err)
+	}
+	if s.CreatedID != "i-stranded" {
+		t.Fatalf("the handle must survive the failure: %q", s.CreatedID)
+	}
+}
+
+func TestVultrPrepareValidatesRegionAgainstCatalog(t *testing.T) {
+	// The live-fire finding: a continent group name ("AMER") is not a
+	// datacenter id — the create 400s "Invalid datacenter." deep in the
+	// API. The validation fails BEFORE the create, naming the valid set.
+	stubClientFor(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/v2/ssh-keys" && r.Method == http.MethodGet:
+			w.Write([]byte(`{"ssh_keys":[]}`))
+		case r.URL.Path == "/v2/regions":
+			w.Write([]byte(`{"regions":[{"id":"ewr"},{"id":"lax"},{"id":"dfw"}]}`))
+		case r.URL.Path == "/v2/os":
+			w.Write([]byte(`{"os":[{"id":2440,"name":"Debian 13 x64","arch":"x86_64","family":"debian"}]}`))
+		default:
+			t.Errorf("an invalid region must fail before the create: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	s, scripts := recordingSession(nil)
+	s.Answers["region"] = "AMER"
+	_, err := (HostProvider{}).Prepare(context.Background(), s, "")
+	if err == nil || !strings.Contains(err.Error(), "invalid vultr region") || !strings.Contains(err.Error(), "ewr") {
+		t.Fatalf("the region error must name the valid set: %v", err)
+	}
+	if len(*scripts) != 0 {
+		t.Fatal("no create must be attempted on an invalid region")
+	}
+}
+
+func TestVultrInstallDoorKeyIdempotent(t *testing.T) {
+	s, scripts := recordingSession(nil)
+	if err := (HostProvider{}).InstallDoorKey(s, "ssh-ed25519 AAA substrate"); err != nil {
+		t.Fatalf("install door: %v", err)
+	}
+	if len(*scripts) != 1 {
+		t.Fatalf("expected one append command, got %v", *scripts)
+	}
+	cmd := (*scripts)[0]
+	if !strings.Contains(cmd, "grep -qF 'ssh-ed25519 AAA substrate'") || !strings.Contains(cmd, "authorized_keys") {
+		t.Fatalf("the append must be guarded (no duplicates): %s", cmd)
+	}
+	if err := (HostProvider{}).InstallDoorKey(s, ""); err != nil {
+		t.Fatalf("an empty key is a no-op: %v", err)
+	}
+}
+
+func TestVultrDestroyFailsClosedWithoutKey(t *testing.T) {
+	s, _ := recordingSession(nil)
+	s.Answers["VULTR_API_KEY"] = ""
+	if err := (HostProvider{}).Destroy(context.Background(), s, "i-9"); err == nil {
+		t.Fatal("destroy without a key must fail (a missed destroy keeps billing)")
+	}
+}

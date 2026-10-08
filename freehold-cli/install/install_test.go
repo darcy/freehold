@@ -231,6 +231,7 @@ func TestCollectAnswersCarriesFlags(t *testing.T) {
 	ui := &installerUI{out: io.Discard, raw: strings.NewReader(stdin), in: bufio.NewReader(strings.NewReader(stdin))}
 	flags := box.Flags{
 		OperatorPubkey: pk,
+		Provider:       "proxmox",
 		Host:           "root@192.0.2.10",
 		RelayDomain:    "chat.example.net",
 		CpDomain:       "home.example.net",

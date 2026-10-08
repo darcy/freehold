@@ -102,6 +102,10 @@ type BackendKind string
 const (
 	KindZfs     BackendKind = "zfs"
 	KindLvmThin BackendKind = "lvmth"
+	// KindDir is the plain-directory backend: host dirs under /srv/data
+	// bind-mounted into the guests. The VPS shape (no ZFS, no VG — the
+	// Vultr/Hetzner cloud hosts); restic owns the backup story there.
+	KindDir BackendKind = "dir"
 )
 
 // ResolveAction is what the resolution stage decides to DO.

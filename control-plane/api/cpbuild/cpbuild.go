@@ -126,7 +126,10 @@ type Spec struct {
 	GatewayCIDR    string
 	GatewayVlan    int
 	GatewayLxc     uint32
-	K3sIP          string
+	// HostedGateway: the HOST is the gateway (api-vultr) — no guest, the
+	// nftables assert runs on the host itself.
+	HostedGateway bool
+	K3sIP         string
 	RunnerAddr     string
 	RunnerPK       string
 	RunnerTarget   string
@@ -497,8 +500,12 @@ func (s *Spec) worldStorage() (map[planebase.Tenant][]planebase.MountSpec, error
 			ms, err = drive.ResolveTenantMounts(drive.ClientExec(mc, s.RunnerTarget), s.PlanePool, s.RelayHost, tenant)
 		case planebase.KindLvmThin:
 			ms, err = drive.ResolveLvmMounts(drive.ClientExec(mc, s.RunnerTarget), s.PlanePool, s.RelayHost, tenant, s.SizeGB, s.PoolSizeGB, s.ThinPool)
+		case planebase.KindDir:
+			// The VPS hosts: domain-keyed host dirs bind-mounted into the
+			// guests (the box's ensure made them; this re-asserts idempotently).
+			ms, err = drive.ResolveDirMounts(drive.ClientExec(mc, s.RunnerTarget), s.RelayHost, tenant)
 		default:
-			return nil, fmt.Errorf("unknown storage backend kind %q (zfs|lvmth)", kind)
+			return nil, fmt.Errorf("unknown storage backend kind %q (zfs|lvmth|dir)", kind)
 		}
 		if err != nil {
 			return nil, fmt.Errorf("storage ensure %s: %w", tenant, err)
@@ -762,13 +769,15 @@ func (s *Spec) worldBootK3s(mounts []planebase.MountSpec) error {
 	return nil
 }
 
-// worldGateway (re)writes the gateway guest's nftables ruleset — a pure
+// worldGateway (re)writes the gateway's nftables ruleset — a pure
 // function of the recorded coords, so every build re-asserts it (a rebuilt
-// k3s with a new internal IP must not leave a stale DNAT). The gateway guest
-// is created by the BOX install (before the CP, whose default route it
-// becomes); the CP build only owns the config. No-op without one.
+// k3s with a new internal IP must not leave a stale DNAT). The gateway is
+// created by the BOX install (before the CP, whose default route it
+// becomes); the CP build only owns the config. No-op without one. On a
+// hosted gateway (api-vultr) the assert rides the host itself — same script,
+// no pct wrapper.
 func (s *Spec) worldGateway() error {
-	if s.GatewayLxc == 0 || s.GatewayCIDR == "" {
+	if s.GatewayCIDR == "" || (s.GatewayLxc == 0 && !s.HostedGateway) {
 		return nil
 	}
 	kip := s.k3sIP()
@@ -781,26 +790,36 @@ func (s *Spec) worldGateway() error {
 	// LAN IP (self-DNAT: the gateway's INPUT chain listens on nothing, and
 	// the world's public surface dies). Masquerade carries the subnet out.
 	// The ruleset is rewritten whole — never merged.
-	conf := config.GatewayNftConf(s.GatewayCIDR, s.ProxyIP, kip, s.CpIP, s.RelayIP, "eth0")
+	bridge := s.Bridge
+	if bridge == "" {
+		bridge = "vmbr0"
+	}
+	var conf, dns string
+	if s.HostedGateway {
+		conf = config.HostGatewayNftConf(s.GatewayCIDR, s.ProxyIP, kip, s.CpIP, s.RelayIP, bridge)
+		dns = config.HostGatewayDnsmasqConf(bridge)
+	} else {
+		conf = config.GatewayNftConf(s.GatewayCIDR, s.ProxyIP, kip, s.CpIP, s.RelayIP, "eth0")
+		dns = config.GatewayDnsmasqConf(s.RelayGW)
+	}
 	// No single quotes in the script (the heredoc delimiter is unquoted; the
 	// ruleset has none) — it rides `sh -c '...'` through the runner verbatim.
 	script := fmt.Sprintf(`set -e
 apt-get install -y -qq nftables dnsmasq >/dev/null 2>&1 || true
-echo net.ipv4.ip_forward=1 > /etc/sysctl.d/90-freehold-gateway.conf
-# A router with BOTH nics on one bridge (the untagged freehold-subnet) must
-# not answer ARP for an IP on the other interface — the flux reads as MAC
-# flapping on the LAN (UniFi: "multiple machines claiming IPs").
-echo net.ipv4.conf.all.arp_ignore=1 >> /etc/sysctl.d/90-freehold-gateway.conf
-echo net.ipv4.conf.all.arp_announce=2 >> /etc/sysctl.d/90-freehold-gateway.conf
-sysctl -p /etc/sysctl.d/90-freehold-gateway.conf >/dev/null
+sysctl net.ipv4.ip_forward=1 >/dev/null
 cat > /etc/nftables.conf <<NFT
 %sNFT
 cat > /etc/dnsmasq.d/freehold.conf <<DNS
 %sDNS
 systemctl enable nftables dnsmasq >/dev/null 2>&1 || true
 systemctl restart nftables dnsmasq >/dev/null 2>&1 || nft -f /etc/nftables.conf
-`, conf, config.GatewayDnsmasqConf(s.RelayGW))
-	cmd := fmt.Sprintf("pct exec %d -- sh -c '%s'", s.GatewayLxc, script)
+`, conf, dns)
+	var cmd string
+	if s.HostedGateway {
+		cmd = script
+	} else {
+		cmd = fmt.Sprintf("pct exec %d -- sh -c '%s'", s.GatewayLxc, script)
+	}
 	if err := s.run(cmd, 300); err != nil {
 		return fmt.Errorf("gateway nftables: %w", err)
 	}
@@ -1499,7 +1518,7 @@ func BuildWorldApply(spec *Spec) agent.WorldApply {
 		if err := spec.worldGateway(); err != nil {
 			return "", fmt.Errorf("world-build gateway: %w", err)
 		}
-		if spec.GatewayLxc != 0 && spec.GatewayCIDR != "" {
+		if spec.GatewayCIDR != "" && (spec.GatewayLxc != 0 || spec.HostedGateway) {
 			report = append(report, "gateway nftables asserted")
 		}
 		if spec.CpLxc != 0 && spec.CpIP != "" {

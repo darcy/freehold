@@ -11,15 +11,33 @@ needed, and the shape is meant to be identical on every substrate — the gatewa
 role everywhere; only the network its public side rides differs.
 
 ```
-   surrounding network (LAN / VPS public)
-                  │
-        ONE address: the gateway   (nftables + dnsmasq)
-          │ masquerade out
-          │ 80/443 → Caddy on k3s     8080 → CP console
-          │ 6443 → kube-apiserver     3000 → relay
-   ───────┼──────────────────────────────────
-     internal subnet:  relay · cp · k3s · (future guests)
+    surrounding network (LAN / VPS public)
+                   │
+         ONE address: the gateway   (nftables + dnsmasq)
+           │ masquerade out
+           │ 80/443 → Caddy on k3s     8080 → CP console
+           │ 6443 → kube-apiserver     3000 → relay
+    ───────┼──────────────────────────────────
+      internal subnet:  relay · cp · k3s · (future guests)
 ```
+
+The gateway has TWO shapes, one per substrate:
+
+*   **A LAN world (Proxmox at home):** the gateway is a GUEST — a small
+    two-NIC LXC holding the one LAN address (the proxy IP), masquerading the
+    internal subnet out and DNATing the fixed port set. Its ruleset is
+    asserted at boot and re-asserted by every build; the PVE host needs an
+    `ip route` into the subnet via it.
+*   **A cloud world (Vultr; the api-vultr access mode):** the HOST is the
+    gateway — the public IP belongs to the instance's NIC, so no guest can
+    hold it. The host owns the internal bridge (`vmbr0`, the subnet's `.1`),
+    renders the same forward/NAT shape plus an INPUT policy (drop; ssh, the
+    edge ports, the internal side — a public edge must not answer anything
+    else, and pveproxy stays dark to the internet), and runs the subnet's
+    resolver. The public NIC is never touched (no bridge-move lockout), the
+    shape persists across a reboot, and there is no host route to lose — the
+    host IS the router. Same ruleset discipline: one renderer
+    (`contract/config`), asserted at boot and re-asserted by every build.
 
 ## How it works
 
@@ -74,11 +92,11 @@ role everywhere; only the network its public side rides differs.
 
 ## Future
 
-*   **VPS parity:** the same gateway role on a cloud VPS, full lifecycle identical to Proxmox.
-    Needs a VPS provider (`docs/COMPUTE.md`).
 *   **Pangolin, the public path:** a Pangolin VPS (Gerbil + Traefik) with **Newt** on the
     gateway dialing *out*, so nothing at home accepts unsolicited traffic and the home IP
-    never appears in public DNS. Caddy stays the internal edge; both paths coexist.
+    never appears in public DNS. Caddy stays the internal edge; both paths coexist. A cloud
+    world needs no tunnel (its host already holds a public IP) — Pangolin there is a
+    local-site edge (identity gating + the agent-operable dashboard), a later decision.
 *   **More DNS providers:** a provider registry (`dnsman`, hoisted out of the cloudflare
     package) with per-provider A-record managers — Route53, Google Cloud DNS,
     DigitalOcean — hand-rolled REST like the Cloudflare one (no SDKs; Route53's SigV4
@@ -99,6 +117,9 @@ terminator.
 
 ## Where the code is
 
-`contract/config/` (gateway spec, nft/dnsmasq renderers), `platform/provisioning/box/`
-(gateway boot), `control-plane/api/cpbuild/` (DNS, certs, gateway re-assert, `terraform/caddy.tf`),
-`providers/proxmox/` (guest networking), `agents/network/`.
+`contract/config/` (gateway spec, nft/dnsmasq renderers — the guest and hosted
+variants), `platform/provisioning/box/` (gateway boot + the host-gateway
+stage), `control-plane/api/cpbuild/` (DNS, certs, gateway re-assert,
+`terraform/caddy.tf`), `providers/proxmox/` (guest networking),
+`providers/vultr/` (the api-vultr host lifecycle + the PVE-on-Debian
+install), `agents/network/`.
