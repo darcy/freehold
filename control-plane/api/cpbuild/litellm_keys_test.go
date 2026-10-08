@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -67,10 +68,12 @@ func fakeKeyGateway(t *testing.T, genStatus int) (*httptest.Server, *keyGateway)
 }
 
 // storeEnvForTest reopens the fixture's sealed litellm store — the assertions
-// look at the same map the production helpers read and write.
+// look at the same map the production helpers read and write. Rooted at the
+// CONSOLE state dir (the store's ONE home), not the Spec's own StateDir.
 func storeEnvForTest(t *testing.T, stateDir string) map[string]string {
 	t.Helper()
-	raw, err := os.ReadFile(stateDir + "/console/identity.json")
+	consoleRoot := (&Spec{StateDir: stateDir}).consoleStateRoot()
+	raw, err := os.ReadFile(consoleRoot + "/console/identity.json")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -85,7 +88,7 @@ func storeEnvForTest(t *testing.T, stateDir string) map[string]string {
 		t.Fatal(err)
 	}
 	open := func(sec, aad, blob []byte) ([]byte, error) { return crypto.Open(sec, aad, blob) }
-	_, env, err := cert.LoadCreds(stateDir+"/world-secrets/litellm.json", open, secret)
+	_, env, err := cert.LoadCreds(consoleRoot+"/world-secrets/litellm.json", open, secret)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -98,7 +101,8 @@ func storeEnvForTest(t *testing.T, stateDir string) map[string]string {
 // exactly once, so a re-mint would orphan keys.
 func TestEnsureAgentLitellmKey(t *testing.T) {
 	srv, st := fakeKeyGateway(t, http.StatusOK)
-	stateDir := t.TempDir()
+	root := t.TempDir()
+	stateDir := filepath.Join(root, "agent-tools")
 	litellmFixture(t, stateDir, "master-key", "provider-key", "openai", "gpt-4o")
 	spec := &Spec{StateDir: stateDir, LitellmBaseURL: srv.URL + "/v1"}
 
@@ -152,7 +156,8 @@ func TestEnsureAgentLitellmKey(t *testing.T) {
 func TestEnsureAgentLitellmKeyFailsLoudly(t *testing.T) {
 	t.Run("gateway refusal", func(t *testing.T) {
 		srv, _ := fakeKeyGateway(t, http.StatusInternalServerError)
-		stateDir := t.TempDir()
+		root := t.TempDir()
+		stateDir := filepath.Join(root, "agent-tools")
 		litellmFixture(t, stateDir, "master-key", "provider-key", "openai", "gpt-4o")
 		spec := &Spec{StateDir: stateDir, LitellmBaseURL: srv.URL + "/v1"}
 		if _, err := spec.ensureAgentLitellmKey("waldo"); err == nil {
@@ -166,7 +171,8 @@ func TestEnsureAgentLitellmKeyFailsLoudly(t *testing.T) {
 		}
 	})
 	t.Run("no litellm base url", func(t *testing.T) {
-		stateDir := t.TempDir()
+		root := t.TempDir()
+		stateDir := filepath.Join(root, "agent-tools")
 		litellmFixture(t, stateDir, "master-key", "provider-key", "openai", "gpt-4o")
 		spec := &Spec{StateDir: stateDir}
 		key, err := spec.ensureAgentLitellmKey("waldo")
@@ -182,7 +188,8 @@ func TestEnsureAgentLitellmKeyFailsLoudly(t *testing.T) {
 // revoke are no-ops (idempotent ensure-revoked).
 func TestRevokeAgentLitellmKey(t *testing.T) {
 	srv, st := fakeKeyGateway(t, http.StatusOK)
-	stateDir := t.TempDir()
+	root := t.TempDir()
+	stateDir := filepath.Join(root, "agent-tools")
 	litellmFixture(t, stateDir, "master-key", "provider-key", "openai", "gpt-4o")
 	spec := &Spec{StateDir: stateDir, LitellmBaseURL: srv.URL + "/v1"}
 	if _, err := spec.ensureAgentLitellmKey("waldo"); err != nil {
@@ -213,7 +220,8 @@ func TestRevokeAgentLitellmKey(t *testing.T) {
 // gone, and a mint under the old name again starts fresh.
 func TestMoveLitellmKeyRecord(t *testing.T) {
 	srv, st := fakeKeyGateway(t, http.StatusOK)
-	stateDir := t.TempDir()
+	root := t.TempDir()
+	stateDir := filepath.Join(root, "agent-tools")
 	litellmFixture(t, stateDir, "master-key", "provider-key", "openai", "gpt-4o")
 	spec := &Spec{StateDir: stateDir, LitellmBaseURL: srv.URL + "/v1"}
 	if _, err := spec.ensureAgentLitellmKey("waldo"); err != nil {
