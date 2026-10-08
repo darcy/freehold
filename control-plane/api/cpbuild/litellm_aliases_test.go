@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -117,7 +118,8 @@ func TestStageLitellmAliases(t *testing.T) {
 	srv, postsFn := fakeGateway(t, nil, http.StatusOK)
 	defer srv.Close()
 
-	stateDir := t.TempDir()
+	root := t.TempDir()
+	stateDir := filepath.Join(root, "agent-tools")
 	litellmFixture(t, stateDir, "master-key", "provider-key", "openai", "gpt-4o")
 	spec := &Spec{StateDir: stateDir, LitellmBaseURL: srv.URL + "/v1"}
 
@@ -205,7 +207,8 @@ func TestStageLitellmAliasesLegacyStore(t *testing.T) {
 	srv, postsFn := fakeGateway(t, nil, http.StatusOK)
 	defer srv.Close()
 
-	stateDir := t.TempDir()
+	root := t.TempDir()
+	stateDir := filepath.Join(root, "agent-tools")
 	litellmFixture(t, stateDir, "master-key", "provider-key", "", "")
 	spec := &Spec{StateDir: stateDir, LitellmBaseURL: srv.URL + "/v1"}
 	if err := spec.stageLitellmAliases(); err != nil {
@@ -227,7 +230,8 @@ func TestStageLitellmAliasesLegacyStore(t *testing.T) {
 func TestStageLitellmAliasesFailsLoudly(t *testing.T) {
 	newStateDir := func(t *testing.T) string {
 		t.Helper()
-		stateDir := t.TempDir()
+		root := t.TempDir()
+		stateDir := filepath.Join(root, "agent-tools")
 		litellmFixture(t, stateDir, "master-key", "provider-key", "openai", "gpt-4o")
 		return stateDir
 	}
