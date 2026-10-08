@@ -305,6 +305,69 @@ func TestProvisionRunnerUnknownGranteeFailsFirst(t *testing.T) {
 	}
 }
 
+// TestLitellmStoreFoundFromConsoleRoot pins the litellm store's ONE home: the
+// CONSOLE's world-secrets (where the build's PutSecret lands), resolvable by
+// a Spec anchored on the agent-tools state dir — the live failure behind a
+// kube-slot provision whose last leg (the pod re-apply's per-agent key mint)
+// hit "no CP litellm store" on a world whose gateway was up and serving. The
+// serve's StateDir-keyed read missed the console-rooted store — and worse, a
+// first mint would have split-brained a second store under the agent-tools
+// root. Same invariant as the DNS doors' console-root test above.
+func TestLitellmStoreFoundFromConsoleRoot(t *testing.T) {
+	root := t.TempDir()
+	consoleRoot := filepath.Join(root, "control-plane")
+	spec := &Spec{
+		StateDir: filepath.Join(root, "agent-tools"), CpIP: "10.0.0.9",
+		CpHost: "cp.example.com", RelayHost: "chat.example.com",
+	}
+	if err := os.MkdirAll(filepath.Join(consoleRoot, "console"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	secret := make([]byte, 32)
+	secret[0] = 9
+	pub, err := crypto.X25519PublicKey(secret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := fmt.Sprintf(`{"enc_secret_hex":%q}`, hex.EncodeToString(secret))
+	if err := os.WriteFile(filepath.Join(consoleRoot, "console", "identity.json"), []byte(id), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := cert.SaveCreds(filepath.Join(consoleRoot, "world-secrets", "litellm.json"), "litellm",
+		map[string]string{"master": "master-key", "provider": "provider-key"}, crypto.Seal, pub, "litellm"); err != nil {
+		t.Fatal(err)
+	}
+
+	master, provider, _, _, err := spec.litellmDoorKeys()
+	if err != nil {
+		t.Fatalf("the store must resolve from the console root: %v", err)
+	}
+	if string(master) != "master-key" || string(provider) != "provider-key" {
+		t.Fatalf("door keys: master=%q provider=%q", master, provider)
+	}
+	path, sec, env, err := spec.litellmStoreEnv()
+	if err != nil {
+		t.Fatalf("the mint path must open the same store: %v", err)
+	}
+	if env["master"] != "master-key" {
+		t.Fatalf("store env: %+v", env)
+	}
+	if !strings.HasPrefix(path, consoleRoot) {
+		t.Fatalf("writes must land console-rooted (never a second store under the serve's root): %s", path)
+	}
+	env["agentkey-p-homelab"] = "minted"
+	if err := spec.saveLitellmStoreEnv(path, sec, env); err != nil {
+		t.Fatal(err)
+	}
+	_, _, denv, err := spec.litellmStoreEnv()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if denv["agentkey-p-homelab"] != "minted" {
+		t.Fatalf("the re-seal must persist to the console-rooted store: %+v", denv)
+	}
+}
+
 // TestDroppedRosters pins the re-provision roster diff: names the previous
 // roster held that the new one drops are revoked.
 func TestDroppedRosters(t *testing.T) {
