@@ -35,6 +35,14 @@ resource "kubernetes_manifest" "caddy_configmap" {
     metadata   = { name = "caddy-caddyfile", namespace = "caddy" }
     data       = { "Caddyfile" = base64decode(var.caddyfile_b64) }
   }
+  # The apps' exposure verb patches this SAME configmap between builds
+  # (kubectl apply — its render is this renderer's identical output). The
+  # field managers collide on .data.Caddyfile unless terraform forces its
+  # ownership: the build's render is the source of truth and the two
+  # appliers converge to identical content in steady state.
+  field_manager {
+    force_conflicts = true
+  }
 }
 
 resource "kubernetes_manifest" "caddy_deploy" {
