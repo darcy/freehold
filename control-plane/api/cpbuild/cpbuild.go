@@ -325,11 +325,22 @@ func (s *Spec) worldDNS() error {
 	// lands on the guest's :443 — where nothing listens — and the pods die on
 	// "connection refused". The LAN dials ride the gateway's forwards instead
 	// (3000/8080 DNAT), which serve BOTH resolver answers.
+	// The EDGE ANSWER is the K3S NODE IP — caddy's real internal address
+	// (every DNAT points there) — never the proxy IP: a guest's (and a pod's)
+	// dial to the proxy IP must hairpin through the gateway, and where the
+	// gateway IS the host (Vultr) that hairpin DNATs back into the dialing
+	// guest itself and never answers. The node serves caddy directly from
+	// every guest and pod. Flat-LAN worlds already have ProxyIP == node IP,
+	// so this is a no-op there.
 	relayIP, cpIP := s.RelayIP, s.CpIP
 	if s.GatewayCIDR != "" {
 		relayIP, cpIP = "", ""
 	}
-	for _, r := range stages.DnsRecords(s.RelayHost, relayIP, s.CpHost, cpIP, s.ProxyIP, s.LitellmIP) {
+	apexIP := s.ProxyIP
+	if s.K3sIP != "" {
+		apexIP = s.K3sIP
+	}
+	for _, r := range stages.DnsRecords(s.RelayHost, relayIP, s.CpHost, cpIP, apexIP, s.LitellmIP) {
 		if err := s.run(proxmox.DnsAddCmd(s.CpLxc, binDir, stateDir, r.Name, r.IP, r.Source, searchBase), 120); err != nil {
 			return fmt.Errorf("world-build dns register %s: %w", r.Name, err)
 		}
@@ -343,19 +354,18 @@ func (s *Spec) worldDNS() error {
 			}
 		}
 	}
-	// The resolver WILDCARD: all *.apex -> the proxy (Caddy) edge, so the
-	// dotted public hosts (relay.<apex>, cp.<apex>) resolve to TLS - never to a
-	// guest LXC (dnsmasq's bare `relay`/`cp` records would otherwise leak the
-	// guest IP into the FQDN answer). The apex is the guest search base when
-	// present, else derived from the relay host (strip its leading label).
+	// The resolver WILDCARD: all *.apex -> the same edge answer (apexIP), so
+	// every dotted public host resolves to TLS - never to a guest LXC. The
+	// apex is the guest search base when present, else derived from the relay
+	// host (strip its leading label).
 	apex := searchBase
 	if apex == "" {
 		if i := strings.Index(s.RelayHost, "."); i > 0 && i < len(s.RelayHost)-1 {
 			apex = s.RelayHost[i+1:]
 		}
 	}
-	if apex != "" && s.ProxyIP != "" {
-		if err := s.run(proxmox.DnsApexCmd(s.CpLxc, binDir, stateDir, apex, config.StripCIDR(s.ProxyIP)), 120); err != nil {
+	if apex != "" && apexIP != "" {
+		if err := s.run(proxmox.DnsApexCmd(s.CpLxc, binDir, stateDir, apex, config.StripCIDR(apexIP)), 120); err != nil {
 			return fmt.Errorf("world-build dns apex: %w", err)
 		}
 	}
@@ -363,12 +373,12 @@ func (s *Spec) worldDNS() error {
 		return err
 	}
 	// Behind the gateway the bare relay record is DROPPED (it shadows the
-	// FQDN's edge answer) — the verify then checks the FQDN -> the EDGE; the
-	// bare-name check stands for flat-LAN worlds.
+	// FQDN's edge answer) — the verify then checks the FQDN -> the wildcard
+	// answer; the bare-name check stands for flat-LAN worlds.
 	relayWant := s.RelayIP
 	relayName := "relay"
 	if s.GatewayCIDR != "" {
-		relayName, relayWant = s.RelayHost, s.ProxyIP
+		relayName, relayWant = s.RelayHost, apexIP
 	}
 	for _, q := range []struct{ name, want string }{
 		{relayName, relayWant}, {"litellm", s.LitellmIP},

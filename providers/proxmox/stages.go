@@ -40,9 +40,9 @@ func DnsRemoveCmd(cpLxc uint32, binDir, stateDir, name string) string {
 // --apex/--ip and the `apex` verb. It puts the FLAGS BEFORE the verb (Go's
 // flag.Parse stops at the first non-flag arg, so a --state-dir after the verb
 // is silently unparsed and state.Open fails on an empty path).
-func DnsApexCmd(cpLxc uint32, binDir, stateDir, apex, proxyIP string) string {
+func DnsApexCmd(cpLxc uint32, binDir, stateDir, apex, wildcardIP string) string {
 	inner := fmt.Sprintf("%s dns --state-dir %s --apex %s --ip %s apex",
-		dq(binDir+"/freehold-console"), dq(stateDir), dq(apex), dq(proxyIP))
+		dq(binDir+"/freehold-console"), dq(stateDir), dq(apex), dq(wildcardIP))
 	return fmt.Sprintf("pct exec %d -- sh -c %s", cpLxc, shellSingleQuote(inner))
 }
 
