@@ -420,7 +420,7 @@ async function loadMembers() {
   }
   for (const s of j.sessions || []) {
     rows.push(`<tr><td>${esc(s.name)}</td><td><span class="chip ${s.device ? "gray" : "green"}">${s.device ? "device" : "nostr"}</span></td>` +
-      `<td class="muted">${esc((s.apps || ["(every app — pre-2.1 session)"]).join(", "))}</td>` +
+      `<td class="muted">${s.device ? esc((s.apps || []).join(", ") || "(none — re-mint the link)") : "the channels decide"}</td>` +
       `<td class="muted">${new Date(s.expires * 1000).toLocaleString()}</td>` +
       `<td><button class="danger" data-act="drop-member" data-name="${esc(s.name)}">drop</button></td></tr>`);
   }

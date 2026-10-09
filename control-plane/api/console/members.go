@@ -76,10 +76,11 @@ type Members struct {
 // memberSessionRow / memberInviteRow are the on-disk shapes (expires as unix
 // seconds).
 type memberSessionRow struct {
-	Pubkey  string `json:"pubkey,omitempty"`
-	Name    string `json:"name"`
-	Device  bool   `json:"device"`
-	Expires int64  `json:"expires"`
+	Pubkey  string   `json:"pubkey,omitempty"`
+	Name    string   `json:"name"`
+	Device  bool     `json:"device"`
+	Apps    []string `json:"apps,omitempty"`
+	Expires int64    `json:"expires"`
 }
 
 type memberInviteRow struct {
@@ -123,7 +124,7 @@ func (m *Members) load() {
 		if exp.Before(now()) {
 			continue
 		}
-		m.sessions[tok] = MemberSession{expires: exp, pubkey: r.Pubkey, name: r.Name, device: r.Device}
+		m.sessions[tok] = MemberSession{expires: exp, pubkey: r.Pubkey, name: r.Name, device: r.Device, apps: r.Apps}
 	}
 	for h, r := range f.Invites {
 		exp := time.Unix(r.Expires, 0)
@@ -147,7 +148,7 @@ func (m *Members) save() error {
 		Invites:  make(map[string]memberInviteRow, len(m.invites)),
 	}
 	for tok, s := range m.sessions {
-		f.Sessions[tok] = memberSessionRow{Pubkey: s.pubkey, Name: s.name, Device: s.device, Expires: s.expires.Unix()}
+		f.Sessions[tok] = memberSessionRow{Pubkey: s.pubkey, Name: s.name, Device: s.device, Apps: s.apps, Expires: s.expires.Unix()}
 	}
 	for h, i := range m.invites {
 		f.Invites[h] = memberInviteRow{Name: i.name, CreatedBy: i.createdBy, Apps: i.apps, Expires: i.expires.Unix()}

@@ -356,10 +356,21 @@ func TestDeviceLinkLifecycle(t *testing.T) {
 		t.Fatalf("reused link must be 404, got %d", rec.Code)
 	}
 
-	// The session survives a serve restart (members.json, 0600).
+	// The session survives a serve restart (members.json, 0600) — the app
+	// BINDING included: a session whose apps were dropped by a restart
+	// validates but admits nothing (the silent-lockout bug this pins).
 	m2 := NewMembers(f.membersFile)
-	if info, ok := m2.MemberIdentity(tok); !ok || info.Name != "grandma" || !info.Device {
-		t.Fatalf("restart must keep the device session: %+v ok=%v", info, ok)
+	info, ok := m2.MemberIdentity(tok)
+	if !ok || info.Name != "grandma" || !info.Device || len(info.Apps) != 1 || info.Apps[0] != "yuvomi" {
+		t.Fatalf("restart must keep the device session WITH its app binding: %+v ok=%v", info, ok)
+	}
+	req = httptest.NewRequest(http.MethodGet, "/auth/verify", nil)
+	req.Header.Set("X-Original-Host", "yuvomi.cp.example.com")
+	req.AddCookie(&http.Cookie{Name: memberCookie, Value: tok})
+	rec = httptest.NewRecorder()
+	f.s.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("the restarted device session must still admit its app: %d", rec.Code)
 	}
 
 	// The operator sees the live session and can drop it.

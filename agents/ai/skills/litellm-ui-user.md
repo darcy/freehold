@@ -20,7 +20,7 @@ admin key) — the exec env carries it injected; reference it by name, never
 echo it.
 
 ```sh
-curl -sS "$LITELLM_URL/user/new" \
+curl -sS "$LITELLM_API_ADMIN_URL/user/new" \
   -H "Authorization: Bearer $LITELLM_API_ADMIN" \
   -H "Content-Type: application/json" \
   -d '{"user_email":"<the operator's email>","user_role":"app_owner"}'
@@ -37,7 +37,7 @@ curl -sS "$LITELLM_URL/user/new" \
 ## Verify before you report
 
 ```sh
-curl -sS "$LITELLM_URL/user/info" -H "Authorization: Bearer $LITELLM_API_ADMIN" \
+curl -sS "$LITELLM_API_ADMIN_URL/user/info" -H "Authorization: Bearer $LITELLM_API_ADMIN" \
   -d '{"user_id":"<the returned user id>"}'
 ```
 
