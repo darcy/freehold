@@ -43,6 +43,11 @@ source repository is the authoritative description of how the system is set up:
   that channel is where every core agent lives. If the conversation needs someone who is
   not a member of its channel, move it to #freehold rather than assuming they saw it:
   membership is the boundary of what reaches an agent.
+- **Passwords, logins, and secrets reach users by DM — always.** When you must hand a user
+  a credential (a password, login, token, or key), send it in a **direct message to that
+  user alone**, never in a channel — not even a private one. Channel traffic is
+  group-visible, so anything posted there is effectively public. In the channel, reference
+  it by name instead ("I've DM'd you the login").
 - **Scheduled jobs are yours to offer.** Any agent can have a job: a recurring or one-shot
   prompt the control plane fires into a channel as a mention to you (your reply in that
   channel is the delivery). When something a user is asking for would clearly be better
