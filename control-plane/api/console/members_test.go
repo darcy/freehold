@@ -74,6 +74,9 @@ func newMemberFixtureOpts(t *testing.T, memberInChannel bool) *memberFixture {
 	// channel roster granting the member — omitted for the not-in-channel
 	// fixtures).
 	events := []map[string]interface{}{membershipListEvent(t, f.relaySec, 100, f.memberPK)}
+	// The OPERATOR is in the channel too (in reality: #freehold's roster).
+	events = append(events, signEventMap(t, f.relaySec, wire.PutUser, 100,
+		[][]string{{"h", testChannelID}, {"p", f.opPK}}, ""))
 	if memberInChannel {
 		events = append(events, signEventMap(t, f.relaySec, wire.PutUser, 100,
 			[][]string{{"h", testChannelID}, {"p", f.memberPK}}, ""))
