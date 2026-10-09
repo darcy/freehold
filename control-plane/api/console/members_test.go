@@ -445,3 +445,45 @@ func TestSafeNext(t *testing.T) {
 		}
 	}
 }
+
+// TestForwardAuthVerifyBrowserRedirect pins the gate's deny UX: a BROWSER
+// (Accept: text/html) bounced off a gated app gets a 302 to the login page
+// with the app URL as the post-login target — ABSOLUTE (the client is on the
+// app's origin, where no login page is served) — and the next target is
+// same-site validated (a forged forwarded host collapses to the console
+// root). API clients get the bare 401.
+func TestForwardAuthVerifyBrowserRedirect(t *testing.T) {
+	f := newMemberFixture(t)
+	hit := func(accept, fwdHost, fwdURI string) string {
+		req := httptest.NewRequest(http.MethodGet, "/auth/verify", nil)
+		req.Header.Set("Accept", accept)
+		req.Header.Set("X-Forwarded-Host", fwdHost)
+		req.Header.Set("X-Forwarded-Uri", fwdURI)
+		rec := httptest.NewRecorder()
+		f.s.ServeHTTP(rec, req)
+		if rec.Code != http.StatusFound {
+			return ""
+		}
+		return rec.Header().Get("Location")
+	}
+	loc := hit("text/html,application/xhtml+xml", "app.cp.example.com", "/calendar")
+	if !strings.HasPrefix(loc, "https://cp.example.com/auth?next=") ||
+		!strings.Contains(loc, "app.cp.example.com%2Fcalendar") {
+		t.Fatalf("browser deny must redirect to login with the app as next, got %q", loc)
+	}
+	// A forged forwarded host is not a valid next: the login lands on the
+	// console root instead.
+	loc = hit("text/html", "evil.example", "/x")
+	if !strings.HasPrefix(loc, "https://cp.example.com/auth?next=") ||
+		strings.Contains(loc, "evil.example") {
+		t.Fatalf("a foreign forwarded host must not ride next, got %q", loc)
+	}
+	// API clients: bare 401, no redirect.
+	req := httptest.NewRequest(http.MethodGet, "/auth/verify", nil)
+	req.Header.Set("X-Forwarded-Host", "app.cp.example.com")
+	rec := httptest.NewRecorder()
+	f.s.ServeHTTP(rec, req)
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("API deny must be 401, got %d", rec.Code)
+	}
+}

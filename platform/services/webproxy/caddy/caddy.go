@@ -2,6 +2,8 @@ package deploy
 
 import (
 	"fmt"
+	"sort"
+	"strings"
 )
 
 // Caddyfile renders Caddy's runtime config for freehold's TLS fronting proxy.
@@ -48,4 +50,43 @@ func RenderCaddyfile(relayHost, relayUpstream, pairUpstream, cpHost, cpUpstream,
   }
 }
 `, relayHost, relayHandle, relayUpstream, cpHost, cpMcpUpstream, cpUpstream)
+}
+
+// AppVhost is one agent-exposed service's site block: its own hostname, the
+// internal upstream it proxies to, the cert slot that must ALREADY be
+// installed (a vhost referencing a missing cert crash-loops the whole edge),
+// and the console upstream its member gate forwards through ("" = ungated —
+// an operator-only choice).
+type AppVhost struct {
+	FQDN     string
+	Upstream string
+	Slot     string
+	Gate     string
+}
+
+// RenderAppVhosts renders the apps' site blocks appended after the base
+// Caddyfile. Deterministic order (sorted by FQDN) so the build's terraform
+// render and the expose verb's kubectl patch produce IDENTICAL config — the
+// two appliers converge, never fight.
+func RenderAppVhosts(apps []AppVhost) string {
+	sorted := append([]AppVhost(nil), apps...)
+	sort.Slice(sorted, func(i, j int) bool { return sorted[i].FQDN < sorted[j].FQDN })
+	var b strings.Builder
+	for _, a := range sorted {
+		b.WriteString("\n" + a.FQDN + " {\n")
+		b.WriteString("  tls /data/tls/" + a.Slot + "/fullchain.pem /data/tls/" + a.Slot + "/key.pem\n")
+		if a.Gate != "" {
+			b.WriteString("  forward_auth " + a.Gate + " {\n    uri /auth/verify\n  }\n")
+		}
+		b.WriteString("  reverse_proxy " + a.Upstream + "\n")
+		b.WriteString("}\n")
+	}
+	return b.String()
+}
+
+// RenderCaddyfileApps is the full edge config: the base vhosts plus the apps'
+// site blocks (RenderAppVhosts) — the one renderer both appliers share.
+func RenderCaddyfileApps(relayHost, relayUpstream, pairUpstream, cpHost, cpUpstream, cpMcpUpstream string, apps []AppVhost) string {
+	return RenderCaddyfile(relayHost, relayUpstream, pairUpstream, cpHost, cpUpstream, cpMcpUpstream) +
+		RenderAppVhosts(apps)
 }

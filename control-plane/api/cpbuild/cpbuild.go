@@ -45,7 +45,6 @@ import (
 	"freehold/platform/provisioning/stages"
 	"freehold/platform/services/certificates/letsencrypt"
 	relaydeploy "freehold/platform/services/relay/buzz"
-	caddydeploy "freehold/platform/services/webproxy/caddy"
 	"freehold/providers/proxmox"
 	"freehold/providers/proxmox/drive"
 	"freehold/providers/proxmox/teardown"
@@ -154,6 +153,12 @@ type Spec struct {
 	AgentRegistry *agenttools.Registry
 	FactsStore    *agenttools.FactsStore
 
+	// Apps is the exposed-apps registry (apps.json in the agent-tools durable
+	// dir) — the build tail's worldApps re-ensures every record (DNS, cert,
+	// edge config), so a teardown/rebuild restores the apps the same way
+	// capability doors re-stage. nil = no apps stage.
+	Apps *agenttools.AppsStore
+
 	// AgentIdentityDir is where agent identity dirs live (the durable
 	// agent-tools state dir, `<root>/agent-tools`), so the console executor and
 	// the agent-tools server mint into the SAME dir and NEVER re-mint a
@@ -187,6 +192,11 @@ type Spec struct {
 	// admin kubeconfig for migration staging (tests). It receives the k3s vmid
 	// and returns the raw in-guest kubeconfig.
 	kubeconfigFetch func(vmid uint32) (string, error)
+
+	// uploadHook, when set, replaces the runner's file upload (tests) — the
+	// same escape hatch execHook is for exec; the expose chain's file-transit
+	// (the rendered edge config) exercises it.
+	uploadHook func(target, localPath, remotePath string, timeoutS uint64) error
 
 	// execHook, when set, replaces the co-located-runner exec for every
 	// execOut call (tests: the kube-slot carve + token read are hermetically
@@ -1436,6 +1446,16 @@ func BuildWorldApply(spec *Spec) agent.WorldApply {
 		engineMu.Lock()
 		defer engineMu.Unlock()
 		var report []string
+		// 0. The apps registry is re-read at the TAIL'S START: expose writes
+		// land in the separate agent-tools process, and every registry
+		// consumer below (the 3.5b terraform render + the 7.5 ensure) must
+		// see the registry as it is NOW — both appliers render the same
+		// rows, and an unexposed app's stale vhost can never re-serve.
+		if spec.Apps != nil {
+			if err := spec.Apps.Reload(); err != nil {
+				return "", fmt.Errorf("world-build apps reload: %w", err)
+			}
+		}
 		// 0.5. Public A records (relay/cp -> proxy) on the CP's stored DNS
 		// credential. The CP owns the cred and does DNS-01, so record
 		// management joins the CP build (it was box-side pre-split). No-op
@@ -1571,19 +1591,15 @@ func BuildWorldApply(spec *Spec) agent.WorldApply {
 			}
 			var extra []string
 			if spec.CpHost != "" && spec.RelayIP != "" {
-				relayUpstream := fmt.Sprintf("%s:3000", spec.RelayIP)
-				cpUpstream, cpMcpUpstream := "", ""
-				if spec.CpIP != "" {
-					cpUpstream = fmt.Sprintf("%s:8080", spec.CpIP)
-					cpMcpUpstream = fmt.Sprintf("%s:8089", spec.CpIP)
+				// The ONE render both appliers share: the apps registry's
+				// cert-backed rows ride the terraform var too — the verb's
+				// kubectl apply renders identically, so build and expose
+				// converge on the same edge config instead of overwriting
+				// each other.
+				caddyfile := spec.renderCaddyfile()
+				if caddyfile == "" {
+					return "", fmt.Errorf("world-build terraform services: the edge render failed (relay/cp coords incomplete)")
 				}
-				// pairUpstream: the pair-relay pod binds 5000 on the k3s node
-				// itself (hostNetwork, same node as the caddy edge).
-				pairUpstream := ""
-				if kip := spec.k3sIP(); kip != "" {
-					pairUpstream = fmt.Sprintf("%s:5000", kip)
-				}
-				caddyfile := caddydeploy.RenderCaddyfile(spec.RelayHost, relayUpstream, pairUpstream, spec.CpHost, cpUpstream, cpMcpUpstream)
 				extra = append(extra, "-var",
 					"caddyfile_b64="+base64.StdEncoding.EncodeToString([]byte(caddyfile)))
 			}
@@ -1600,6 +1616,15 @@ func BuildWorldApply(spec *Spec) agent.WorldApply {
 				return "", fmt.Errorf("world-build cert: %w", err)
 			}
 			report = append(report, "cert issued/installed (or already present)")
+		}
+		// 7.5. The exposed apps: every registry row re-ensured (DNS pointed,
+		// cert issued/seeded, the edge config rendered + applied ONCE) — the
+		// rebuild-safety half of expose_app, the same ensure-discipline as the
+		// doors' re-stage.
+		if appsReport, err := spec.worldApps(); err != nil {
+			return "", fmt.Errorf("world-build apps: %w", err)
+		} else if appsReport != "" {
+			report = append(report, appsReport)
 		}
 		// 7.25. Drop the CP's /etc/hosts public-host pins. The agent-tools seed
 		// pinned relay.<apex>/cp.<apex> -> the guest LXC IP so it could dial the

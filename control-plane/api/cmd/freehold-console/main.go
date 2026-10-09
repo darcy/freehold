@@ -21,6 +21,7 @@ import (
 
 	"freehold/contract/crypto"
 	"freehold/contract/version"
+	"freehold/control-plane/api/agenttools"
 	"freehold/control-plane/api/console"
 	"freehold/control-plane/api/cpbuild"
 	"freehold/control-plane/secret-management"
@@ -315,6 +316,13 @@ func cmdServe(args []string) error {
 	// grant on the surviving identity.
 	if builder != nil {
 		builder.AgentIdentityDir = *agentToolsStateDir
+		// The exposed-apps registry: the world-build tail's worldApps stage
+		// re-ensures every record (DNS, cert, edge config) from these rows.
+		if apps, aerr := agenttools.OpenApps(filepath.Join(*agentToolsStateDir, "apps.json")); aerr == nil {
+			builder.Apps = apps
+		} else {
+			log.Printf("apps registry unreadable — the build's apps stage is off: %v", aerr)
+		}
 		// The world-config may predate litellm; derive the gateway IP/base from
 		// the proxy IP so agent pods get a real OPENAI_COMPAT_BASE_URL.
 		builder.FillEdgeURLs()

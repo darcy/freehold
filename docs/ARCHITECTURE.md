@@ -574,7 +574,10 @@ resident-runner mode, the retired-name guard — is in `docs/AI.md` ("Runners an
     calls the CP toolset's `create_agent` / `update_agent` / `provision_runner` /
     `revoke_runner` / `manage_agent` (through the
     `freehold-agent-tools mcp` stdio bridge, signed as its own nsec and
-    authorized by the server's roster). `update_agent` edits an agent it created —
+    authorized by the server's roster). Exposure (`expose_app` / `unexpose_app` — the
+    edge's public vhost, DNS, cert, and the member gate for an agent-built service) is
+    the NETWORK department's verb, never the CPA's or a custom agent's; the ask routes
+    through Network in conversation. `update_agent` edits an agent it created —
     purpose, model, channels, or a rename that keeps the pubkey (chat history, grants,
     and memory follow); core identities are refused, the repo is their source.
     `provision_runner` stages a NEW

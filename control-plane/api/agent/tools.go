@@ -205,6 +205,54 @@ type Tools struct {
 	// host (DOOR_SPEC). nil = door unsupported.
 	DoorAuthorize DoorAuthorizeAppend
 	DoorRevoke    DoorRevoke
+	// Expose/Unexpose make an agent-built service reachable: the public TLS
+	// vhost + DNS + cert + the member gate, applied live from the apps
+	// registry. nil = expose unsupported.
+	Expose   ExposeAppFn
+	Unexpose UnexposeAppFn
+}
+
+// ExposeArgs is one expose_app call. Name is a DNS label (the fqdn composes
+// as <name>.<world-domain>); target is the service's internal host:port;
+// group is the relay CHANNEL the access rides — the requester must already
+// be in it (access narrows to groups the requester belongs to, never
+// widens); requester is the pubkey of whoever asked (default: the caller);
+// visibility family|public|lan (public is operator-only at the dispatch);
+// auth gate|app|none (none is operator-only at the dispatch).
+type ExposeArgs struct {
+	Name       string `json:"name"`
+	Target     string `json:"target"`
+	Group      string `json:"group"`
+	Requester  string `json:"requester,omitempty"`
+	Visibility string `json:"visibility,omitempty"`
+	Auth       string `json:"auth,omitempty"`
+}
+
+// ExposeAppFn is Network's exposure capability: record + apply (DNS, cert,
+// edge config), reporting per-leg what landed. Built by
+// cpbuild.BuildExposeAppFn; nil = unsupported.
+type ExposeAppFn func(args ExposeArgs) (report string, err error)
+
+// UnexposeAppFn takes an exposed app down: record removed, the edge config
+// re-applied without its vhost, its A record best-effort removed. Built by
+// cpbuild.BuildUnexposeAppFn; nil = unsupported.
+type UnexposeAppFn func(name string) (report string, err error)
+
+// ExposeApp records + applies an exposure (Network's capability; the
+// dispatch gates the caller).
+func (t *Tools) ExposeApp(args ExposeArgs) (string, error) {
+	if t.Expose == nil {
+		return "", fmt.Errorf("expose_app is not supported on this server")
+	}
+	return t.Expose(args)
+}
+
+// UnexposeApp takes an exposed app down.
+func (t *Tools) UnexposeApp(name string) (string, error) {
+	if t.Unexpose == nil {
+		return "", fmt.Errorf("unexpose_app is not supported on this server")
+	}
+	return t.Unexpose(name)
 }
 
 // ExecFn runs a command through the CP's co-located runner and returns its
