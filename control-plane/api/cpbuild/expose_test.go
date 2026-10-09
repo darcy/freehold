@@ -389,3 +389,64 @@ func selfSigned(t *testing.T, host string) []byte {
 	}
 	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
 }
+
+// TestExposeRefusesTheEdgeHosts pins the collision guard: an app named
+// "relay" or "cp" composes the EDGE's own hostname — two site blocks for one
+// address is a config that cannot load (the whole edge, relay included,
+// crash-loops, and kubectl apply exits 0 so nothing reports it). Refused
+// before anything is recorded.
+func TestExposeRefusesTheEdgeHosts(t *testing.T) {
+	family := "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+	consoleSec := make([]byte, 32)
+	consoleSec[0] = 0x42
+	for _, name := range []string{"relay", "cp"} {
+		te := newTestExposer(t, []relayChannel{{family, "family"}},
+			[]memberEvent{{channelID: family, pubkey: strings.Repeat("b", 64), kind: wire.PutUser, ts: 100}})
+		if _, err := te.exposeFn(consoleSec)(agent.ExposeArgs{
+			Name: name, Target: "10.78.0.13:3000", Group: family, Requester: strings.Repeat("b", 64),
+		}); err == nil || !strings.Contains(err.Error(), "the edge's own host") {
+			t.Fatalf("expose %q must refuse the edge's own host, got %v", name, err)
+		}
+		if _, ok := te.apps.Get(name); ok {
+			t.Fatalf("expose %q must not record", name)
+		}
+	}
+}
+
+// TestWorldAppsReadsTheRegistryFresh pins the freshness fix: expose writes
+// land in the SEPARATE agent-tools process, so the build tail (a different
+// in-memory store over the same file) must see them — a store that stayed
+// startup-frozen would strip every post-expose app from the edge (and
+// resurrect every unexposed one).
+func TestWorldAppsReadsTheRegistryFresh(t *testing.T) {
+	family := "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+	te := newTestExposer(t, []relayChannel{{family, "family"}},
+		[]memberEvent{{channelID: family, pubkey: strings.Repeat("b", 64), kind: wire.PutUser, ts: 100}})
+	// The OTHER process exposes through its OWN store over the same file.
+	other, err := agenttools.OpenApps(te.apps.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := other.Expose(agenttools.AppRecord{
+		Name: "yuvomi", FQDN: appFQDN(te.spec.CpHost, "yuvomi"), Target: "10.78.0.13:3000",
+		Visibility: agenttools.VisibilityFamily, Auth: agenttools.AuthGate,
+		Group: family, Owner: "op", Requester: strings.Repeat("b", 64), CreatedAt: 7,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// The build tail (the frozen first store) still reports the app.
+	rep, err := te.spec.worldApps()
+	if err != nil {
+		t.Fatalf("worldApps: %v", err)
+	}
+	if !strings.Contains(rep, "apps reconciled (1)") {
+		t.Fatalf("the tail must read the registry as the OTHER process left it: %q", rep)
+	}
+	// ...and the unexpose lands the same way.
+	if _, err := other.Unexpose("yuvomi"); err != nil {
+		t.Fatal(err)
+	}
+	if rep, err := te.spec.worldApps(); err != nil || rep != "" {
+		t.Fatalf("the unexposed app must be gone from the tail's render: %q %v", rep, err)
+	}
+}

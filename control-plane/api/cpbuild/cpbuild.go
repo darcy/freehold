@@ -1429,6 +1429,16 @@ func BuildWorldApply(spec *Spec) agent.WorldApply {
 		engineMu.Lock()
 		defer engineMu.Unlock()
 		var report []string
+		// 0. The apps registry is re-read at the TAIL'S START: expose writes
+		// land in the separate agent-tools process, and every registry
+		// consumer below (the 3.5b terraform render + the 7.5 ensure) must
+		// see the registry as it is NOW — both appliers render the same
+		// rows, and an unexposed app's stale vhost can never re-serve.
+		if spec.Apps != nil {
+			if err := spec.Apps.Reload(); err != nil {
+				return "", fmt.Errorf("world-build apps reload: %w", err)
+			}
+		}
 		// 0.5. Public A records (relay/cp -> proxy) on the CP's stored DNS
 		// credential. The CP owns the cred and does DNS-01, so record
 		// management joins the CP build (it was box-side pre-split). No-op

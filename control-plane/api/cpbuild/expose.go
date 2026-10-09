@@ -355,6 +355,9 @@ func BuildExposeAppFn(spec *Spec, apps *agenttools.AppsStore, consoleSecret []by
 			return "", fmt.Errorf("expose: the apps registry is not bound")
 		}
 		fqdn := appFQDN(spec.CpHost, args.Name)
+		if fqdn == spec.RelayHost || fqdn == spec.CpHost {
+			return "", fmt.Errorf("expose %q: %s is the edge's own host — pick another name", args.Name, fqdn)
+		}
 		dial, auth := spec.RelayURL, spec.RelayAuthURL
 		if auth == "" {
 			auth = dial

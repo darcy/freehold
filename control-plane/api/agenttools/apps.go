@@ -214,6 +214,10 @@ func (a *AppsStore) Expose(rec AppRecord) error {
 	return a.save()
 }
 
+// Path is the registry's file path (the cross-process freshness tests open
+// a second store over the same file).
+func (a *AppsStore) Path() string { return a.path }
+
 // Unexpose removes an app's record. Not-found is an error (the caller
 // reports it); the edge-side teardown is the caller's job.
 func (a *AppsStore) Unexpose(name string) (AppRecord, error) {
