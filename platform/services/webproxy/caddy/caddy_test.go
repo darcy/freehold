@@ -44,3 +44,40 @@ func TestRenderCaddyfileOmitsPairRouteWithoutUpstream(t *testing.T) {
 		t.Errorf("relay catch-all lost:\n%s", out)
 	}
 }
+
+// TestRenderAppVhosts pins the apps' site blocks: a gated app carries
+// forward_auth to the console on the CP guest (uri /auth/verify), an
+// ungated one doesn't, and the order is DETERMINISTIC (sorted by fqdn) —
+// the build's terraform render and the expose verb's kubectl apply must
+// produce identical config.
+func TestRenderAppVhosts(t *testing.T) {
+	apps := []AppVhost{
+		{FQDN: "zeta.example", Upstream: "10.0.0.9:3000", Slot: "app-zeta", Gate: "10.78.0.12:8080"},
+		{FQDN: "alpha.example", Upstream: "10.0.0.8:8080", Slot: "app-alpha"}, // no gate
+	}
+	out := RenderAppVhosts(apps)
+	alpha := strings.Index(out, "alpha.example {")
+	zeta := strings.Index(out, "zeta.example {")
+	if alpha < 0 || zeta < 0 || alpha > zeta {
+		t.Fatalf("app blocks must render sorted by fqdn:\n%s", out)
+	}
+	if !strings.Contains(out, "forward_auth 10.78.0.12:8080 {\n    uri /auth/verify\n  }") {
+		t.Fatalf("the gated app must forward to the console:\n%s", out)
+	}
+	if !strings.Contains(out, "reverse_proxy 10.0.0.9:3000") {
+		t.Fatalf("the app's upstream must ride:\n%s", out)
+	}
+	alphaBlock := out[alpha:zeta]
+	if strings.Contains(alphaBlock, "forward_auth") {
+		t.Fatalf("an ungated app must not carry forward_auth:\n%s", alphaBlock)
+	}
+	if !strings.Contains(out, "tls /data/tls/app-zeta/fullchain.pem /data/tls/app-zeta/key.pem") {
+		t.Fatalf("each app presents its own slot's cert:\n%s", out)
+	}
+	// The compose: the base file plus the apps' blocks, one render for both
+	// appliers.
+	full := RenderCaddyfileApps("relay.example", "10.0.0.11:3000", "", "cp.example", "10.0.0.12:8080", "10.0.0.12:8089", apps)
+	if !strings.Contains(full, "relay.example {") || !strings.Contains(full, "cp.example {") || !strings.Contains(full, "zeta.example {") {
+		t.Fatal("the composed render must carry base + apps")
+	}
+}

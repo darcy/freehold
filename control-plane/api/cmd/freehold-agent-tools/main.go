@@ -577,6 +577,13 @@ func cmdServe(args []string) {
 	if err != nil {
 		log.Fatalf("open registry: %v", err)
 	}
+	// The apps registry (the exposure verbs' source of truth) — the same
+	// durable dir, re-ensured by every build from these rows.
+	apps, aerr := agenttools.OpenApps(filepath.Join(*stateDir, "apps.json"))
+	if aerr != nil {
+		log.Fatalf("open apps: %v", aerr)
+	}
+	spec.Apps = apps
 	// The console-owner credential for roster writes (grant_agent): the
 	// console's OWN identity, read from ITS state dir (0600 durable plane),
 	// used in-process to sign put-user publishes. Missing = grants refuse
@@ -666,6 +673,12 @@ func cmdServe(args []string) {
 	doorAuth, doorRevoke := cpbuild.BuildWorldDoor(spec)
 	tools.DoorAuthorize = doorAuth
 	tools.DoorRevoke = doorRevoke
+	// Exposure: Network's capability (the dispatch refuses every other agent
+	// caller), bound to the same spec + registry handles. The membership/
+	// channel reads sign as the console identity — the credential that owns
+	// the relay community.
+	tools.Expose = cpbuild.BuildExposeAppFn(spec, apps, consoleSecret)
+	tools.Unexpose = cpbuild.BuildUnexposeAppFn(spec, apps)
 	srv := &agenttools.Server{
 		Facts:        facts,
 		Audience:     audience,
@@ -703,6 +716,18 @@ func cmdServe(args []string) {
 				}
 			}
 			return false
+		},
+		AgentName: func(caller string) (string, bool) {
+			agents, err := reg.Agents()
+			if err != nil {
+				return "", false // fail closed: no name, no exposure scope
+			}
+			for _, a := range agents {
+				if a.Pubkey == caller {
+					return a.Name, true
+				}
+			}
+			return "", false
 		},
 	}
 

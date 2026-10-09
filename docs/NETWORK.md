@@ -55,6 +55,29 @@ The gateway has TWO shapes, one per substrate:
 *   **The edge is Caddy on k3s**, permanently the internal edge: a relay vhost and a CP vhost
     (the CP also serves `/mcp` publicly). Certificates are issued in-process (lego, DNS-01)
     and written into Caddy's volume.
+*   **The launch surface — agents' services, reachable by default.** When an agent stands a
+    service up (a homelab agent deploying a family calendar), reaching it is a Network
+    capability: the **exposure verbs** (`expose_app` / `unexpose_app` on the agent toolset)
+    turn {name, target, group} into a public TLS vhost on the edge — DNS pointed
+    (`<name>.<world-domain>` → the proxy), a per-app cert issued through the same
+    in-process lego chain, the Caddy config rendered + applied live — and the record lands
+    in the **apps registry** (`apps.json`, the toolset's durable dir), which the build tail
+    re-ensures so teardown/rebuild restores the apps. Two invariants: **cert before
+    config** (a vhost whose cert is missing crash-loops the whole edge — an app's block
+    enters the rendered Caddyfile only once its cert is installed) and **access narrows to
+    groups the requester belongs to** (below). The gate is the console's **member identity
+    tier**: NIP-07 Nostr login admitted by the relay's NIP-43 membership list plus
+    single-use device-link invites (the no-Nostr path); gated apps verify through
+    `/auth/verify` (a browser gets the 302 to the login page, an API client the 401), and
+    the operator session passes the same gate. Scope is structural: only the **network**
+    department's identity or the operator may call the verbs; a custom agent that asks
+    directly is refused (`-32003`) and routes through Network in conversation — and
+    widening (`visibility: public`, `auth: none`) is refused from agents outright.
+*   **Groups are relay channels.** Every exposed app rides a relay channel as its ACL —
+    the record stores the channel ID (names change; the display layer resolves the current
+    name), `#general` is the everyone-channel and the default, and the expose validates the
+    requester is IN the named channel before recording it. The family's group chat in Buzz
+    IS the family's app group: one place to manage people, revocation is a roster change.
 *   **DNS:** certs via DNS-01 with an automated provider (Cloudflare today) or MANUAL
     mode — the build stops and prints the exact TXT record to create, then the re-run
     resumes that same order when it exists; public A records are managed via the
@@ -92,46 +115,30 @@ The gateway has TWO shapes, one per substrate:
 
 ## Future
 
-*   **The launch surface — the services agents stand up, reachable by default.** When an
-    agent creates a service for its user (a homelab agent deploying a family calendar),
-    reaching it is a Network capability with a default and an advanced tier, never a
-    hand-built edge:
-    *   **The gate (the default auth layer).** The console serves a MEMBER identity tier
-        beside operator auth — the appliance's users, not its operator. Two ways in,
-        both ending in a `fh_member` cookie: NIP-07 Nostr login admitted only when the
-        pubkey is on the relay's own NIP-43 membership list (the same identity the member
-        already chats with — the relay's list is the only user store), and single-use
-        device-link invites (the operator mints a link, the click binds a session to the
-        device — the no-Nostr path for the people the appliance serves). Exposed apps gate
-        through Caddy `forward_auth` against the console's `/auth/verify`; the operator
-        session passes the same gate. An app with its own auth opts out per-record
-        (`auth: app`), and an ungated public exposure is an operator-only choice — agents
-        structurally cannot mint a world-facing domain without the gate.
-    *   **The registry + expose.** A Network-scoped agenttools verb (`expose_app` /
-        `unexpose_app`) records `{name, fqdn, target, visibility (family|public|lan),
-        auth (gate|app|none), owner}` and renders the Caddy vhost; the same record feeds
-        the launcher. Visibility defaults to family (gated, reachable from anywhere);
-        `public` is operator-only; `lan` never leaves the subnet (the resolver answers it
-        internally, no public DNS).
-    *   **Pangolin as the default public path.** The public DNS story flips: a wildcard
-        `*.cp.domain` points at the Pangolin VPS and per-app names ride the tunnel, so the
-        home IP appears nowhere in public DNS and nothing at home accepts unsolicited
-        traffic (Newt dials out from the gateway — asserted at boot and re-asserted by
-        every build, like the nftables ruleset). Apps go behind it first; relay/cp keep
-        the direct Caddy edge. A cloud world uses the same chain (Newt on its gateway
-        dials out) — one shape on every substrate. The Pangolin VPS itself is provisioned
-        through the created-host lifecycle (the Vultr provider path with a
-        pangolin-compose payload instead of PVE-on-Debian) and destroyed by `uninstall` —
-        it is a bill, and the profile records it. Per-host certs issue at expose time
-        (HTTP-01 through the tunnel); the VPS never holds the DNS provider's credentials.
-    *   **The portal.** `cp.domain` becomes the landing page: launcher tiles from the
-        registry (the apps the agents built and manage) + "talk to your agents" (the
-        relay) + login; the operator console stays behind its own operator login.
-    *   **The advanced tier.** A custom domain is the same machinery with a different
-        hostname: the registry takes a full fqdn, certs are per-host, and the user's DNS
-        is theirs to point. Verify-before-design: whether Network drives Pangolin's REST
-        API (the `pangolin-api` runner) or a Traefik file-provider door decides the
-        expose verb's write path.
+*   **The gate reads the app's group (2.1).** The registry already carries the channel ID;
+    the gate still checks the whole community — next it checks the app's channel
+    (`IsMemberAuth`, the runner-grant read) per request with the membership cache, the
+    Access card's invite picker binds the invite's group at mint, and the display resolves
+    id → name. Revocation lands within the cache TTL; drop-sessions is the instant lever.
+*   **The portal.** `cp.domain` becomes the landing page: launcher tiles from the apps
+    registry (the apps the agents built and manage) + "talk to your agents" (the relay) +
+    login; the operator console stays behind its own operator login.
+*   **Pangolin as the default public path.** The public DNS story flips: a wildcard
+    `*.cp.domain` points at the Pangolin VPS and per-app names ride the tunnel, so the
+    home IP appears nowhere in public DNS and nothing at home accepts unsolicited traffic
+    (Newt dials out from the gateway — asserted at boot and re-asserted by every build,
+    like the nftables ruleset). Apps go behind it first; relay/cp keep the direct Caddy
+    edge. A cloud world uses the same chain (Newt on its gateway dials out) — one shape on
+    every substrate. The Pangolin VPS itself is provisioned through the created-host
+    lifecycle (the Vultr provider path with a pangolin-compose payload instead of
+    PVE-on-Debian) and destroyed by `uninstall` — it is a bill, and the profile records it.
+    Per-host certs issue at expose time (HTTP-01 through the tunnel); the VPS never holds
+    the DNS provider's credentials.
+*   **The advanced tier.** A custom domain is the same machinery with a different hostname:
+    the registry takes a full fqdn, certs are per-host, and the user's DNS is theirs to
+    point. Verify-before-design: whether Network drives Pangolin's REST API (the
+    `pangolin-api` runner) or a Traefik file-provider door decides the expose verb's write
+    path.
 *   **More DNS providers:** a provider registry (`dnsman`, hoisted out of the cloudflare
     package) with per-provider A-record managers — Route53, Google Cloud DNS,
     DigitalOcean — hand-rolled REST like the Cloudflare one (no SDKs; Route53's SigV4

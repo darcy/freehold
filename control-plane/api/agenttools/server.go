@@ -49,6 +49,12 @@ type Server struct {
 	// next request. nil = everyone is an operator (no registry filtering).
 	IsAgent func(callerPubkey string) bool
 
+	// AgentName resolves a caller pubkey to its registry agent NAME (the
+	// exposure tools' scope check: exposure is the NETWORK department's
+	// capability — the caller must be that agent, an operator, or refused).
+	// nil = no name resolution (only operators may expose).
+	AgentName func(callerPubkey string) (name string, ok bool)
+
 	// AgentGrants reads the CP's agent-grant mode fresh per call ("confirm" =
 	// the default, the CPA's provision_runner flow is up and the confirmation
 	// discipline lives in the granting skill; "auto" = grants land without
@@ -221,6 +227,23 @@ func ToolList() []map[string]interface{} {
 			}, []string{"name"}),
 		},
 		{
+			"name": "expose_app", "description": "Make a service reachable by the people it serves: a public TLS vhost on the edge (DNS pointed, cert issued, Caddy config applied live), gated by the member login. SCOPE: exposure is Network's capability — only the network department (or the operator) may call this; other agents are refused, so route the ask through Network in conversation. group is the relay CHANNEL the access rides (name or id; default general — the everyone-channel): the requester must ALREADY be in it, because access narrows to groups the requester belongs to and never widens; a user in #family can open what #family can open, and removing them from the channel revokes it. requester is the pubkey of whoever asked (default: you). target is the service's internal host:port (the edge proxies plain HTTP to it). visibility: family (public DNS + gate — the default) | public (NO gate — operator-only) | lan (no public DNS). auth: gate (the member gate — the default) | app (the app has its own auth) | none (operator-only). The record survives rebuilds; a failed apply is re-ensured by the next build and the report names which legs landed.",
+			"inputSchema": i(map[string]interface{}{
+				"name":       map[string]interface{}{"type": "string"},
+				"target":     map[string]interface{}{"type": "string"},
+				"group":      map[string]interface{}{"type": "string"},
+				"requester":  map[string]interface{}{"type": "string"},
+				"visibility": map[string]interface{}{"type": "string", "enum": []string{"family", "public", "lan"}},
+				"auth":       map[string]interface{}{"type": "string", "enum": []string{"gate", "app", "none"}},
+			}, []string{"name", "target"}),
+		},
+		{
+			"name": "unexpose_app", "description": "Take an exposed app down: the record is removed, the edge config re-applied without its vhost, its A record best-effort removed. The cert's durable mirror entry is kept (harmless). Network's capability — same scope as expose_app.",
+			"inputSchema": i(map[string]interface{}{
+				"name": map[string]interface{}{"type": "string"},
+			}, []string{"name"}),
+		},
+		{
 			"name": "update_agent", "description": "Update an existing agent you created: replace its purpose (the one-liner its system prompt is rendered from — live on the agent's next spawn), switch its litellm model, replace its channel list (private applies only then), or rename it. A rename moves the durable identity dir, workspace, pod objects and registry row to the new name while KEEPING the agent's pubkey — chat history, grants and memory follow. Absent fields keep the row's current values. Core identities (the CPA and the four departments) are refused — their prompts live in the repo.",
 			"inputSchema": i(map[string]interface{}{
 				"name":     map[string]interface{}{"type": "string"},
@@ -360,6 +383,22 @@ type revokeRunnerArgs struct {
 	// RevokeFrom are the agent NAMES to drop from the door's roster; empty =
 	// retire the whole door. The server never interprets it — the flow does.
 	RevokeFrom []string `json:"revoke_from"`
+}
+
+// exposeAppArgs / unexposeAppArgs are the exposure verbs' bodies. group is
+// the relay channel (name or id — the record stores the ID); requester is
+// whoever asked (their group membership bounds the grant); visibility/auth
+// widen only at the operator's hand (dispatch-enforced).
+type exposeAppArgs struct {
+	Name       string `json:"name"`
+	Target     string `json:"target"`
+	Group      string `json:"group"`
+	Requester  string `json:"requester"`
+	Visibility string `json:"visibility"`
+	Auth       string `json:"auth"`
+}
+type unexposeAppArgs struct {
+	Name string `json:"name"`
 }
 type manageAgentArgs struct {
 	Remove string `json:"remove"`
@@ -542,6 +581,30 @@ func isWorldTool(name string) bool {
 	return false
 }
 
+// isExposureTool reports whether name is an exposure verb — NETWORK's
+// capability (external proxy/edge), never a custom agent's. The dispatch
+// refuses everyone but the network department's identity and operator
+// callers: a custom agent that self-serves exposure is a containment failure
+// even when a grant would technically allow it — the ask routes through
+// Network in conversation.
+func isExposureTool(name string) bool {
+	return name == "expose_app" || name == "unexpose_app"
+}
+
+// requireExposer enforces the exposure scope: the network department's
+// identity or an operator. Returns the refusal error or nil.
+func (s *Server) requireExposer(caller string) error {
+	if s.AgentName != nil {
+		if name, ok := s.AgentName(caller); ok && name == "network" {
+			return nil
+		}
+	}
+	if s.IsAgent != nil && s.IsAgent(caller) {
+		return fmt.Errorf("exposure is Network's capability — ask Network in conversation (the network department executes exposure; a custom agent never holds it)")
+	}
+	return nil // operator caller (not a registry agent)
+}
+
 // agentGrantsMode returns the configured agent-grant mode ("confirm" default).
 func (s *Server) agentGrantsMode() string {
 	if s.AgentGrants == nil {
@@ -660,6 +723,43 @@ func (s *Server) dispatch(w http.ResponseWriter, id json.RawMessage, params json
 			return
 		}
 		report, err := s.Tools.RevokeRunner(agent.RetireArgs{Name: a.Name, RevokeFrom: a.RevokeFrom})
+		s.textResult(w, id, err, report)
+	case "expose_app":
+		// NETWORK's capability (external proxy/edge): the network department's
+		// identity or an operator — a custom agent asking directly is refused
+		// here and routes through Network in conversation. Widening acts
+		// (visibility public / auth none) are operator-only WITHIN the
+		// allowed callers too: an agent narrows access to a group the
+		// requester belongs to; it never opens the world.
+		if err := s.requireExposer(caller); err != nil {
+			s.rpcError(w, id, -32003, err.Error())
+			return
+		}
+		var a exposeAppArgs
+		if err := json.Unmarshal(call.Arguments, &a); err != nil {
+			s.rpcError(w, id, -32602, "expose_app arguments: "+err.Error())
+			return
+		}
+		if s.IsAgent != nil && s.IsAgent(caller) && (a.Visibility == "public" || a.Auth == "none") {
+			s.rpcError(w, id, -32003, "unauthorized: widening access (visibility public / auth none) is an operator-level act — ask the operator")
+			return
+		}
+		report, err := s.Tools.ExposeApp(agent.ExposeArgs{
+			Name: a.Name, Target: a.Target, Group: a.Group, Requester: a.Requester,
+			Visibility: a.Visibility, Auth: a.Auth,
+		})
+		s.textResult(w, id, err, report)
+	case "unexpose_app":
+		if err := s.requireExposer(caller); err != nil {
+			s.rpcError(w, id, -32003, err.Error())
+			return
+		}
+		var a unexposeAppArgs
+		if err := json.Unmarshal(call.Arguments, &a); err != nil {
+			s.rpcError(w, id, -32602, "unexpose_app arguments: "+err.Error())
+			return
+		}
+		report, err := s.Tools.UnexposeApp(a.Name)
 		s.textResult(w, id, err, report)
 	case "update_agent":
 		var a updateAgentArgs

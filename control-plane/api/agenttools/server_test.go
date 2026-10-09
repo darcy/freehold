@@ -93,10 +93,10 @@ func TestServerToolList(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatal(err)
 	}
-	if len(resp.Result.Tools) != 18 {
-		t.Fatalf("expected 18 tools, got %d", len(resp.Result.Tools))
+	if len(resp.Result.Tools) != 20 {
+		t.Fatalf("expected 20 tools, got %d", len(resp.Result.Tools))
 	}
-	for _, name := range []string{"create_agent", "update_agent", "grant_agent", "provision_runner", "revoke_runner", "manage_agent", "create_job", "list_jobs", "delete_job", "pause_job", "world_status", "world_teardown", "world_migrate", "world_build", "world_exec", "world_authorize_door", "world_revoke_door", "world_register_facts"} {
+	for _, name := range []string{"create_agent", "update_agent", "grant_agent", "provision_runner", "revoke_runner", "manage_agent", "expose_app", "unexpose_app", "create_job", "list_jobs", "delete_job", "pause_job", "world_status", "world_teardown", "world_migrate", "world_build", "world_exec", "world_authorize_door", "world_revoke_door", "world_register_facts"} {
 		found := false
 		for _, tl := range resp.Result.Tools {
 			if tl["name"] == name {

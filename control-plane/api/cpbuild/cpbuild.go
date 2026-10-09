@@ -154,6 +154,12 @@ type Spec struct {
 	AgentRegistry *agenttools.Registry
 	FactsStore    *agenttools.FactsStore
 
+	// Apps is the exposed-apps registry (apps.json in the agent-tools durable
+	// dir) — the build tail's worldApps re-ensures every record (DNS, cert,
+	// edge config), so a teardown/rebuild restores the apps the same way
+	// capability doors re-stage. nil = no apps stage.
+	Apps *agenttools.AppsStore
+
 	// AgentIdentityDir is where agent identity dirs live (the durable
 	// agent-tools state dir, `<root>/agent-tools`), so the console executor and
 	// the agent-tools server mint into the SAME dir and NEVER re-mint a
@@ -187,6 +193,11 @@ type Spec struct {
 	// admin kubeconfig for migration staging (tests). It receives the k3s vmid
 	// and returns the raw in-guest kubeconfig.
 	kubeconfigFetch func(vmid uint32) (string, error)
+
+	// uploadHook, when set, replaces the runner's file upload (tests) — the
+	// same escape hatch execHook is for exec; the expose chain's file-transit
+	// (the rendered edge config) exercises it.
+	uploadHook func(target, localPath, remotePath string, timeoutS uint64) error
 
 	// execHook, when set, replaces the co-located-runner exec for every
 	// execOut call (tests: the kube-slot carve + token read are hermetically
@@ -1572,6 +1583,15 @@ func BuildWorldApply(spec *Spec) agent.WorldApply {
 				return "", fmt.Errorf("world-build cert: %w", err)
 			}
 			report = append(report, "cert issued/installed (or already present)")
+		}
+		// 7.5. The exposed apps: every registry row re-ensured (DNS pointed,
+		// cert issued/seeded, the edge config rendered + applied ONCE) — the
+		// rebuild-safety half of expose_app, the same ensure-discipline as the
+		// doors' re-stage.
+		if appsReport, err := spec.worldApps(); err != nil {
+			return "", fmt.Errorf("world-build apps: %w", err)
+		} else if appsReport != "" {
+			report = append(report, appsReport)
 		}
 		// 7.25. Drop the CP's /etc/hosts public-host pins. The agent-tools seed
 		// pinned relay.<apex>/cp.<apex> -> the guest LXC IP so it could dial the

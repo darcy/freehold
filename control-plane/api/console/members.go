@@ -561,7 +561,9 @@ func (s *Server) memberLinkLand(w http.ResponseWriter, r *http.Request, token st
 
 // forwardAuthVerify is the gate endpoint Caddy's forward_auth calls for every
 // request to a gated app: the original request's cookies ride the
-// subrequest; 204 admits, 401 denies.
+// subrequest; 204 admits, anything else denies. A denial is content-negotiated:
+// a browser (Accept: text/html) gets a 302 to the login page with the app's
+// URL as the post-login target; API clients get the bare 401.
 func (s *Server) forwardAuthVerify(w http.ResponseWriter, r *http.Request) {
 	if s.Members == nil {
 		writeErr(w, http.StatusNotFound, "member gate is not enabled on this console")
@@ -584,7 +586,49 @@ func (s *Server) forwardAuthVerify(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// A denied BROWSER gets the login page: the redirect must be ABSOLUTE —
+	// Caddy copies this response (status + Location) back to the client, and
+	// the client is on the APP's origin, where no login page is served.
+	// API clients (no Accept: text/html) get the bare 401.
+	if strings.Contains(r.Header.Get("Accept"), "text/html") {
+		next := s.gateNext(r)
+		if next == "" {
+			next = strings.TrimSuffix(ofStr(s.PublicOrigin), "/")
+		}
+		login := "/auth?next=" + url.QueryEscape(next)
+		if pub := ofStr(s.PublicOrigin); pub != "" {
+			login = strings.TrimSuffix(pub, "/") + login
+		}
+		http.Redirect(w, r, login, http.StatusFound)
+		return
+	}
 	writeErr(w, http.StatusUnauthorized, "no valid session — sign in at /auth")
+}
+
+// ofStr dereferences an optional string ("" for nil) — the optional PublicOrigin.
+func ofStr(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
+}
+
+// gateNext composes the app URL a denied browser should return to after
+// login: the forwarded proto/host/uri headers (Caddy's forward_auth passes
+// the original request's headers; the auth subrequest's own URI is /auth/verify
+// and is never used). An empty PublicOrigin (loopback/dev) yields "" — the
+// browser falls back to the login page alone. Same-site validated by
+// safeNext before use.
+func (s *Server) gateNext(r *http.Request) string {
+	host := r.Header.Get("X-Forwarded-Host")
+	if host == "" {
+		return ""
+	}
+	proto := r.Header.Get("X-Forwarded-Proto")
+	if proto == "" {
+		proto = "https"
+	}
+	return s.safeNext(proto + "://" + host + r.Header.Get("X-Forwarded-Uri"))
 }
 
 func (s *Server) memberLogout(w http.ResponseWriter, r *http.Request) {
