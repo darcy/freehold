@@ -768,25 +768,24 @@ func TestGateResolvesOldShapeRows(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	rec, _ := stale.Get("yuvomi")
-	rec.FQDN = "yuvomi.cp.example.com" // the released shape's stored value
-	if err := stale.Expose... // no-clobber: remove + re-add
+	staleRec, _ := stale.Get("yuvomi")
+	staleRec.FQDN = "yuvomi.cp.example.com" // the released shape's stored value
 	_, _ = stale.Unexpose("yuvomi")
-	if err := stale.Expose(rec); err != nil {
+	if err := stale.Expose(staleRec); err != nil {
 		t.Fatal(err)
 	}
 
 	// The member logs in and hits the DERIVED hostname — the stale stored
 	// FQDN must not matter to the gate.
-	rec := f.loginAs(t, f.memberSec, "")
-	if rec.Code != 200 {
-		t.Fatalf("login: %d %s", rec.Code, rec.Body.String())
+	loginRec := f.loginAs(t, f.memberSec, "")
+	if loginRec.Code != 200 {
+		t.Fatalf("login: %d %s", loginRec.Code, loginRec.Body.String())
 	}
-	tok := cookieOf(t, rec, memberCookie)
+	tok := cookieOf(t, loginRec, memberCookie)
 	req := httptest.NewRequest(http.MethodGet, "/auth/verify", nil)
 	req.Header.Set("X-Original-Host", "yuvomi.example.com")
 	req.AddCookie(&http.Cookie{Name: memberCookie, Value: tok})
-	rec = httptest.NewRecorder()
+	rec := httptest.NewRecorder()
 	f.s.ServeHTTP(rec, req)
 	if rec.Code != http.StatusNoContent {
 		t.Fatalf("the gate must resolve the old-shape row at its derived hostname: %d", rec.Code)
