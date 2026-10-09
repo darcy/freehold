@@ -417,7 +417,15 @@ func (s *Server) memberDomain() string {
 	if s.PublicOrigin == nil || *s.PublicOrigin == "" {
 		return ""
 	}
-	return strings.TrimPrefix(hostOf(*s.PublicOrigin), "cp.")
+	// The FIRST-label rule, matching cpbuild's appDomainBase: the console
+	// host's world domain (cp.librem… → librem…; control.example.com →
+	// example.com). A two-label host IS the zone — returned unchanged.
+	host := hostOf(*s.PublicOrigin)
+	labels := strings.Split(host, ".")
+	if len(labels) >= 3 {
+		return strings.Join(labels[1:], ".")
+	}
+	return host
 }
 
 // memberCookieDomain scopes the member cookie to the appliance's zone —

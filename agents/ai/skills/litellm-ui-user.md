@@ -10,7 +10,7 @@ metadata:
 
 The LiteLLM gateway serves its admin UI at `/ui` on the gateway itself
 (`http://<litellm-ip>:4000/ui`; the public edge fronts it at
-`https://litellm.cp.<domain>/ui` once the app is exposed). The UI logs in
+`https://litellm.<world domain>/ui` (a sibling of the cp host — an app named `litellm` lands at `<name>.<world domain>`) once the app is exposed). The UI logs in
 with LiteLLM USER accounts (not the master key).
 
 ## Create the user

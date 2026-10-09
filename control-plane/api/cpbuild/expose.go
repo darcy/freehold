@@ -155,6 +155,15 @@ const appsCertSlot = "apps"
 // certs' challenges live at their own label names and can never collide).
 func appWildcardHost(cpHost string) string { return "*." + appDomainBase(cpHost) }
 
+// appRecordFQDN derives the row's hostname FROM ITS NAME at consume time —
+// rows written by the released per-app shape (<name>.<cpHost>) re-derive to
+// the sibling shape (<name>.<world domain>) the shared wildcard covers,
+// instead of re-serving a name the wildcard's one-label coverage misses
+// (a silent TLS mismatch). The stored FQDN is informational.
+func (s *Spec) appRecordFQDN(rec agenttools.AppRecord) string {
+	return appFQDN(s.CpHost, rec.Name)
+}
+
 // appVhost builds one registry row's site block. Gated apps forward through
 // the console's member gate on the CP guest (the CP's LAN IP, port 8080);
 // every app presents the SHARED wildcard cert.
@@ -164,7 +173,7 @@ func (s *Spec) appVhost(rec agenttools.AppRecord) caddydeploy.AppVhost {
 		gate = s.CpIP + ":8080"
 	}
 	return caddydeploy.AppVhost{
-		FQDN:     rec.FQDN,
+		FQDN:     s.appRecordFQDN(rec),
 		Upstream: rec.Target,
 		Slot:     appsCertSlot,
 		Gate:     gate,
@@ -227,23 +236,20 @@ func (s *Spec) appsCertEnsure() (bool, error) {
 
 // appDNSEnsure points the app's public A record at the proxy. LAN visibility
 // skips it: no public record — the name resolves only inside the world.
-func (s *Spec) appDNSEnsure(rec agenttools.AppRecord) (bool, error) {
-	if rec.Visibility == agenttools.VisibilityLAN {
-		return false, nil
-	}
+func (s *Spec) appDNSEnsure(fqdn string) (bool, error) {
 	if s.ProxyIP == "" {
-		return false, fmt.Errorf("app dns %s: the proxy IP is not in the world coords", rec.FQDN)
+		return false, fmt.Errorf("app dns %s: the proxy IP is not in the world coords", fqdn)
 	}
 	provider, env, err := s.dnsCredFromStore("relay")
 	if err != nil {
-		return false, fmt.Errorf("app dns %s: %w", rec.FQDN, err)
+		return false, fmt.Errorf("app dns %s: %w", fqdn, err)
 	}
 	mgr, err := dnsman.For(provider, env)
 	if err != nil {
-		return false, fmt.Errorf("app dns %s: %w", rec.FQDN, err)
+		return false, fmt.Errorf("app dns %s: %w", fqdn, err)
 	}
-	if err := mgr.UpsertA(rec.FQDN, s.ProxyIP); err != nil {
-		return false, fmt.Errorf("app dns %s: %w", rec.FQDN, err)
+	if err := mgr.UpsertA(fqdn, s.ProxyIP); err != nil {
+		return false, fmt.Errorf("app dns %s: %w", fqdn, err)
 	}
 	return true, nil
 }
@@ -354,7 +360,7 @@ func (s *Spec) worldApps() (string, error) {
 	}
 	var failed []string
 	for _, rec := range records {
-		if _, err := s.appDNSEnsure(rec); err != nil {
+		if _, err := s.appDNSEnsure(s.appRecordFQDN(rec)); err != nil {
 			failed = append(failed, rec.Name+" dns: "+err.Error())
 		}
 	}
@@ -421,7 +427,7 @@ func BuildExposeAppFn(spec *Spec, apps *agenttools.AppsStore, consoleSecret []by
 		}
 		report := fmt.Sprintf("%s → https://%s (group %s, visibility %s, auth %s)",
 			rec.Name, rec.FQDN, gid, rec.Visibility, rec.Auth)
-		if _, err := spec.appDNSEnsure(rec); err != nil {
+		if _, err := spec.appDNSEnsure(fqdn); err != nil {
 			return report + " — RECORDED; the DNS step failed and the next build re-ensures it: " + err.Error(), nil
 		}
 		if _, err := spec.appsCertEnsure(); err != nil {
@@ -451,7 +457,7 @@ func BuildUnexposeAppFn(spec *Spec, apps *agenttools.AppsStore) func(name string
 		if rec.Visibility != agenttools.VisibilityLAN {
 			if provider, env, err := spec.dnsCredFromStore("relay"); err == nil {
 				if mgr, merr := dnsman.For(provider, env); merr == nil {
-					_ = mgr.DeleteA(rec.FQDN) // best-effort
+					_ = mgr.DeleteA(spec.appRecordFQDN(rec)) // best-effort
 				}
 			}
 		}

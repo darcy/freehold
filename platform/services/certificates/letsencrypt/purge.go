@@ -113,8 +113,8 @@ func findCoveringZone(client *http.Client, base, token, apiKey, email, name stri
 			return "", fmt.Errorf("cloudflare purge list zones: HTTP %d: %s", resp.StatusCode, trunc(body))
 		}
 		var out struct {
-			Success  bool `json:"success"`
-			Result   []struct {
+			Success bool `json:"success"`
+			Result  []struct {
 				ID   string `json:"id"`
 				Name string `json:"name"`
 			} `json:"result"`

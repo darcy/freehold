@@ -42,14 +42,14 @@ var ErrAuthInvalid = errors.New("acme: authorization invalid")
 
 // pendingResume is the persisted on-disk order state (sealed acct key).
 type pendingResume struct {
-	Domain          string `json:"domain"`
-	Wildcard        bool   `json:"wildcard"`
-	AcctKeySealed   string `json:"acct_key_sealed"` // hex ciphertext (sealed to ops identity)
-	Kid             string `json:"kid"`
-	OrderURL        string `json:"order_url"`
-	ChallengeName   string `json:"challenge_name"`
-	ChallengeValue  string `json:"challenge_value"`  // the expected TXT content (propagation wait)
-	CreatedAt       string `json:"created_at"`       // RFC3339; orders expire — resume only while fresh
+	Domain         string `json:"domain"`
+	Wildcard       bool   `json:"wildcard"`
+	AcctKeySealed  string `json:"acct_key_sealed"` // hex ciphertext (sealed to ops identity)
+	Kid            string `json:"kid"`
+	OrderURL       string `json:"order_url"`
+	ChallengeName  string `json:"challenge_name"`
+	ChallengeValue string `json:"challenge_value"` // the expected TXT content (propagation wait)
+	CreatedAt      string `json:"created_at"`      // RFC3339; orders expire — resume only while fresh
 }
 
 // Resume is a resumable issuance controller for one cert-domain.
@@ -305,9 +305,37 @@ func (r *Resume) PropagationWait(po *pendingOrder) error {
 	if st.ChallengeName == "" || st.ChallengeValue == "" {
 		return fmt.Errorf("resume propagation: order %s has no placed challenge recorded", po.orderURL)
 	}
+
+	// An order whose authorization LE ALREADY validated (a resume that
+	// outlived its own validation) needs no record — waiting would stall the
+	// full timeout on a purged TXT before Resolve skips it.
+	core, err := r.newCore(po.acctKey, po.kid)
+	if err != nil {
+		return err
+	}
+	order, err := core.Orders.Get(po.orderURL)
+	if err != nil {
+		return err
+	}
+	if ok, verr := r.authorizationValid(core, order)(); verr == nil && ok {
+		return nil
+	}
+
+	// The SELF-HEAL: a cert order's challenge TXT can be removed UNDER it —
+	// another flow sharing the challenge name purges on every fresh order
+	// (a sibling wildcard + the slot cert; two processes don't serialize).
+	// The challenge is RE-PLACEABLE: the token is the authorization's own,
+	// so the same value re-presents. One re-place + one more wait; a still-
+	// failing wait is a real error. (Without this, a purged challenge
+	// wedges the order into a propagation timeout on every attempt until
+	// the pending state's 7-day freshness lapses.)
 	if err := waitAuthoritativePropagation(st.ChallengeName+".", st.ChallengeValue, 3*time.Minute); err != nil {
-		return fmt.Errorf("dns-01 propagation: %w — expected %s TXT %q (manual DNS: create it in your console, then re-run `freehold build`)",
-			err, st.ChallengeName, st.ChallengeValue)
+		if perr := r.place(po); perr != nil {
+			return fmt.Errorf("dns-01 propagation: %w (challenge re-place failed: %v)", err, perr)
+		}
+		if err := waitAuthoritativePropagation(st.ChallengeName+".", st.ChallengeValue, 3*time.Minute); err != nil {
+			return fmt.Errorf("dns-01 propagation after re-place: %w", err)
+		}
 	}
 	return nil
 }
