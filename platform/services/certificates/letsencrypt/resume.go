@@ -185,16 +185,24 @@ func (r *Resume) place(po *pendingOrder) error {
 	if err != nil {
 		return err
 	}
-	chlg, _, err := r.findDNSChallenge(core, order)
+	chlg, authz, err := r.findDNSChallenge(core, order)
 	if err != nil {
 		return err
 	}
+	// The challenge domain is the AUTHORIZATION's identifier — for a WILDCARD
+	// order that is the BASE ("cp.x", no "*"): the TXT lives at
+	// _acme-challenge.<base>. Passing the wildcard form here puts a
+	// literal-"*" label in the zone — a record NOTHING validates (LE checks
+	// the base's name), so the authorization dies invalid while the
+	// propagation check green-lights the wrong record. (lego's own solve
+	// path passes the identifier for exactly this reason.)
+	challengeDomain := authz.Identifier.Value
 	keyAuth, err := core.GetKeyAuthorization(chlg.Token)
 	if err != nil {
 		return err
 	}
-	perr := r.Provider.Present(r.Domain, chlg.Token, keyAuth)
-	info := dns01.GetChallengeInfo(r.Domain, keyAuth)
+	perr := r.Provider.Present(challengeDomain, chlg.Token, keyAuth)
+	info := dns01.GetChallengeInfo(challengeDomain, keyAuth)
 	if perr != nil {
 		if m, ok := r.Provider.(instructional); ok && m.Instructional() {
 			if err := r.persist(po, info.EffectiveFQDN, info.Value); err != nil {
@@ -207,23 +215,24 @@ func (r *Resume) place(po *pendingOrder) error {
 }
 
 // findDNSChallenge returns the dns-01 challenge from the order's (first)
-// pending authorization.
-func (r *Resume) findDNSChallenge(core *acmeapi.Core, order acme.ExtendedOrder) (acme.Challenge, string, error) {
+// pending authorization, WITH the authorization (its identifier is the
+// challenge's real domain — the base for a wildcard order).
+func (r *Resume) findDNSChallenge(core *acmeapi.Core, order acme.ExtendedOrder) (acme.Challenge, acme.Authorization, error) {
 	for _, url := range order.Authorizations {
 		auth, err := core.Authorizations.Get(url)
 		if err != nil {
-			return acme.Challenge{}, "", err
+			return acme.Challenge{}, acme.Authorization{}, err
 		}
 		if auth.Status == acme.StatusValid {
 			continue
 		}
 		for _, c := range auth.Challenges {
 			if c.Type == "dns-01" {
-				return c, url, nil
+				return c, auth, nil
 			}
 		}
 	}
-	return acme.Challenge{}, "", fmt.Errorf("no pending dns-01 challenge in order %s", order.Location)
+	return acme.Challenge{}, acme.Authorization{}, fmt.Errorf("no pending dns-01 challenge in order %s", order.Location)
 }
 
 // acceptChallenges POSTs "ready" for every outstanding dns-01 challenge. An
