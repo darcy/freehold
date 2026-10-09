@@ -38,6 +38,11 @@
   tr.door-focus td:first-child { border-left: 2px solid #58a6ff; }
   #fill-fields input { margin-bottom: 8px; }
   body.member #admin-ui { display: none; }
+  .tiles { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 8px; }
+  .tile { display: inline-block; padding: 10px 14px; border: 1px solid #2a2a2e; border-radius: 6px; text-decoration: none; color: inherit; }
+  .tile:hover { border-color: #4a9eff; }
+  .tile b { display: block; }
+  .tile .muted { font-size: .75rem; }
 </style>
 </head>
 <body>
@@ -97,6 +102,12 @@
 </div>
 
 <div id="err" class="muted"></div>
+
+<div class="card">
+  <b id="portal-title">apps</b>
+  <div class="small">Everything exposed on this world that your session opens — one click each.</div>
+  <div id="tiles" class="tiles"></div>
+</div>
 
 <div class="card">
   <b>scheduled jobs</b>
@@ -469,8 +480,20 @@ $("#invite-mint").onclick = async () => {
   } catch (e) { $("#err").textContent = "error: " + e.message; }
 };
 
+async function loadPortal() {
+  try {
+    const res = await api("/api/my/apps");
+    const tiles = (res.apps || []).map((a) =>
+      `<a class="tile" href="https://${esc(a.fqdn)}" target="_blank" rel="noopener"><b>${esc(a.name)}</b><span class="muted">${esc(a.fqdn)}</span></a>`);
+    $("#tiles").innerHTML = tiles.join("") || '<span class="muted">nothing exposed yet — ask an agent to expose an app</span>';
+  } catch (e) {
+    $("#tiles").innerHTML = '<span class="muted">nothing exposed yet — ask an agent to expose an app</span>';
+  }
+}
+
 refresh().catch((e) => { $("#err").textContent = "error: " + e.message; });
 loadSettings();
+loadPortal();
 loadJobs();
 </script>
 <script>
@@ -487,6 +510,7 @@ loadJobs();
     const j = await api("/api/jobs");
     if (j && j.jobs) {
       document.body.classList.add("member");
+      $("#portal-title").textContent = "your apps";
       $("#member-badge").style.display = "inline-block";
       $("#member-signout").onclick = async () => {
         try { await api("/api/auth/member/logout", {}); } catch (e) {}

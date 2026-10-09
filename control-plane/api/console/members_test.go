@@ -895,3 +895,90 @@ func TestJobsServesTheMemberCookieSession(t *testing.T) {
 		t.Fatalf("a device session must not read jobs, got %d", rec.Code)
 	}
 }
+
+// TestMyAppsPerSessionKind pins the portal's redaction: the operator's
+// session sees every exposed app; a member's fh_member session sees only
+// what their channel roster admits; a device session sees exactly the apps
+// its link was minted for; the anonymous caller sees nothing. Rows carry
+// names + FQDNs only — no targets, no owners.
+func TestMyAppsPerSessionKind(t *testing.T) {
+	f := newMemberFixture(t)
+	apps, err := agenttools.OpenApps(filepath.Join(f.s.AgentToolsDir, "apps.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := apps.Expose(agenttools.AppRecord{Name: "yuvomi", FQDN: "yuvomi.example.com", Target: "10.0.0.9:80", Group: testChannelID, Owner: "somebody", Visibility: "family"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := apps.Expose(agenttools.AppRecord{Name: "other", FQDN: "other.example.com", Target: "10.0.0.10:80", Group: "another-channel", Owner: "somebody", Visibility: "family"}); err != nil {
+		t.Fatal(err)
+	}
+
+	names := func(rec *httptest.ResponseRecorder) []string {
+		var out struct {
+			Apps []struct {
+				Name string `json:"name"`
+				FQDN string `json:"fqdn"`
+			} `json:"apps"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+			t.Fatalf("bad body: %s", rec.Body.String())
+		}
+		got := []string{}
+		for _, a := range out.Apps {
+			got = append(got, a.Name)
+		}
+		return got
+	}
+	get := func(cookies ...*http.Cookie) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, "/api/my/apps", nil)
+		for _, c := range cookies {
+			req.AddCookie(c)
+		}
+		rec := httptest.NewRecorder()
+		f.s.ServeHTTP(rec, req)
+		return rec
+	}
+
+	// The anonymous: closed.
+	if rec := get(); rec.Code != 401 {
+		t.Fatalf("anonymous portal: %d", rec.Code)
+	}
+
+	// The operator (a console session): everything.
+	rec := get(opCookie(t, f))
+	if rec.Code != 200 {
+		t.Fatalf("the operator portal: %d %s", rec.Code, rec.Body.String())
+	}
+	if got := names(rec); len(got) != 2 || got[0] != "other" || got[1] == "other" && got[1] != "yuvomi" {
+		t.Fatalf("the operator sees both: %v", got)
+	}
+	if body := rec.Body.String(); strings.Contains(body, "10.0.0.9") || strings.Contains(body, "somebody") {
+		t.Fatal("portal rows must not leak targets or owners")
+	}
+
+	// The member (the /auth login's fh_member session): only the channel
+	// apps — yuvomi's channel admits them, other's does not.
+	rec = f.loginAs(t, f.memberSec, "")
+	mtok := cookieOf(t, rec, memberCookie)
+	rec = get(&http.Cookie{Name: memberCookie, Value: mtok})
+	if rec.Code != 200 {
+		t.Fatalf("the member portal: %d %s", rec.Code, rec.Body.String())
+	}
+	if got := names(rec); len(got) != 1 || got[0] != "yuvomi" {
+		t.Fatalf("the member sees only the channel apps: %v", got)
+	}
+
+	// The device session: exactly the bound list.
+	devTok, err := f.s.Members.IssueMemberSession("", "device-owner", true, []string{"other"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec = get(&http.Cookie{Name: memberCookie, Value: devTok})
+	if rec.Code != 200 {
+		t.Fatalf("the device portal: %d %s", rec.Code, rec.Body.String())
+	}
+	if got := names(rec); len(got) != 1 || got[0] != "other" {
+		t.Fatalf("the device session sees exactly its bound apps: %v", got)
+	}
+}

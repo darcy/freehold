@@ -202,6 +202,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.settingsSet(w, r)
 	case path == "/api/apps" && method == http.MethodGet:
 		s.appsList(w, r)
+	case path == "/api/my/apps" && method == http.MethodGet:
+		s.myApps(w, r)
 	case path == "/api/members/portal" && method == http.MethodPost:
 		s.memberPortalMint(w, r)
 	case strings.HasPrefix(path, "/auth/portal/") && method == http.MethodGet:
@@ -817,18 +819,18 @@ func (s *Server) overview(w http.ResponseWriter, r *http.Request) {
 	snap := fresh.Snapshot()
 
 	type runnerOut struct {
-		Name      string      `json:"name"`
-		Status    string      `json:"status"`
-		NostrPub  string      `json:"nostr_pubkey"`
-		EncPub    string      `json:"enc_pubkey"`
-		McpAddr   *string     `json:"mcp_addr"`
-		Risk      *string     `json:"risk"`
-		Secret    interface{} `json:"secret"`
-		Grants    interface{} `json:"grants"`
+		Name     string      `json:"name"`
+		Status   string      `json:"status"`
+		NostrPub string      `json:"nostr_pubkey"`
+		EncPub   string      `json:"enc_pubkey"`
+		McpAddr  *string     `json:"mcp_addr"`
+		Risk     *string     `json:"risk"`
+		Secret   interface{} `json:"secret"`
+		Grants   interface{} `json:"grants"`
 		// grants_source: "live" (the relay-signed 39002 roster — what actually
 		// gates exec) or "package" (the shipped fallback — the co-located
 		// runner's mode). Empty when neither was readable (grants = null).
-		GrantsSource string `json:"grants_source,omitempty"`
+		GrantsSource string      `json:"grants_source,omitempty"`
 		Readiness    interface{} `json:"readiness,omitempty"`
 		// colocated marks the CP's own co-located runner.
 		Colocated bool `json:"colocated,omitempty"`
