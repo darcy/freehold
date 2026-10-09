@@ -802,7 +802,10 @@ func TestMemberPortalSurvivesRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	m2 := NewMembers(f.membersFile)
-	pk, _, ok := m2.ConsumeMemberPortal(tok)
+	pk, _, ok, err := m2.ConsumeMemberPortal(tok)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !ok || pk != f.opPK {
 		t.Fatalf("the portal token must survive a restart: pk=%q ok=%v", pk, ok)
 	}
