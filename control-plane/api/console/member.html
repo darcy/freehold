@@ -10,7 +10,7 @@
   body { margin:0; min-height:100vh; display:flex; align-items:center; justify-content:center;
          font-family: ui-monospace, "SFMono-Regular", Menlo, monospace;
          background:#0d1117; color:#c9d1d9; padding:16px; }
-  .card { max-width:26rem; width:100%; padding:2rem; background:#161b22;
+  .card { max-width:28rem; width:100%; padding:2rem; background:#161b22;
           border:1px solid #21262d; border-radius:8px; }
   h1 { font-size:16px; letter-spacing:2px; margin:0 0 .6rem; color:#e6edf3; }
   h1 span { color:#58a6ff; }
@@ -18,23 +18,201 @@
   button { background:#21262d; border:1px solid #30363d; color:#c9d1d9; border-radius:6px;
            padding:8px 14px; font:inherit; cursor:pointer; }
   button:hover { background:#30363d; }
+  button.primary { background:#1a3a5c; border-color:#2a5580; }
+  input[type=text], input[type=password] { background:#0d1117; border:1px solid #30363d; color:#c9d1d9;
+           border-radius:6px; padding:8px 10px; font:inherit; width:100%; }
+  label.small { display:block; }
+  .row { display:flex; gap:8px; align-items:center; margin-top:.8rem; }
+  .muted { color:#8b949e; font-size:12px; }
   #err { color:#ff7b72; font-size:12px; margin-top:.8rem; display:none; word-break:break-word; }
+  details { margin-top:1rem; }
+  summary { cursor:pointer; color:#8b949e; font-size:13px; }
+  .forget { background:none; border:none; color:#ff7b72; padding:0; font-size:12px; text-decoration:underline; }
 </style>
 </head>
 <body>
 <div class="card">
   <h1>freehold <span>&middot;</span> sign in</h1>
-  <p>Members sign in with Nostr — the same identity you already use to talk with the agents. Your key never leaves your device.</p>
-  <p>No Nostr key? Use the invite link that was sent to you.</p>
-  <button id="login">Sign in with Nostr</button>
+  <p>Members sign in with Nostr — the same identity you already use to talk with the agents. Your key never leaves your device: it signs the login here, and only the signature is sent.</p>
+
+  <div id="remembered" style="display:none">
+    <p>Signing in as <b id="remembered-pk"></b> <span class="muted">(remembered in this browser)</span></p>
+    <button id="remembered-login" class="primary">Sign in</button>
+    <button class="forget" id="forget">forget this key</button>
+  </div>
+
+  <div class="row">
+    <button id="login" class="primary">Sign in with Nostr</button>
+  </div>
+  <p class="muted">Needs a NIP-07 extension (Alby, nos2x…). Don't have one? Use your key below.</p>
+
+  <details>
+    <summary>Sign in with your key (paste nsec)</summary>
+    <div style="margin-top:.8rem">
+      <input id="nsec" type="password" placeholder="nsec1… or 64-hex (never sent anywhere — it signs here)" autocomplete="off">
+      <label class="small" style="margin-top:.6rem">
+        <input type="checkbox" id="remember" style="width:auto"> remember this key in this browser (it stays in this browser's storage)
+      </label>
+      <div class="row">
+        <button id="paste-login" class="primary">Sign in</button>
+      </div>
+    </div>
+  </details>
+
   <div id="err"></div>
 </div>
 <script>
 const errBox = document.getElementById("err");
 function fail(msg) { errBox.textContent = msg; errBox.style.display = "block"; }
 const next = new URLSearchParams(location.search).get("next") || "";
+const REMEMBER_KEY = "fh_member_nsec";
+
+// ---- bytes / hashing ----
+const toHex = (b) => Array.from(b).map(c => c.toString(16).padStart(2, "0")).join("");
+const fromHex = (h) => new Uint8Array(h.match(/../g).map(c => parseInt(c, 16)));
+const utf8 = (s) => new TextEncoder().encode(s);
+const concat = (...arrs) => { const out = new Uint8Array(arrs.reduce((n, a) => n + a.length, 0)); let o = 0; for (const a of arrs) { out.set(a, o); o += a.length; } return out; };
+const sha256 = async (b) => new Uint8Array(await crypto.subtle.digest("SHA-256", b));
+const toBytes = (n, len) => { const out = new Uint8Array(len); let v = n; for (let i = len - 1; i >= 0; i--) { out[i] = Number(v & 255n); v >>= 8n; } return out; };
+const toBigInt = (b) => BigInt("0x" + toHex(b));
+
+// ---- bech32 (nsec1…) ----
+const B32 = "qpzry9x8gf2tvdw0s3jn54khce6mua7l";
+const GEN = [0x3b6a57b2, 0x26508e6d, 0x1ea119fa, 0x3d4233dd, 0x2a1462b3];
+function bech32Decode(s) {
+  s = s.trim().toLowerCase();
+  const pos = s.lastIndexOf("1");
+  if (pos < 1) throw new Error("not bech32");
+  const hrp = s.slice(0, pos), data = s.slice(pos + 1).split("").map(c => {
+    const v = B32.indexOf(c);
+    if (v < 0) throw new Error("not bech32");
+    return v;
+  });
+  // polymod over hrp_expand (HIGH bits, then 0, then LOW bits) + the data
+  // (whose last 6 values are the checksum) — must be 1 for a valid key.
+  const values = [];
+  for (const c of hrp) values.push(c.charCodeAt(0) >> 5);
+  values.push(0);
+  for (const c of hrp) values.push(c.charCodeAt(0) & 31);
+  for (const v of data) values.push(v);
+  let p = 1;
+  for (const v of values) {
+    const b = p >> 25;
+    p = ((p & 0x1ffffff) << 5) ^ v;
+    for (let i = 0; i < 5; i++) if ((b >> i) & 1) p ^= GEN[i];
+  }
+  if (p !== 1) throw new Error("bad bech32 checksum");
+  let acc = 0, bits = 0, out = [];
+  for (const v of data.slice(0, -6)) {
+    acc = (acc << 5) | v; bits += 5;
+    while (bits >= 8) { bits -= 8; out.push((acc >> bits) & 255); }
+  }
+  if (bits >= 5 || (acc & ((1 << bits) - 1)) !== 0) throw new Error("bad bech32 padding");
+  return new Uint8Array(out);
+}
+
+// ---- secp256k1 + BIP-340 schnorr ----
+// hashBip340 — BIP-340's tagged hash (sha256(sha256(tag) || sha256(tag) || m))
+// — the nonce AND the challenge use it.
+let _tagCache = null;
+async function hashBip340(m) {
+  if (!_tagCache) _tagCache = await sha256(utf8("BIP0340/challenge"));
+  return sha256(concat(_tagCache, _tagCache, m));
+}
+
+
+const P = 2n ** 256n - 2n ** 32n - 977n;
+const NN = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFEBAAEDCE6AF48A03BBFD25E8CD0364141n;
+const G = [0x79BE667EF9DCBBAC55A06295CE870B07029BFCDB2DCE28D959F2815B16F81798n,
+           0x483ADA7726A3C4655DA4FBFC0E1108A8FD17B448A68554199C47D08FFB10D4B8n];
+const mod = (a, m = P) => { const r = a % m; return r >= 0n ? r : r + m; };
+const powMod = (b, e, m) => { let r = 1n, base = mod(b, m), exp = e; while (exp > 0n) { if (exp & 1n) r = mod(r * base, m); base = mod(base * base, m); exp >>= 1n; } return r; };
+const invert = (a, m = P) => powMod(a, m - 2n, m);
+
+function pointAdd(p1, p2) {
+  if (!p1) return p2;
+  if (!p2) return p1;
+  if (p1[0] === p2[0] && mod(p1[1] + p2[1]) === 0n) return null;
+  let lam;
+  if (p1[0] === p2[0] && p1[1] === p2[1]) {
+    lam = mod(3n * p1[0] * p1[0] * invert(2n * p1[1]));
+  } else {
+    lam = mod((p2[1] - p1[1]) * invert(mod(p2[0] - p1[0])));
+  }
+  const x = mod(lam * lam - p1[0] - p2[0]);
+  return [x, mod(lam * (p1[0] - x) - p1[1])];
+}
+function pointMul(k, p = G) {
+  let r = null, add = p;
+  while (k > 0n) {
+    if (k & 1n) r = pointAdd(r, add);
+    add = pointAdd(add, add);
+    k >>= 1n;
+  }
+  return r;
+}
+
+// signSchnorr — BIP-340: signs the 32-byte message with the 32-byte key.
+async function signSchnorr(msg, seckey) {
+  const d0 = toBigInt(seckey);
+  if (d0 === 0n || d0 >= NN) throw new Error("key out of range");
+  const pk = pointMul(d0);
+  const d = pk[1] % 2n === 0n ? d0 : NN - d0;
+  const aux = crypto.getRandomValues(new Uint8Array(32));
+  const t = toBytes(d, 32).map((b, i) => b ^ aux[i]);
+  const pkBytes = toBytes(pk[0], 32);
+  const k0 = mod(toBigInt(await hashBip340(concat(t, pkBytes, msg))), NN);
+  if (k0 === 0n) throw new Error("bad nonce");
+  const R = pointMul(k0);
+  const k = R[1] % 2n === 0n ? k0 : NN - k0;
+  const rx = toBytes(R[0], 32);
+  const e = mod(toBigInt(await hashBip340(concat(rx, pkBytes, msg))), NN);
+  return concat(rx, toBytes(mod(k + e * d, NN), 32));
+}
+
+// pubkeyOf derives the 32-byte x-only pubkey.
+async function pubkeyOf(seckey) {
+  const pk = pointMul(toBigInt(seckey));
+  return toBytes(pk[0], 32);
+}
+
+// signEvent signs the login event the server verifies (NIP-01 id = the
+// canonical serialization; JSON.stringify of an all-ASCII array matches the
+// server's canonical form byte for byte).
+async function signEvent(seckey, nonce) {
+  const pk = await pubkeyOf(seckey);
+  const ev = {
+    kind: 27235,
+    created_at: Math.floor(Date.now() / 1000),
+    tags: [["url", location.origin + "/auth"], ["method", "GET"]],
+    content: nonce,
+    pubkey: toHex(pk),
+  };
+  const ser = JSON.stringify([0, ev.pubkey, ev.created_at, ev.kind, ev.tags, ev.content]);
+  const id = await sha256(utf8(ser));
+  const sig = await signSchnorr(id, seckey);
+  ev.id = toHex(id);
+  ev.sig = toHex(sig);
+  return ev;
+}
+
+// ---- the flows ----
+async function loginWith(seckey) {
+  const ch = await (await fetch("/api/auth/member/challenge")).json();
+  if (!ch.nonce) throw new Error("no challenge");
+  const ev = await signEvent(seckey, ch.nonce);
+  const res = await fetch("/api/auth/member/login", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ nonce: ch.nonce, pubkey: ev.pubkey, created_at: ev.created_at, tags: ev.tags, sig: ev.sig, next: next }),
+  });
+  const j = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(j.error || ("HTTP " + res.status));
+  location.href = j.next || "/";
+}
+
 document.getElementById("login").onclick = async () => {
-  if (!window.nostr) { fail("No Nostr extension found (NIP-07). Use the invite link you were sent instead."); return; }
+  if (!window.nostr) { fail("No Nostr extension found (NIP-07). Use your key below."); return; }
   try {
     const ch = await (await fetch("/api/auth/member/challenge")).json();
     if (!ch.nonce) throw new Error("no challenge");
@@ -54,6 +232,45 @@ document.getElementById("login").onclick = async () => {
     location.href = j.next || "/";
   } catch (e) { fail(String(e.message || e)); }
 };
+
+// The paste path: decode → sign HERE → send only the signature. The key is
+// dropped unless remembered.
+const nsecInput = document.getElementById("nsec");
+document.getElementById("paste-login").onclick = async () => {
+  const raw = nsecInput.value.trim();
+  if (!raw) { fail("paste your key first"); return; }
+  try {
+    let seckey;
+    if (raw.toLowerCase().startsWith("nsec1")) seckey = bech32Decode(raw);
+    else if (/^[0-9a-fA-F]{64}$/.test(raw)) seckey = fromHex(raw);
+    else { fail("that is not a key (want nsec1… or 64 hex chars)"); return; }
+    await loginWith(seckey);
+    if (document.getElementById("remember").checked) {
+      localStorage.setItem(REMEMBER_KEY, toHex(seckey));
+    }
+  } catch (e) { fail(String(e.message || e)); }
+};
+
+// The remembered path: one click (the stored key signs, never leaves).
+const rememberedBox = document.getElementById("remembered");
+if (localStorage.getItem(REMEMBER_KEY)) {
+  rememberedBox.style.display = "block";
+  document.getElementById("remembered-pk").textContent = "…";
+  (async () => {
+    try {
+      const pk = await pubkeyOf(fromHex(localStorage.getItem(REMEMBER_KEY)));
+      document.getElementById("remembered-pk").textContent = toHex(pk).slice(0, 12) + "…";
+    } catch (e) { localStorage.removeItem(REMEMBER_KEY); rememberedBox.style.display = "none"; }
+  })();
+  document.getElementById("remembered-login").onclick = async () => {
+    try { await loginWith(fromHex(localStorage.getItem(REMEMBER_KEY))); }
+    catch (e) { fail(String(e.message || e)); }
+  };
+  document.getElementById("forget").onclick = () => {
+    localStorage.removeItem(REMEMBER_KEY);
+    rememberedBox.style.display = "none";
+  };
+}
 </script>
 </body>
 </html>
