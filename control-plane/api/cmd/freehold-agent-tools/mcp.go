@@ -97,6 +97,19 @@ func freeholdToolDefs(hasRunner bool, targets []string) []map[string]interface{}
 				"name":        map[string]interface{}{"type": "string"},
 				"revoke_from": map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
 			}, []string{"name"})},
+		{"name": "expose_app", "description": "Make a service reachable by the people it serves: a public TLS vhost on the edge (DNS pointed, cert issued, Caddy config applied live), gated by the member login. name is a DNS label — the app's hostname is <name>.<the cp host's own hostname> (a subdomain OF the cp host, the domain the member cookie is scoped to). SCOPE: exposure is Network's capability — only the network department (or the operator) may call this; other agents are refused, so route the ask through Network in conversation. group is the relay CHANNEL the access rides (name or id; default general — the everyone-channel): the requester must ALREADY be in it — access narrows to groups the requester belongs to and never widens (per-channel gate enforcement is the group-gate follow-up; today the gate admits every relay member). requester is the pubkey of whoever asked (default: you). target is the service's internal host:port (the edge proxies plain HTTP to it). visibility: family (public DNS + gate — the default) | public (NO gate — operator-only) | lan (no public DNS). auth: gate (the member gate — the default) | app (the app has its own auth) | none (operator-only). The record survives rebuilds; a failed apply is re-ensured by the next build and the report names which legs landed.",
+			"inputSchema": i(map[string]interface{}{
+				"name":       map[string]interface{}{"type": "string"},
+				"target":     map[string]interface{}{"type": "string"},
+				"group":      map[string]interface{}{"type": "string"},
+				"requester":  map[string]interface{}{"type": "string"},
+				"visibility": map[string]interface{}{"type": "string", "enum": []string{"family", "public", "lan"}},
+				"auth":       map[string]interface{}{"type": "string", "enum": []string{"gate", "app", "none"}},
+			}, []string{"name", "target"})},
+		{"name": "unexpose_app", "description": "Take an exposed app down: the record is removed, the edge config re-applied without its vhost, its A record best-effort removed. The cert's durable mirror entry is kept (harmless). Network's capability — same scope as expose_app.",
+			"inputSchema": i(map[string]interface{}{
+				"name": map[string]interface{}{"type": "string"},
+			}, []string{"name"})},
 	}
 	if hasRunner {
 		execDesc := "Run a shell command VERBATIM on a capability runner's target through the runner-owned connection (the credential is fixed per target by this pod's config). Pass no secrets. Returns {stdout, stderr, exit_code, timed_out}."
@@ -131,6 +144,7 @@ func isFreeholdTool(name string) bool {
 	// takes it back, and it is bounded by the same ownership guards (only doors
 	// the agent flow gave) and the same agent_grants kill switch.
 	case "create_agent", "update_agent", "manage_agent", "provision_runner", "revoke_runner",
+		"expose_app", "unexpose_app",
 		"create_job", "list_jobs", "delete_job", "pause_job":
 		return true
 	}
