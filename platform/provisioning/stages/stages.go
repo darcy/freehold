@@ -58,8 +58,11 @@ type DnsRec struct {
 
 // DnsRecords is the world's explicit resolver records, in register order: the
 // guest bare names (relay/cp/proxy/k3s/litellm) plus the dotted public hosts
-// (relayHost/cpHost) that must resolve to the PROXY (Caddy), never directly to
-// a LXC. A caller drops a record by passing an empty value for its field.
+// (relayHost/cpHost) that must resolve to the Caddy EDGE answer — the k3s node
+// IP, where caddy actually listens (the caller passes it; the proxy IP would
+// force pods/guests through the gateway's hairpin, which self-loops fatally
+// where the gateway is the host). A caller drops a record by passing an empty
+// value for its field.
 func DnsRecords(relayHost, relayIP, cpHost, cpIP, proxyIP, litellmIP string) []DnsRec {
 	var recs []DnsRec
 	if relayIP != "" {
