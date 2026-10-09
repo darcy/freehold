@@ -73,11 +73,13 @@ The gateway has TWO shapes, one per substrate:
     department's identity or the operator may call the verbs; a custom agent that asks
     directly is refused (`-32003`) and routes through Network in conversation — and
     widening (`visibility: public`, `auth: none`) is refused from agents outright.
-*   **Groups are relay channels.** Every exposed app rides a relay channel as its ACL —
-    the record stores the channel ID (names change; the display layer resolves the current
-    name), `#general` is the everyone-channel and the default, and the expose validates the
-    requester is IN the named channel before recording it. The family's group chat in Buzz
-    IS the family's app group: one place to manage people, revocation is a roster change.
+*   **Groups are relay channels.** Every exposed app rides a relay channel as its intended
+    ACL — the record stores the channel ID (names change; the display layer resolves the
+    current name), `#general` is the everyone-channel and the default, and the expose
+    validates the requester is IN the named channel before recording it. The family's
+    group chat in Buzz IS the family's app group: one place to manage people. The GATE
+    does not read the channel yet (it admits every relay member) — per-channel
+    enforcement is the 2.1 item below.
 *   **DNS:** certs via DNS-01 with an automated provider (Cloudflare today) or MANUAL
     mode — the build stops and prints the exact TXT record to create, then the re-run
     resumes that same order when it exists; public A records are managed via the

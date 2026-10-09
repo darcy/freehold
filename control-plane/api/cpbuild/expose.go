@@ -73,12 +73,14 @@ func looksLikeChannelID(g string) bool {
 }
 
 // groupID resolves the expose group: a channel NAME resolves through the
-// relay (FindChannel); an already-dashed id passes through. The record stores
-// the ID, never the name — groups get renamed, the ACL must not break.
+// relay (FindChannel); an already-dashed id passes through. EMPTY defaults
+// to `general` — the everyone-channel the first-run surface stands up. The
+// record stores the ID, never the name — groups get renamed, the ACL must
+// not break.
 func groupID(dialURL, authURL string, secret []byte, group string) (string, error) {
 	g := strings.TrimSpace(group)
 	if g == "" {
-		return "", fmt.Errorf("group is required (the relay channel the access rides — default: general)")
+		g = "general"
 	}
 	if looksLikeChannelID(g) {
 		return g, nil
@@ -220,11 +222,13 @@ func (s *Spec) appDNSEnsure(rec agenttools.AppRecord) (bool, error) {
 }
 
 // renderCaddyfile renders the CURRENT edge config from the world coords +
-// the apps registry (missing coords → "" — the caller skips). An app's site
-// block rides ONLY when its cert is on the durable mirror (cert-before-config
-// is the edge-safety invariant).
+// the apps registry — the ONE render both appliers share: the build's
+// terraform var and the verb's kubectl apply (identical output, so they
+// converge, never fight). Missing the relay/cp hosts → "" (the caller
+// skips). An app's site block rides ONLY when its cert is on the durable
+// mirror (cert-before-config is the edge-safety invariant).
 func (s *Spec) renderCaddyfile() string {
-	if s.RelayHost == "" || s.CpHost == "" || s.RelayIP == "" || s.CpIP == "" {
+	if s.RelayHost == "" || s.RelayIP == "" || s.CpHost == "" {
 		return ""
 	}
 	var apps []caddydeploy.AppVhost
@@ -243,9 +247,14 @@ func (s *Spec) renderCaddyfile() string {
 	if s.K3sIP != "" {
 		pair = s.K3sIP + ":5000"
 	}
+	cpUpstream, cpMcpUpstream := "", ""
+	if s.CpIP != "" {
+		cpUpstream = s.CpIP + ":8080"
+		cpMcpUpstream = s.CpIP + ":8089"
+	}
 	return caddydeploy.RenderCaddyfileApps(
 		s.RelayHost, s.RelayIP+":3000", pair,
-		s.CpHost, s.CpIP+":8080", s.CpIP+":8089",
+		s.CpHost, cpUpstream, cpMcpUpstream,
 		apps)
 }
 
@@ -296,26 +305,39 @@ rm -f /tmp/fh-caddyfile
 }
 
 // worldApps is the build tail's apps ensure: every registered app gets its
-// DNS pointed, its cert issued/seeded, and the edge config applied ONCE at
-// the end. Idempotent — same records, same state.
+// DNS pointed and its cert issued/seeded, and the edge config applies ONCE
+// at the end. Idempotent — same records, same state. The registry is
+// RE-READ fresh (expose writes land in the separate agent-tools process; the
+// console executor's Spec was built at serve start). One record's failure
+// (a revoked cred, an unreachable provider) is REPORTED and the tail moves
+// on — the other apps still come up, and the failure is loud in the report,
+// never silent.
 func (s *Spec) worldApps() (string, error) {
 	if s.Apps == nil {
 		return "", nil
+	}
+	if err := s.Apps.Reload(); err != nil {
+		return "", fmt.Errorf("apps registry reload: %w", err)
 	}
 	records := s.Apps.List()
 	if len(records) == 0 {
 		return "", nil
 	}
+	var failed []string
 	for _, rec := range records {
 		if _, err := s.appDNSEnsure(rec); err != nil {
-			return "", err
+			failed = append(failed, rec.Name+" dns: "+err.Error())
+			continue
 		}
 		if _, err := s.appCertEnsure(appSlot(rec.Name), rec.FQDN); err != nil {
-			return "", err
+			failed = append(failed, rec.Name+" cert: "+err.Error())
 		}
 	}
 	if err := s.applyCaddyfile(); err != nil {
-		return "", err
+		return "", fmt.Errorf("edge config: %w", err)
+	}
+	if len(failed) > 0 {
+		return fmt.Sprintf("apps reconciled (%d of %d; FAILED: %s)", len(records)-len(failed), len(records), strings.Join(failed, "; ")), nil
 	}
 	return fmt.Sprintf("apps reconciled (%d)", len(records)), nil
 }
@@ -343,7 +365,7 @@ func BuildExposeAppFn(spec *Spec, apps *agenttools.AppsStore, consoleSecret []by
 		}
 		requester := args.Requester
 		if requester == "" {
-			requester = spec.Audience
+			return "", fmt.Errorf("expose: no requester (the pubkey of whoever asked — their group membership bounds the grant)")
 		}
 		if err := requesterInGroup(spec.AgentRegistry, spec.OwnerPub, requester, dial, auth, consoleSecret, gid); err != nil {
 			return "", err

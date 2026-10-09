@@ -45,7 +45,6 @@ import (
 	"freehold/platform/provisioning/stages"
 	"freehold/platform/services/certificates/letsencrypt"
 	relaydeploy "freehold/platform/services/relay/buzz"
-	caddydeploy "freehold/platform/services/webproxy/caddy"
 	"freehold/providers/proxmox"
 	"freehold/providers/proxmox/drive"
 	"freehold/providers/proxmox/teardown"
@@ -1554,19 +1553,15 @@ func BuildWorldApply(spec *Spec) agent.WorldApply {
 			}
 			var extra []string
 			if spec.CpHost != "" && spec.RelayIP != "" {
-				relayUpstream := fmt.Sprintf("%s:3000", spec.RelayIP)
-				cpUpstream, cpMcpUpstream := "", ""
-				if spec.CpIP != "" {
-					cpUpstream = fmt.Sprintf("%s:8080", spec.CpIP)
-					cpMcpUpstream = fmt.Sprintf("%s:8089", spec.CpIP)
+				// The ONE render both appliers share: the apps registry's
+				// cert-backed rows ride the terraform var too — the verb's
+				// kubectl apply renders identically, so build and expose
+				// converge on the same edge config instead of overwriting
+				// each other.
+				caddyfile := spec.renderCaddyfile()
+				if caddyfile == "" {
+					return "", fmt.Errorf("world-build terraform services: the edge render failed (relay/cp coords incomplete)")
 				}
-				// pairUpstream: the pair-relay pod binds 5000 on the k3s node
-				// itself (hostNetwork, same node as the caddy edge).
-				pairUpstream := ""
-				if kip := spec.k3sIP(); kip != "" {
-					pairUpstream = fmt.Sprintf("%s:5000", kip)
-				}
-				caddyfile := caddydeploy.RenderCaddyfile(spec.RelayHost, relayUpstream, pairUpstream, spec.CpHost, cpUpstream, cpMcpUpstream)
 				extra = append(extra, "-var",
 					"caddyfile_b64="+base64.StdEncoding.EncodeToString([]byte(caddyfile)))
 			}

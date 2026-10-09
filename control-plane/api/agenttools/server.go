@@ -227,7 +227,7 @@ func ToolList() []map[string]interface{} {
 			}, []string{"name"}),
 		},
 		{
-			"name": "expose_app", "description": "Make a service reachable by the people it serves: a public TLS vhost on the edge (DNS pointed, cert issued, Caddy config applied live), gated by the member login. SCOPE: exposure is Network's capability — only the network department (or the operator) may call this; other agents are refused, so route the ask through Network in conversation. group is the relay CHANNEL the access rides (name or id; default general — the everyone-channel): the requester must ALREADY be in it, because access narrows to groups the requester belongs to and never widens; a user in #family can open what #family can open, and removing them from the channel revokes it. requester is the pubkey of whoever asked (default: you). target is the service's internal host:port (the edge proxies plain HTTP to it). visibility: family (public DNS + gate — the default) | public (NO gate — operator-only) | lan (no public DNS). auth: gate (the member gate — the default) | app (the app has its own auth) | none (operator-only). The record survives rebuilds; a failed apply is re-ensured by the next build and the report names which legs landed.",
+			"name": "expose_app", "description": "Make a service reachable by the people it serves: a public TLS vhost on the edge (DNS pointed, cert issued, Caddy config applied live), gated by the member login. SCOPE: exposure is Network's capability — only the network department (or the operator) may call this; other agents are refused, so route the ask through Network in conversation. group is the relay CHANNEL the access rides (name or id; default general — the everyone-channel): the requester must ALREADY be in it — access narrows to groups the requester belongs to and never widens (per-channel gate enforcement is the group-gate follow-up; today the gate admits every relay member). requester is the pubkey of whoever asked (default: you). target is the service's internal host:port (the edge proxies plain HTTP to it). visibility: family (public DNS + gate — the default) | public (NO gate — operator-only) | lan (no public DNS). auth: gate (the member gate — the default) | app (the app has its own auth) | none (operator-only). The record survives rebuilds; a failed apply is re-ensured by the next build and the report names which legs landed.",
 			"inputSchema": i(map[string]interface{}{
 				"name":       map[string]interface{}{"type": "string"},
 				"target":     map[string]interface{}{"type": "string"},
@@ -743,6 +743,13 @@ func (s *Server) dispatch(w http.ResponseWriter, id json.RawMessage, params json
 		if s.IsAgent != nil && s.IsAgent(caller) && (a.Visibility == "public" || a.Auth == "none") {
 			s.rpcError(w, id, -32003, "unauthorized: widening access (visibility public / auth none) is an operator-level act — ask the operator")
 			return
+		}
+		// The requester is the VERIFIED caller when not named — the dispatch
+		// is the only place that knows it (the flow's default would be the
+		// toolset identity, which is neither the operator nor the agent that
+		// asked).
+		if a.Requester == "" {
+			a.Requester = caller
 		}
 		report, err := s.Tools.ExposeApp(agent.ExposeArgs{
 			Name: a.Name, Target: a.Target, Group: a.Group, Requester: a.Requester,

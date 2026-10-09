@@ -14,7 +14,10 @@ import (
 )
 
 func (s *Server) appsList(w http.ResponseWriter, r *http.Request) {
-	if _, err := s.requireSession(r); err != nil {
+	// OPERATOR-only: the records carry internal targets + pubkeys — a
+	// member session (any relay member) must not enumerate them. The same
+	// admin gate every other /api surface holds.
+	if _, err := s.requireAdmin(r); err != nil {
 		writeErr(w, statusFor(err), err.Error())
 		return
 	}

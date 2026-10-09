@@ -106,11 +106,49 @@ func (a *AppsStore) save() error {
 	return os.Rename(tmp, a.path)
 }
 
+// Reload re-reads the file into memory. The CONSOLE executor needs it: its
+// Spec is built once at serve start, but expose writes land in the SEPARATE
+// agent-tools process — the build tail must see the registry as it is on
+// disk NOW, never the startup-frozen snapshot. The agent-tools process
+// (which does the writes) re-reads harmlessly.
+func (a *AppsStore) Reload() error {
+	if a.path == "" {
+		return nil
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.apps = map[string]AppRecord{}
+	a.order = nil
+	raw, err := os.ReadFile(a.path)
+	if os.IsNotExist(err) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+	if err := json.Unmarshal(raw, &a.apps); err != nil {
+		return fmt.Errorf("malformed apps %s: %w", a.path, err)
+	}
+	for n := range a.apps {
+		a.order = append(a.order, n)
+	}
+	sort.Slice(a.order, func(i, j int) bool {
+		ri, rj := a.apps[a.order[i]], a.apps[a.order[j]]
+		if ri.CreatedAt != rj.CreatedAt {
+			return ri.CreatedAt < rj.CreatedAt
+		}
+		return ri.Name < rj.Name
+	})
+	return nil
+}
+
 // ValidAppName reports whether name is a DNS label (the app's fqdn is
 // <name>.<world-domain>, so the name must be one that composes).
 func ValidAppName(name string) bool { return appNameRe.MatchString(name) }
 
 // ValidTarget reports whether target is a host:port the edge can proxy to.
+// The host part must be printable and blank-free — it composes the SHARED
+// Caddyfile verbatim (`reverse_proxy <target>`), so a stray space or control
+// char is a broken (or injected) site block, not a value.
 func ValidTarget(target string) bool {
 	host, port, err := net.SplitHostPort(target)
 	if err != nil || host == "" || port == "" {
@@ -118,6 +156,12 @@ func ValidTarget(target string) bool {
 	}
 	if _, err := net.LookupPort("tcp", port); err != nil {
 		return false
+	}
+	for i := 0; i < len(host); i++ {
+		c := host[i]
+		if c <= ' ' || c > '~' {
+			return false
+		}
 	}
 	return true
 }
