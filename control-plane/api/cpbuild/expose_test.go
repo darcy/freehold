@@ -104,12 +104,13 @@ func (re *relayEvents) server(t *testing.T) *httptest.Server {
 // the console root), a fake relay, and an exec hook that records commands
 // and answers the durable-fullchain reads with a real self-signed cert.
 type testExposer struct {
-	spec     *Spec
-	apps     *agenttools.AppsStore
-	cmds     []string
-	uploads  []string // remote paths
-	bodies   map[string]string
-	relaySrv *httptest.Server
+	spec      *Spec
+	apps      *agenttools.AppsStore
+	cmds      []string
+	uploads   []string // remote paths
+	bodies    map[string]string
+	relaySrv  *httptest.Server
+	cfWrites  *int // the fake CF's record-write counter
 }
 
 func newTestExposer(t *testing.T, channels []relayChannel, members []memberEvent) *testExposer {
@@ -153,11 +154,11 @@ func newTestExposer(t *testing.T, channels []relayChannel, members []memberEvent
 	}
 	// A fake Cloudflare API (the zone cred's CLOUDFLARE_BASE_URL points here —
 	// a test must never touch the real API): /zones resolves one zone, record
-	// writes succeed.
+	// writes succeed (and COUNT — the lan mode's no-public-DNS skip pins
+	// against the counter).
+	var cfWrites int
 	cf := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		// Reads (zone list, record lookup) return ARRAY results; writes return
-		// an object — matching the API's shapes.
 		if r.URL.Path == "/zones" || (r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/dns_records")) {
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{
 				"success":     true,
@@ -165,6 +166,9 @@ func newTestExposer(t *testing.T, channels []relayChannel, members []memberEvent
 				"result_info": map[string]interface{}{"total_pages": 1},
 			})
 			return
+		}
+		if r.Method == http.MethodPost || r.Method == http.MethodPut {
+			cfWrites++
 		}
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "result": map[string]interface{}{}})
 	}))
@@ -185,7 +189,7 @@ func newTestExposer(t *testing.T, channels []relayChannel, members []memberEvent
 	if err != nil {
 		t.Fatal(err)
 	}
-	te := &testExposer{spec: spec, apps: apps, bodies: map[string]string{}}
+	te := &testExposer{spec: spec, apps: apps, bodies: map[string]string{}, cfWrites: &cfWrites}
 	spec.Apps = apps
 	spec.execHook = func(cmd string, _ uint64, _ ...string) (string, error) {
 		te.cmds = append(te.cmds, cmd)
@@ -477,9 +481,8 @@ func TestWorldAppsReadsTheRegistryFresh(t *testing.T) {
 }
 
 // TestLanVisibilitySkipsPublicDNS pins the lan mode: a lan app exposes
-// WITHOUT any public DNS (the skip happens before the proxy-IP check — a
-// world without a recorded proxy IP can still serve lan apps), while a
-// family app on the same coords fails the DNS leg loudly.
+// WITHOUT any public DNS (zero record writes hit the zone), while a family
+// app on the same coords does write its record.
 func TestLanVisibilitySkipsPublicDNS(t *testing.T) {
 	family := "3fa85f64-5717-4562-b3fc-2c963f66afa6"
 	consoleSec := make([]byte, 32)
@@ -487,7 +490,6 @@ func TestLanVisibilitySkipsPublicDNS(t *testing.T) {
 
 	te := newTestExposer(t, []relayChannel{{family, "family"}},
 		[]memberEvent{{channelID: family, pubkey: strings.Repeat("b", 64), kind: wire.PutUser, ts: 100}})
-	te.spec.ProxyIP = "" // no proxy IP: a family app's DNS leg must fail
 	report, err := te.exposeFn(consoleSec)(agent.ExposeArgs{
 		Name: "internal-dash", Target: "10.78.0.13:3000", Group: family,
 		Visibility: agenttools.VisibilityLAN, Requester: strings.Repeat("b", 64),
@@ -501,5 +503,17 @@ func TestLanVisibilitySkipsPublicDNS(t *testing.T) {
 	rec, _ := te.apps.Get("internal-dash")
 	if rec.Visibility != agenttools.VisibilityLAN {
 		t.Fatalf("the lan visibility must record: %+v", rec)
+	}
+	if *te.cfWrites != 0 {
+		t.Fatalf("a lan app must not write public DNS records, saw %d", *te.cfWrites)
+	}
+	// The control: a family app on the same coords DOES write the record.
+	if _, err := te.exposeFn(consoleSec)(agent.ExposeArgs{
+		Name: "family-app", Target: "10.78.0.13:3000", Group: family, Requester: strings.Repeat("b", 64),
+	}); err != nil {
+		t.Fatalf("the family app exposes: %v", err)
+	}
+	if *te.cfWrites < 1 {
+		t.Fatal("a family app must point its public DNS record")
 	}
 }
