@@ -88,14 +88,17 @@
   <b>access — members &amp; device links</b>
   <div class="row" style="margin-top:8px">
     <input id="invite-name" placeholder="who is this device link for (e.g. grandma)">
+  </div>
+  <div id="invite-apps" style="margin-top:8px" class="small">apps: loading…</div>
+  <div class="row" style="margin-top:8px">
     <button id="invite-mint">mint device link</button>
   </div>
   <div class="small" id="invite-out"></div>
   <table>
-    <thead><tr><th>member</th><th>kind</th><th>expires</th><th></th></tr></thead>
+    <thead><tr><th>member</th><th>kind</th><th>opens</th><th>expires</th><th></th></tr></thead>
     <tbody id="member-rows"></tbody>
   </table>
-  <div class="small">Members sign in with Nostr (relay membership decides); everyone else uses a one-time device link. Gated apps check this session via /auth/verify.</div>
+  <div class="small">Members sign in with Nostr (the app's channel roster decides); everyone else uses a one-time device link that opens exactly the apps picked above.</div>
 </div>
 
 <div id="fill-overlay" style="display:none;position:fixed;inset:0;z-index:8;background:rgba(10,10,12,.92);align-items:center;justify-content:center">
@@ -400,18 +403,28 @@ $("#fill-submit").onclick = async () => {
 // Fails quiet until operator login (the card stays empty on the 401 path).
 async function loadMembers() {
   const j = await api("/api/members");
+  // The app picker: checkboxes over the exposed apps (a link opens exactly
+  // the picked apps — there is no all-apps link).
+  try {
+    const a = await api("/api/apps");
+    $("#invite-apps").innerHTML = (a.apps || []).map((app) =>
+      '<label class="small" style="margin-right:12px"><input type="checkbox" class="invite-app" value="' + esc(app.name) + '"> ' + esc(app.name) + " — " + esc(app.fqdn) + "</label>"
+    ).join("") || "no exposed apps yet — expose one first";
+  } catch (e) { /* not logged in — the mint button surfaces it */ }
   const rows = [];
   for (const i of j.invites || []) {
     rows.push(`<tr><td>${esc(i.name)}</td><td><span class="chip gray">invite</span></td>` +
+      `<td class="muted">${esc((i.apps || []).join(", "))}</td>` +
       `<td class="muted">${new Date(i.expires * 1000).toLocaleDateString()} · by ${esc(i.created_by)}</td>` +
       `<td><button data-act="revoke-invite" data-hash="${esc(i.hash)}">revoke</button></td></tr>`);
   }
   for (const s of j.sessions || []) {
     rows.push(`<tr><td>${esc(s.name)}</td><td><span class="chip ${s.device ? "gray" : "green"}">${s.device ? "device" : "nostr"}</span></td>` +
+      `<td class="muted">${esc((s.apps || ["(every app — pre-2.1 session)"]).join(", "))}</td>` +
       `<td class="muted">${new Date(s.expires * 1000).toLocaleString()}</td>` +
       `<td><button class="danger" data-act="drop-member" data-name="${esc(s.name)}">drop</button></td></tr>`);
   }
-  $("#member-rows").innerHTML = rows.join("") || '<tr><td colspan="4" class="muted">no members yet — mint a device link above</td></tr>';
+  $("#member-rows").innerHTML = rows.join("") || '<tr><td colspan="5" class="muted">no members yet — mint a device link above</td></tr>';
   $("#member-rows").querySelectorAll("button").forEach((b) => {
     b.onclick = async () => {
       try {
@@ -429,10 +442,12 @@ async function loadMembers() {
 $("#invite-mint").onclick = async () => {
   const name = $("#invite-name").value.trim();
   if (!name) { $("#err").textContent = "error: an invite needs a name"; return; }
+  const apps = Array.from(document.querySelectorAll(".invite-app:checked")).map((c) => c.value);
+  if (!apps.length) { $("#err").textContent = "error: pick at least one app the link opens"; return; }
   try {
-    const res = await api("/api/members/invites", { name });
+    const res = await api("/api/members/invites", { name, apps });
     $("#invite-out").innerHTML = "one-time link for " + esc(res.name) +
-      ' (shown once): <input readonly value="' + esc(location.origin + res.link) + '" onclick="this.select()">';
+      ' (opens: ' + esc((res.apps || []).join(", ")) + ') <input readonly value="' + esc(location.origin + res.link) + '" onclick="this.select()">';
     $("#invite-name").value = "";
     await loadMembers();
   } catch (e) { $("#err").textContent = "error: " + e.message; }

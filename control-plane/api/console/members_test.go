@@ -13,10 +13,13 @@ import (
 
 	"freehold/contract/crypto"
 	"freehold/contract/wire"
+	"freehold/control-plane/api/agenttools"
 	"freehold/control-plane/state"
 )
 
 // ---- fixture ----
+
+const testChannelID = "3fa85f64-5717-4562-b3fc-2c963f66afa6"
 
 type memberFixture struct {
 	s           *Server
@@ -31,9 +34,16 @@ type memberFixture struct {
 }
 
 // newMemberFixture builds a console with the member tier enabled, the relay
-// coords pointed at a fake /query serving ONE kind-13534 listing that names
-// the fixture's own member, and a public origin for cookie/next handling.
+// coords pointed at a fake relay serving BY KIND (the NIP-43 community list
+// naming the fixture's member; the app channel's kind-9000 put-user granting
+// them), an exposed app in the toolset's durable dir, and a public origin
+// for cookie/next handling.
 func newMemberFixture(t *testing.T) *memberFixture {
+	return newMemberFixtureOpts(t, true)
+}
+
+// newMemberFixtureOpts(…
+func newMemberFixtureOpts(t *testing.T, memberInChannel bool) *memberFixture {
 	t.Helper()
 	dir := t.TempDir()
 	store, err := state.Open(dir)
@@ -48,7 +58,27 @@ func newMemberFixture(t *testing.T) *memberFixture {
 	f.opPK = pkOf(t, f.opSec)
 	f.memberPK = pkOf(t, f.memberSec)
 	f.relayPK = pkOf(t, f.relaySec)
-	f.relay = fakeRelayQuery(t, []map[string]interface{}{membershipListEvent(t, f.relaySec, 100, f.memberPK)})
+	// The app the gate fronts: yuvomi, riding the test channel.
+	apps, err := agenttools.OpenApps(filepath.Join(dir, "agent-tools", "apps.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := apps.Expose(agenttools.AppRecord{
+		Name: "yuvomi", FQDN: "yuvomi.cp.example.com", Target: "10.0.0.9:3000",
+		Visibility: agenttools.VisibilityFamily, Auth: agenttools.AuthGate,
+		Group: testChannelID, Owner: "op", Requester: f.memberPK, CreatedAt: 1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// The relay answers by KIND: 13534 (the community list) + 9000 (the
+	// channel roster granting the member — omitted for the not-in-channel
+	// fixtures).
+	events := []map[string]interface{}{membershipListEvent(t, f.relaySec, 100, f.memberPK)}
+	if memberInChannel {
+		events = append(events, signEventMap(t, f.relaySec, wire.PutUser, 100,
+			[][]string{{"h", testChannelID}, {"p", f.memberPK}}, ""))
+	}
+	f.relay = fakeRelayQuery(t, events)
 	if err := store.SetRelayURL(&f.relay.URL); err != nil {
 		t.Fatal(err)
 	}
@@ -63,6 +93,7 @@ func newMemberFixture(t *testing.T) *memberFixture {
 		Auth:          NewAuth([]string{f.opPK}, filepath.Join(dir, "sessions.json")),
 		Members:       NewMembers(f.membersFile),
 		PublicOrigin:  &pub,
+		AgentToolsDir: filepath.Join(dir, "agent-tools"),
 	}
 	return f
 }
@@ -237,12 +268,25 @@ func TestForwardAuthVerify(t *testing.T) {
 	if mtok == "" {
 		t.Fatal("no member cookie")
 	}
+	// The app-aware gate: the member is IN the app's channel (the fixture's
+	// fake roster grants them) — the forwarded host resolves the app.
 	req := httptest.NewRequest(http.MethodGet, "/auth/verify", nil)
+	req.Header.Set("X-Original-Host", "yuvomi.cp.example.com")
 	req.AddCookie(&http.Cookie{Name: memberCookie, Value: mtok})
 	rec = httptest.NewRecorder()
 	f.s.ServeHTTP(rec, req)
 	if rec.Code != http.StatusNoContent {
-		t.Fatalf("member verify: %d", rec.Code)
+		t.Fatalf("member verify on the app: %d", rec.Code)
+	}
+	// A host with no app record fails CLOSED — even a member who just
+	// logged in.
+	req = httptest.NewRequest(http.MethodGet, "/auth/verify", nil)
+	req.Header.Set("X-Original-Host", "unknown.cp.example.com")
+	req.AddCookie(&http.Cookie{Name: memberCookie, Value: mtok})
+	rec = httptest.NewRecorder()
+	f.s.ServeHTTP(rec, req)
+	if rec.Code == http.StatusNoContent {
+		t.Fatal("an unregistered host must not admit")
 	}
 
 	// The operator passes the gate on their existing session.
@@ -270,13 +314,21 @@ func TestDeviceLinkLifecycle(t *testing.T) {
 	f := newMemberFixture(t)
 	op := opCookie(t, f)
 
-	// Mint.
-	req := httptest.NewRequest(http.MethodPost, "/api/members/invites", strings.NewReader(`{"name":"grandma"}`))
+	// Mint (opens the named app; there is no all-apps link).
+	req := httptest.NewRequest(http.MethodPost, "/api/members/invites", strings.NewReader(`{"name":"grandma","apps":["yuvomi"]}`))
 	req.AddCookie(op)
 	rec := httptest.NewRecorder()
 	f.s.ServeHTTP(rec, req)
 	if rec.Code != 200 {
 		t.Fatalf("mint: %d %s", rec.Code, rec.Body.String())
+	}
+	// No apps = refused outright.
+	reqNoApps := httptest.NewRequest(http.MethodPost, "/api/members/invites", strings.NewReader(`{"name":"nobody"}`))
+	reqNoApps.AddCookie(op)
+	recNoApps := httptest.NewRecorder()
+	f.s.ServeHTTP(recNoApps, reqNoApps)
+	if recNoApps.Code != 400 {
+		t.Fatalf("an invite with no apps must be refused, got %d", recNoApps.Code)
 	}
 	var mint struct {
 		Link string `json:"link"`
@@ -306,8 +358,8 @@ func TestDeviceLinkLifecycle(t *testing.T) {
 
 	// The session survives a serve restart (members.json, 0600).
 	m2 := NewMembers(f.membersFile)
-	if _, name, device, ok := m2.MemberIdentity(tok); !ok || name != "grandma" || !device {
-		t.Fatalf("restart must keep the device session: ok=%v name=%q device=%v", ok, name, device)
+	if info, ok := m2.MemberIdentity(tok); !ok || info.Name != "grandma" || !info.Device {
+		t.Fatalf("restart must keep the device session: %+v ok=%v", info, ok)
 	}
 
 	// The operator sees the live session and can drop it.
@@ -336,12 +388,12 @@ func TestDeviceLinkLifecycle(t *testing.T) {
 	if rec.Code != 200 {
 		t.Fatalf("drop: %d %s", rec.Code, rec.Body.String())
 	}
-	if _, _, _, ok := f.s.Members.MemberIdentity(tok); ok {
+	if _, ok := f.s.Members.MemberIdentity(tok); ok {
 		t.Fatal("the dropped session must be dead")
 	}
 
 	// A fresh invite can be revoked before use: the link dies unconsumed.
-	req = httptest.NewRequest(http.MethodPost, "/api/members/invites", strings.NewReader(`{"name":"grandpa"}`))
+	req = httptest.NewRequest(http.MethodPost, "/api/members/invites", strings.NewReader(`{"name":"grandpa","apps":["yuvomi"]}`))
 	req.AddCookie(op)
 	rec = httptest.NewRecorder()
 	f.s.ServeHTTP(rec, req)
@@ -485,5 +537,87 @@ func TestForwardAuthVerifyBrowserRedirect(t *testing.T) {
 	f.s.ServeHTTP(rec, req)
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("API deny must be 401, got %d", rec.Code)
+	}
+}
+
+// TestDeviceLinkBindsApps pins the per-app device link: the invite names the
+// apps it opens (>=1, validated against the registry), the landed session
+// admits exactly those and NOTHING else — a second app on the same channel
+// does not admit, and there is no all-apps link.
+func TestDeviceLinkBindsApps(t *testing.T) {
+	f := newMemberFixture(t)
+	op := opCookie(t, f)
+
+	mint := func(body string) string {
+		req := httptest.NewRequest(http.MethodPost, "/api/members/invites", strings.NewReader(body))
+		req.AddCookie(op)
+		rec := httptest.NewRecorder()
+		f.s.ServeHTTP(rec, req)
+		if rec.Code != 200 {
+			t.Fatalf("mint %s: %d %s", body, rec.Code, rec.Body.String())
+		}
+		var out struct {
+			Link string `json:"link"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+			t.Fatal(err)
+		}
+		return out.Link
+	}
+	// A mistyped app name is an error, not a dead link.
+	req := httptest.NewRequest(http.MethodPost, "/api/members/invites", strings.NewReader(`{"name":"x","apps":["yuvomi ","typo"]}`))
+	req.AddCookie(op)
+	rec := httptest.NewRecorder()
+	f.s.ServeHTTP(rec, req)
+	if rec.Code != 400 {
+		t.Fatalf("an unknown app in the mint must be refused, got %d %s", rec.Code, rec.Body.String())
+	}
+
+	link := mint(`{"name":"grandma","apps":["yuvomi"]}`)
+	rec = httptest.NewRecorder()
+	f.s.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, link, nil))
+	if rec.Code != 200 {
+		t.Fatalf("link land: %d", rec.Code)
+	}
+	tok := cookieOf(t, rec, memberCookie)
+
+	// The named app admits.
+	req = httptest.NewRequest(http.MethodGet, "/auth/verify", nil)
+	req.Header.Set("X-Original-Host", "yuvomi.cp.example.com")
+	req.AddCookie(&http.Cookie{Name: memberCookie, Value: tok})
+	rec = httptest.NewRecorder()
+	f.s.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("the named app must admit: %d", rec.Code)
+	}
+	// ANY other host denies — even a second app on the same channel: the
+	// device link is per-app, and there is no path to all apps.
+	req = httptest.NewRequest(http.MethodGet, "/auth/verify", nil)
+	req.Header.Set("X-Original-Host", "photos.cp.example.com")
+	req.AddCookie(&http.Cookie{Name: memberCookie, Value: tok})
+	rec = httptest.NewRecorder()
+	f.s.ServeHTTP(rec, req)
+	if rec.Code == http.StatusNoContent {
+		t.Fatal("an unlisted app must not admit a device session")
+	}
+}
+
+// TestGateChannelRevocation pins the nostr side: the app's channel roster is
+// the ACL — a member the channel granted admits; a channel member REMOVED
+// (a newer kind-9001) denies within the cache's TTL.
+func TestGateChannelRevocation(t *testing.T) {
+	f := newMemberFixtureOpts(t, false) // no put-user: not in the channel
+	rec := f.loginAs(t, f.memberSec, "")
+	if rec.Code != 200 {
+		t.Fatalf("community login still works: %d %s", rec.Code, rec.Body.String())
+	}
+	tok := cookieOf(t, rec, memberCookie)
+	req := httptest.NewRequest(http.MethodGet, "/auth/verify", nil)
+	req.Header.Set("X-Original-Host", "yuvomi.cp.example.com")
+	req.AddCookie(&http.Cookie{Name: memberCookie, Value: tok})
+	rec = httptest.NewRecorder()
+	f.s.ServeHTTP(rec, req)
+	if rec.Code == http.StatusNoContent {
+		t.Fatal("a pubkey outside the app's channel must not admit")
 	}
 }
