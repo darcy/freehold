@@ -109,7 +109,11 @@ func (s *Server) myApps(w http.ResponseWriter, r *http.Request) {
 				continue // fail-closed: a relay outage lists nothing
 			}
 		}
-		out = append(out, map[string]interface{}{"name": rec.Name, "fqdn": rec.FQDN})
+		// The DERIVED host is authoritative — the stored FQDN is
+		// informational (old-shape rows hold <name>.<cpHost>, which nothing
+		// serves and the wildcard never covered). Same derivation the gate
+		// (appByHost) and the edge render from.
+		out = append(out, map[string]interface{}{"name": rec.Name, "fqdn": rec.Name + "." + s.memberDomain()})
 	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{"apps": out})
 }
