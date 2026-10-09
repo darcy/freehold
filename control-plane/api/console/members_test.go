@@ -791,3 +791,19 @@ func TestGateResolvesOldShapeRows(t *testing.T) {
 		t.Fatalf("the gate must resolve the old-shape row at its derived hostname: %d", rec.Code)
 	}
 }
+
+// TestMemberPortalSurvivesRestart pins the portal store's persistence: the
+// token's row (pubkey + expiry) round-trips through members.json — an
+// unconsumed link must not die on the serve restart every build does.
+func TestMemberPortalSurvivesRestart(t *testing.T) {
+	f := newMemberFixture(t)
+	tok, err := f.s.Members.IssueMemberPortal(f.opPK, "member session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m2 := NewMembers(f.membersFile)
+	pk, _, ok := m2.ConsumeMemberPortal(tok)
+	if !ok || pk != f.opPK {
+		t.Fatalf("the portal token must survive a restart: pk=%q ok=%v", pk, ok)
+	}
+}

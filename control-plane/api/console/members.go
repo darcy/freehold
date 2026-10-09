@@ -69,10 +69,12 @@ type memberInvite struct {
 // the bridge for a key-holder whose browser has no NIP-07 extension: the
 // operator mints it (their own session's pubkey), the link lands a FULL
 // member session (dynamic channel checks), the key never touches a browser.
+// memberPortal's fields are EXPORTED — the struct's JSON IS its
+// persistence (a{} row would lose the pubkey/expiry and die on restart).
 type memberPortal struct {
-	expires time.Time
-	pubkey  string
-	name    string
+	Expires time.Time `json:"expires"`
+	Pubkey  string    `json:"pubkey"`
+	Name    string    `json:"name"`
 }
 
 // Members is the member session + invite store, persisted to members.json.
@@ -147,7 +149,7 @@ func (m *Members) load() {
 		m.invites[h] = memberInvite{expires: exp, createdBy: r.CreatedBy, name: r.Name, apps: r.Apps}
 	}
 	for tok, r := range f.Portals {
-		if r.expires.Before(now()) {
+		if r.Expires.Before(now()) {
 			continue
 		}
 		m.portals[tok] = r
@@ -251,7 +253,7 @@ func (m *Members) IssueMemberPortal(pubkey, name string) (string, error) {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.portals[token] = memberPortal{expires: now().Add(portalTTL), pubkey: pubkey, name: name}
+	m.portals[token] = memberPortal{Expires: now().Add(portalTTL), Pubkey: pubkey, Name: name}
 	if err := m.save(); err != nil {
 		return "", err
 	}
@@ -274,10 +276,10 @@ func (m *Members) ConsumeMemberPortal(token string) (pubkey, name string, ok boo
 		m.portals[token] = p // the disk kept it — the memory must match
 		return "", "", false, err
 	}
-	if p.expires.Before(now()) {
+	if p.Expires.Before(now()) {
 		return "", "", false, nil
 	}
-	return p.pubkey, p.name, true, nil
+	return p.Pubkey, p.Name, true, nil
 }
 
 // IssueMemberSession mints a member session token (apps ride device
