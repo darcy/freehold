@@ -475,3 +475,31 @@ func TestWorldAppsReadsTheRegistryFresh(t *testing.T) {
 		t.Fatalf("the unexposed app must be gone from the tail's render: %q %v", rep, err)
 	}
 }
+
+// TestLanVisibilitySkipsPublicDNS pins the lan mode: a lan app exposes
+// WITHOUT any public DNS (the skip happens before the proxy-IP check — a
+// world without a recorded proxy IP can still serve lan apps), while a
+// family app on the same coords fails the DNS leg loudly.
+func TestLanVisibilitySkipsPublicDNS(t *testing.T) {
+	family := "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+	consoleSec := make([]byte, 32)
+	consoleSec[0] = 0x42
+
+	te := newTestExposer(t, []relayChannel{{family, "family"}},
+		[]memberEvent{{channelID: family, pubkey: strings.Repeat("b", 64), kind: wire.PutUser, ts: 100}})
+	te.spec.ProxyIP = "" // no proxy IP: a family app's DNS leg must fail
+	report, err := te.exposeFn(consoleSec)(agent.ExposeArgs{
+		Name: "internal-dash", Target: "10.78.0.13:3000", Group: family,
+		Visibility: agenttools.VisibilityLAN, Requester: strings.Repeat("b", 64),
+	})
+	if err != nil {
+		t.Fatalf("a lan app must expose without public DNS: %v", err)
+	}
+	if !strings.Contains(report, "live") {
+		t.Fatalf("the lan app reports live: %s", report)
+	}
+	rec, _ := te.apps.Get("internal-dash")
+	if rec.Visibility != agenttools.VisibilityLAN {
+		t.Fatalf("the lan visibility must record: %+v", rec)
+	}
+}

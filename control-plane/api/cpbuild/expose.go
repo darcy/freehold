@@ -236,7 +236,12 @@ func (s *Spec) appsCertEnsure() (bool, error) {
 
 // appDNSEnsure points the app's public A record at the proxy. LAN visibility
 // skips it: no public record — the name resolves only inside the world.
-func (s *Spec) appDNSEnsure(fqdn string) (bool, error) {
+func (s *Spec) appDNSEnsure(rec agenttools.AppRecord) (bool, error) {
+	// LAN visibility: NO public record — the whole point of the mode.
+	if rec.Visibility == agenttools.VisibilityLAN {
+		return false, nil
+	}
+	fqdn := s.appRecordFQDN(rec)
 	if s.ProxyIP == "" {
 		return false, fmt.Errorf("app dns %s: the proxy IP is not in the world coords", fqdn)
 	}
@@ -360,7 +365,7 @@ func (s *Spec) worldApps() (string, error) {
 	}
 	var failed []string
 	for _, rec := range records {
-		if _, err := s.appDNSEnsure(s.appRecordFQDN(rec)); err != nil {
+		if _, err := s.appDNSEnsure(rec); err != nil {
 			failed = append(failed, rec.Name+" dns: "+err.Error())
 		}
 	}
@@ -427,7 +432,7 @@ func BuildExposeAppFn(spec *Spec, apps *agenttools.AppsStore, consoleSecret []by
 		}
 		report := fmt.Sprintf("%s → https://%s (group %s, visibility %s, auth %s)",
 			rec.Name, rec.FQDN, gid, rec.Visibility, rec.Auth)
-		if _, err := spec.appDNSEnsure(fqdn); err != nil {
+		if _, err := spec.appDNSEnsure(rec); err != nil {
 			return report + " — RECORDED; the DNS step failed and the next build re-ensures it: " + err.Error(), nil
 		}
 		if _, err := spec.appsCertEnsure(); err != nil {
