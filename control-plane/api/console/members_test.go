@@ -755,3 +755,40 @@ func TestMemberPortalLandsThePubkeySession(t *testing.T) {
 		t.Fatalf("a member session must not mint portal links, got %d", rec.Code)
 	}
 }
+
+// TestGateResolvesOldShapeRows pins the migration: a record written by the
+// released per-app shape (stored FQDN <name>.<cpHost>) still gates at its
+// DERIVED hostname (<name>.<world domain>) — the edge renders the derived
+// name, so the gate matching the stale stored FQDN would lock every member
+// out invisibly (the operator passes outright).
+func TestGateResolvesOldShapeRows(t *testing.T) {
+	f := newMemberFixture(t)
+	// Overwrite the row with the OLD shape's stored FQDN.
+	stale, err := agenttools.OpenApps(filepath.Join(f.s.AgentToolsDir, "apps.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec, _ := stale.Get("yuvomi")
+	rec.FQDN = "yuvomi.cp.example.com" // the released shape's stored value
+	if err := stale.Expose... // no-clobber: remove + re-add
+	_, _ = stale.Unexpose("yuvomi")
+	if err := stale.Expose(rec); err != nil {
+		t.Fatal(err)
+	}
+
+	// The member logs in and hits the DERIVED hostname — the stale stored
+	// FQDN must not matter to the gate.
+	rec := f.loginAs(t, f.memberSec, "")
+	if rec.Code != 200 {
+		t.Fatalf("login: %d %s", rec.Code, rec.Body.String())
+	}
+	tok := cookieOf(t, rec, memberCookie)
+	req := httptest.NewRequest(http.MethodGet, "/auth/verify", nil)
+	req.Header.Set("X-Original-Host", "yuvomi.example.com")
+	req.AddCookie(&http.Cookie{Name: memberCookie, Value: tok})
+	rec = httptest.NewRecorder()
+	f.s.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("the gate must resolve the old-shape row at its derived hostname: %d", rec.Code)
+	}
+}

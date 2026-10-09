@@ -855,7 +855,10 @@ func (s *Server) appByHost(host string) (agenttools.AppRecord, bool) {
 		return agenttools.AppRecord{}, false
 	}
 	for _, rec := range apps.List() {
-		if rec.FQDN == host {
+		// The DERIVED hostname (name + the world domain) is authoritative —
+		// rows written by the released per-app shape carry a stale stored
+		// FQDN; the edge renders the derived one, so the gate must match it.
+		if rec.Name+"."+s.memberDomain() == host {
 			return rec, true
 		}
 	}
