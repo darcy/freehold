@@ -200,6 +200,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.settingsGet(w, r)
 	case path == "/api/settings" && method == http.MethodPost:
 		s.settingsSet(w, r)
+	case path == "/api/apps" && method == http.MethodGet:
+		s.appsList(w, r)
 	default:
 		writeErr(w, http.StatusNotFound, "no such route: "+method+" "+path)
 	}
