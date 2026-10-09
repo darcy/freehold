@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"freehold/contract/client"
@@ -38,6 +39,10 @@ type Server struct {
 	ConsolePubkey string
 	// Auth is the NIP-98 operator auth; nil = loopback-only posture.
 	Auth *Auth
+	// Members is the member identity tier — the appliance's users (family,
+	// team): NIP-07 relay-membership login + device-link invites, gated apps
+	// verify through /auth/verify. Constructed beside Auth; nil = disabled.
+	Members *Members
 	// PublicOrigin is the console's fronted public origin (DNS-rebinding guard).
 	PublicOrigin *string
 	// RelayHost is the relay community host (kind-9 reads send it explicitly).
@@ -62,6 +67,11 @@ type Server struct {
 	// RestartDoor restarts a capability door's runner unit (nil = the real
 	// systemd restart on this guest). Injectable for tests.
 	RestartDoor func(name string, port int) error
+
+	// memberMu/memberCache cache the relay's membership answers behind
+	// memberRelayAllowed (lazy — tests build Server literals without them).
+	memberMu    sync.Mutex
+	memberCache map[string]memberCheck
 }
 
 // versionPin re-reads <StateDir>/version.json per call so an update's repin is
@@ -112,6 +122,29 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.portalToken(w, r)
 	case strings.HasPrefix(path, "/api/auth/portal/") && method == http.MethodGet:
 		s.portalLand(w, r, strings.TrimPrefix(path, "/api/auth/portal/"))
+	// The member identity tier: the login page + gate endpoint the edge's
+	// forward_auth calls, plus the operator's invite surface. /auth/* are
+	// page routes (no /api prefix) so they ride the same CP vhost.
+	case path == "/auth" && method == http.MethodGet:
+		s.memberLoginPage(w, r)
+	case path == "/auth/verify" && method == http.MethodGet:
+		s.forwardAuthVerify(w, r)
+	case strings.HasPrefix(path, "/auth/link/") && method == http.MethodGet:
+		s.memberLinkLand(w, r, strings.TrimPrefix(path, "/auth/link/"))
+	case path == "/api/auth/member/challenge" && method == http.MethodGet:
+		s.memberChallenge(w, r)
+	case path == "/api/auth/member/login" && method == http.MethodPost:
+		s.memberLogin(w, r)
+	case path == "/api/auth/member/logout" && method == http.MethodPost:
+		s.memberLogout(w, r)
+	case path == "/api/members" && method == http.MethodGet:
+		s.membersList(w, r)
+	case path == "/api/members/invites" && method == http.MethodPost:
+		s.memberInviteMint(w, r)
+	case strings.HasPrefix(path, "/api/members/invites/") && method == http.MethodDelete:
+		s.memberInviteRevoke(w, r, strings.TrimPrefix(path, "/api/members/invites/"))
+	case strings.HasPrefix(path, "/api/members/sessions/") && method == http.MethodDelete:
+		s.memberDrop(w, r, strings.TrimPrefix(path, "/api/members/sessions/"))
 	case path == "/api/overview" && method == http.MethodGet:
 		s.overview(w, r)
 	case path == "/api/world" && method == http.MethodGet:

@@ -197,10 +197,14 @@ func cmdServe(args []string) error {
 		return err
 	}
 
-	// Bind guard: unauthenticated console stays loopback-only (C3).
+	// Bind guard: unauthenticated console stays loopback-only (C3). With an
+	// admin whitelist, the member identity tier (the appliance's users: NIP-07
+	// relay-membership login + device-link invites) comes up beside it.
 	var auth *console.Auth
+	var members *console.Members
 	if len(admins) > 0 {
 		auth = console.NewAuth(admins, filepath.Join(*stateDir, "sessions.json"))
+		members = console.NewMembers(filepath.Join(*stateDir, "members.json"))
 		log.Printf("console auth enabled (NIP-98, %d operators) — non-loopback bind allowed", len(admins))
 	} else {
 		if err := console.ValidateLoopbackBind(*addr); err != nil {
@@ -344,7 +348,7 @@ func cmdServe(args []string) error {
 	}
 	srv := &console.Server{
 		Store: store, ConsoleSecret: secret, ConsolePubkey: consolePK,
-		Auth: auth, PublicOrigin: pubOrigin, RelayHost: *relayHost,
+		Auth: auth, Members: members, PublicOrigin: pubOrigin, RelayHost: *relayHost,
 		StateDir: *stateDir, AgentToolsDir: *agentToolsStateDir,
 		Builder: builder, Version: pin,
 	}

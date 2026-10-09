@@ -84,6 +84,20 @@
   <div class="small">Applies to agent pods on their next apply (a rebuild or agent create). Blank = pods run UTC.</div>
 </div>
 
+<div class="card">
+  <b>access — members &amp; device links</b>
+  <div class="row" style="margin-top:8px">
+    <input id="invite-name" placeholder="who is this device link for (e.g. grandma)">
+    <button id="invite-mint">mint device link</button>
+  </div>
+  <div class="small" id="invite-out"></div>
+  <table>
+    <thead><tr><th>member</th><th>kind</th><th>expires</th><th></th></tr></thead>
+    <tbody id="member-rows"></tbody>
+  </table>
+  <div class="small">Members sign in with Nostr (relay membership decides); everyone else uses a one-time device link. Gated apps check this session via /auth/verify.</div>
+</div>
+
 <div id="fill-overlay" style="display:none;position:fixed;inset:0;z-index:8;background:rgba(10,10,12,.92);align-items:center;justify-content:center">
   <div style="max-width:30rem;padding:2rem;width:100%">
     <h2 id="fill-title">fill credential</h2>
@@ -214,6 +228,7 @@ async function refresh() {
   }).join("");
   $("#rows").innerHTML = rows || '<tr><td colspan="7" class="muted">no runners yet — provision one above</td></tr>';
   bindActions();
+  loadMembers().catch(() => {});
   // A deep link to one door opens its fill form once (after login the reload
   // lands on the same path, so the form re-opens there too).
   if (doorName && !doorOpened) {
@@ -379,6 +394,48 @@ $("#fill-submit").onclick = async () => {
     $("#fill-overlay").style.display = "none";
     await refresh();
   } catch (e) { $("#fill-err").textContent = "error: " + e.message; }
+};
+
+// Access: the member identity tier — device-link invites + live sessions.
+// Fails quiet until operator login (the card stays empty on the 401 path).
+async function loadMembers() {
+  const j = await api("/api/members");
+  const rows = [];
+  for (const i of j.invites || []) {
+    rows.push(`<tr><td>${esc(i.name)}</td><td><span class="chip gray">invite</span></td>` +
+      `<td class="muted">${new Date(i.expires * 1000).toLocaleDateString()} · by ${esc(i.created_by)}</td>` +
+      `<td><button data-act="revoke-invite" data-hash="${esc(i.hash)}">revoke</button></td></tr>`);
+  }
+  for (const s of j.sessions || []) {
+    rows.push(`<tr><td>${esc(s.name)}</td><td><span class="chip ${s.device ? "gray" : "green"}">${s.device ? "device" : "nostr"}</span></td>` +
+      `<td class="muted">${new Date(s.expires * 1000).toLocaleString()}</td>` +
+      `<td><button class="danger" data-act="drop-member" data-name="${esc(s.name)}">drop</button></td></tr>`);
+  }
+  $("#member-rows").innerHTML = rows.join("") || '<tr><td colspan="4" class="muted">no members yet — mint a device link above</td></tr>';
+  $("#member-rows").querySelectorAll("button").forEach((b) => {
+    b.onclick = async () => {
+      try {
+        if (b.dataset.act === "revoke-invite") {
+          await fetch("/api/members/invites/" + encodeURIComponent(b.dataset.hash), { method: "DELETE" });
+        } else {
+          await fetch("/api/members/sessions/" + encodeURIComponent(b.dataset.name), { method: "DELETE" });
+        }
+        await loadMembers();
+      } catch (e) { $("#err").textContent = "error: " + e.message; }
+    };
+  });
+}
+
+$("#invite-mint").onclick = async () => {
+  const name = $("#invite-name").value.trim();
+  if (!name) { $("#err").textContent = "error: an invite needs a name"; return; }
+  try {
+    const res = await api("/api/members/invites", { name });
+    $("#invite-out").innerHTML = "one-time link for " + esc(res.name) +
+      ' (shown once): <input readonly value="' + esc(location.origin + res.link) + '" onclick="this.select()">';
+    $("#invite-name").value = "";
+    await loadMembers();
+  } catch (e) { $("#err").textContent = "error: " + e.message; }
 };
 
 refresh().catch((e) => { $("#err").textContent = "error: " + e.message; });

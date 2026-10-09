@@ -608,7 +608,13 @@ resident-runner mode, the retired-name guard — is in `docs/AI.md` ("Runners an
     (the admin whitelist — the full admin/ops surface) or a **member** (any relay
     community member — the scheduled-jobs read of their own rows only; every
     admin route refuses a member session). The scheduled-jobs read is
-    owner-redacted: prompts and labels ride only the owner's own rows. It also
+    owner-redacted: prompts and labels ride only the owner's own rows. Beside
+    operator auth it serves the **member identity tier** — the appliance's
+    users: NIP-07 login backed by the relay's NIP-43 membership list plus
+    single-use device-link invites (`members.json`, 0600, beside
+    `sessions.json`), issued as a `fh_member` cookie scoped `.cp.domain` and
+    validated on `/auth/verify` (the gate exposed apps point Caddy
+    `forward_auth` at — `docs/NETWORK.md`, the launch surface). It also
     carries the box-side CP CLI verbs (`provision`/`grant`/`adopt`/`add-secret`/`identity`),
     so the deploy and the rebuild engine ship + drive a Go console end to end. The console
     is the CP's own identity (0600, minted on the box at first serve — never

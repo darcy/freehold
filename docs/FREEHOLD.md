@@ -86,7 +86,8 @@ the ordering across all of them is `docs/ROADMAP.md`.
 ## UI/UX
 
 *   The minimal console is readiness + agent chat (Buzz) + services + skill install; the
-    console is admin/ops only — **no chat surface rebuilds**.
+    console is admin/ops + the appliance's identity surface (the member gate —
+    `docs/NETWORK.md`, the launch surface) — **no chat surface rebuilds**.
 *   Later: a unified resource/activity view, deep monitoring, AI-box telemetry, TUI tabs for
     Certs and Guests, a mobile client, a Proxmox-ISO install guide.
 

@@ -22,6 +22,11 @@ const (
 	GroupMembers   = 39002
 	MemoryKind     = 30174
 	ChannelMessage = 9
+	// KINDNip43Membership is NIP-43's relay membership list (kind 13534) —
+	// published and signed by the relay's own key; a member's pubkey rides a
+	// `member` tag (NOT a p-tag). The trust anchor for "who may use this
+	// appliance" is the relay.
+	KINDNip43Membership = 13534
 )
 
 // canonicalEventBytes serializes the NIP-01 id array [0, pubkey, created_at,
@@ -29,6 +34,12 @@ const (
 // serde_json does not escape <>& or U+2028/U+2029, while Go's default
 // encoding/json does. This is the byte-exact canonical form (core/src/nip98.rs).
 func canonicalEventBytes(pubkeyHex string, createdAt int64, kind uint32, tags [][]string, content string) ([]byte, error) {
+	// serde (the Rust oracle) serializes an empty tags vec as [] — a nil Go
+	// slice marshals as null, a form Rust cannot produce. Normalize so a
+	// signed-empty tags list and a parse-into-nil one verify identically.
+	if tags == nil {
+		tags = [][]string{}
+	}
 	arr := []interface{}{
 		0,
 		pubkeyHex,
