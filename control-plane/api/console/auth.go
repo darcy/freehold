@@ -106,9 +106,9 @@ func NewAuth(admins []string, file string) *Auth {
 
 // sessionRow is the on-disk shape of one session (expires as unix seconds).
 type sessionRow struct {
-	Pubkey string `json:"pubkey"`
-	Role   string `json:"role,omitempty"`
-	Expires int64 `json:"expires"`
+	Pubkey  string `json:"pubkey"`
+	Role    string `json:"role,omitempty"`
+	Expires int64  `json:"expires"`
 }
 
 // loadSessions reads the persisted sessions, dropping expired ones and any

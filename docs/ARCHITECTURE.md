@@ -609,9 +609,11 @@ resident-runner mode, the retired-name guard — is in `docs/AI.md` ("Runners an
     freshness windows, the DNS-rebinding `Origin` guard, and the
     loopback-only-until-authn bind guard. Login carries a ROLE: an **operator**
     (the admin whitelist — the full admin/ops surface) or a **member** (any relay
-    community member — the scheduled-jobs read of their own rows only; every
-    admin route refuses a member session). The scheduled-jobs read is
-    owner-redacted: prompts and labels ride only the owner's own rows. Beside
+    community member — the scheduled-jobs read of their own rows plus the
+    session-aware launcher (`/api/my/apps`: the apps their channel roster
+    admits, names + FQDNs only); every admin route refuses a member
+    session). The scheduled-jobs read is owner-redacted: prompts and labels
+    ride only the owner's own rows. Beside
     operator auth it serves the **member identity tier** — the appliance's
     users: NIP-07 login backed by the relay's NIP-43 membership list plus
     single-use device-link invites (`members.json`, 0600, beside

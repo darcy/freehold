@@ -73,6 +73,13 @@ The gateway has TWO shapes, one per substrate:
     department's identity or the operator may call the verbs; a custom agent that asks
     directly is refused (`-32003`) and routes through Network in conversation — and
     widening (`visibility: public`, `auth: none`) is refused from agents outright.
+    The console at `cp.<domain>` is the **portal**: the console's session-aware
+    launcher (`/api/my/apps`) answers what the asking session can open — the operator
+    sees every exposed app, a member sees what their channel roster admits, a device
+    session exactly its bound list — and the console renders it as launcher tiles
+    (names + FQDNs only, no targets or owners) above the member's own scheduled jobs.
+    One login (`/auth`) serves everyone: a whitelisted key lands the operator session,
+    any other relay member key lands the member session — the role falls out of the key.
 *   **Groups are relay channels.** Every exposed app rides a relay channel as its ACL —
     the record stores the channel ID (names change; the display layer resolves the current
     name), `#general` is the everyone-channel and the default, and the expose validates
@@ -125,9 +132,6 @@ The gateway has TWO shapes, one per substrate:
     they're onboarded (the add-member flow) — the one-time default that makes
     "the app rides #general" mean "available to everyone". Separate concern from the
     exposure verbs.
-*   **The portal.** `cp.domain` becomes the landing page: launcher tiles from the apps
-    registry (the apps the agents built and manage) + "talk to your agents" (the relay) +
-    login; the operator console stays behind its own operator login.
 *   **Pangolin as the default public path.** The public DNS story flips: a wildcard
     `*.cp.domain` points at the Pangolin VPS and per-app names ride the tunnel, so the
     home IP appears nowhere in public DNS and nothing at home accepts unsolicited traffic
