@@ -633,13 +633,25 @@ func (s *Server) memberLogin(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusForbidden, "not a member of this relay")
 		return
 	}
+	// THE ROLE FALLS OUT OF THE KEY: a whitelisted pubkey logging in HERE is
+	// the operator — the same login lands BOTH sessions (the host-only
+	// operator cookie for the console's admin surface, the zone-scoped member
+	// cookie for the app gates). Everyone else gets the member session. One
+	// door, the role derived from the key.
+	role := "member"
+	if s.Auth != nil && s.Auth.isAdmin(req.Pubkey) {
+		if opTok, oerr := s.Auth.IssueSessionRole(req.Pubkey, RoleOperator); oerr == nil {
+			setSessionCookie(w, opTok)
+			role = "operator"
+		}
+	}
 	token, err := s.Members.IssueMemberSession(req.Pubkey, req.Pubkey, false, nil)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	setMemberCookie(w, token, s.memberCookieDomain())
-	writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "next": s.safeNext(req.Next)})
+	writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "next": s.safeNext(req.Next), "role": role})
 }
 
 // memberLinkLand consumes a single-use device link and binds a session to

@@ -73,7 +73,10 @@ func newMemberFixtureOpts(t *testing.T, memberInChannel bool) *memberFixture {
 	// The relay answers by KIND: 13534 (the community list) + 9000 (the
 	// channel roster granting the member — omitted for the not-in-channel
 	// fixtures).
-	events := []map[string]interface{}{membershipListEvent(t, f.relaySec, 100, f.memberPK)}
+	// The community list names BOTH (in reality the operator is a member —
+	// their /auth login runs the same community check before the whitelist
+	// promotion).
+	events := []map[string]interface{}{membershipListEvent(t, f.relaySec, 100, f.memberPK, f.opPK)}
 	// The OPERATOR is in the channel too (in reality: #freehold's roster).
 	events = append(events, signEventMap(t, f.relaySec, wire.PutUser, 100,
 		[][]string{{"h", testChannelID}, {"p", f.opPK}}, ""))
@@ -808,5 +811,87 @@ func TestMemberPortalSurvivesRestart(t *testing.T) {
 	}
 	if !ok || pk != f.opPK {
 		t.Fatalf("the portal token must survive a restart: pk=%q ok=%v", pk, ok)
+	}
+}
+
+// TestAuthLoginPromotesTheWhitelistKey pins the one-door rule: the /auth
+// member login with a WHITELISTED pubkey lands BOTH sessions — the operator
+// cookie (the console's admin surface answers) AND the member cookie (the
+// app gates). A member key lands the member session only: the overview
+// stays 401.
+func TestAuthLoginPromotesTheWhitelistKey(t *testing.T) {
+	f := newMemberFixture(t)
+	rec := f.loginAs(t, f.opSec, "") // the operator's key — on the whitelist
+	if rec.Code != 200 {
+		t.Fatalf("the operator's /auth login: %d %s", rec.Code, rec.Body.String())
+	}
+	var out struct {
+		Role string `json:"role"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil || out.Role != "operator" {
+		t.Fatalf("the whitelisted login must report operator: %s", rec.Body.String())
+	}
+	if cookieOf(t, rec, memberCookie) == "" {
+		t.Fatal("the member cookie must land (the app gates)")
+	}
+	opTok := cookieOf(t, rec, sessionCookie)
+	if opTok == "" {
+		t.Fatal("the operator cookie must land (the console surface)")
+	}
+	// The console's admin surface answers the operator session.
+	req := httptest.NewRequest(http.MethodGet, "/api/overview", nil)
+	req.AddCookie(&http.Cookie{Name: sessionCookie, Value: opTok})
+	rec = httptest.NewRecorder()
+	f.s.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("the operator session must reach the overview: %d %s", rec.Code, rec.Body.String())
+	}
+
+	// A member key: the member session only.
+	rec = f.loginAs(t, f.memberSec, "")
+	if rec.Code != 200 {
+		t.Fatalf("the member's /auth login: %d %s", rec.Code, rec.Body.String())
+	}
+	if cookieOf(t, rec, sessionCookie) != "" {
+		t.Fatal("a non-whitelisted key must NOT land an operator session")
+	}
+	if cookieOf(t, rec, memberCookie) == "" {
+		t.Fatal("the member cookie must land")
+	}
+}
+
+// TestJobsServesTheMemberCookieSession pins the one member route's fallback:
+// the /auth login's fh_member pubkey session reaches their OWN rows (prompts
+// included) and nobody else's — the same redaction a console member-role
+// session gets. A DEVICE session (no pubkey) stays out entirely.
+func TestJobsServesTheMemberCookieSession(t *testing.T) {
+	f := newMemberFixture(t)
+	rec := f.loginAs(t, f.memberSec, "")
+	mtok := cookieOf(t, rec, memberCookie)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/jobs", nil)
+	req.AddCookie(&http.Cookie{Name: memberCookie, Value: mtok})
+	rec = httptest.NewRecorder()
+	f.s.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("the member session must reach the jobs read: %d %s", rec.Code, rec.Body.String())
+	}
+
+	// A device session (no pubkey): the jobs view stays closed.
+	_, err := f.s.Members.IssueInvite("device-owner", f.opPK, []string{"yuvomi"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = err
+	devTok, err := f.s.Members.IssueMemberSession("", "device-owner", true, []string{"yuvomi"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req = httptest.NewRequest(http.MethodGet, "/api/jobs", nil)
+	req.AddCookie(&http.Cookie{Name: memberCookie, Value: devTok})
+	rec = httptest.NewRecorder()
+	f.s.ServeHTTP(rec, req)
+	if rec.Code != 401 {
+		t.Fatalf("a device session must not read jobs, got %d", rec.Code)
 	}
 }
