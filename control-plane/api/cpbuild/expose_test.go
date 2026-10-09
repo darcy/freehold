@@ -126,7 +126,7 @@ func newTestExposer(t *testing.T, channels []relayChannel, members []memberEvent
 
 	// A self-signed cert for the durable-mirror reads (the render's
 	// cert-existence filter parses it).
-	fc := selfSigned(t, "yuvomi.cp.librem.example")
+	fc := selfSigned(t, "*.cp.librem.example")
 
 	spec := &Spec{
 		StateDir: toolsetState, AgentRegistry: testRegistryForExpose(t),
@@ -304,7 +304,7 @@ func TestExposeRecordFirstAndEdgeSafe(t *testing.T) {
 	cfg := te.bodies["/tmp/fh-caddyfile"]
 	if !strings.Contains(cfg, "yuvomi.cp.librem.example {") ||
 		!strings.Contains(cfg, "forward_auth 10.78.0.12:8080") ||
-		!strings.Contains(cfg, "tls /data/tls/app-yuvomi/fullchain.pem") {
+		!strings.Contains(cfg, "tls /data/tls/apps/fullchain.pem") {
 		t.Fatalf("the rendered edge config must carry the gated app vhost: %s", cfg)
 	}
 }

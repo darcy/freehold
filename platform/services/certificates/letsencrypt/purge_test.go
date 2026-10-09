@@ -3,6 +3,7 @@ package cert
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -77,5 +78,43 @@ func TestPurgeChallengeRecords_NameFilterNoTrailingDot(t *testing.T) {
 	}
 	if gotName != "_acme-challenge.relay.migrate.freehold.technology" {
 		t.Fatalf("name filter = %q, want no trailing dot", gotName)
+	}
+}
+
+// TestPurgeChallengeRecordsStripsWildcard pins the wildcard purge: the TXT
+// for *.cp.x lives at _acme-challenge.cp.x (lego strips the "*") — the purge
+// must query the BASE's name, never "_acme-challenge.*.cp.x" (a name nothing
+// ever wrote; the stale record would survive the cleanup).
+func TestPurgeChallengeRecordsStripsWildcard(t *testing.T) {
+	var seen []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/zones":
+			_, _ = w.Write([]byte(`{"success":true,"result_info":{"page":1,"total_pages":1},
+				"result":[{"id":"z-fh","name":"freehold.technology"}]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/zones/z-fh/dns_records":
+			seen = append(seen, r.URL.Query().Get("name"))
+			_, _ = w.Write([]byte(`{"success":true,"result":[]}`))
+		case r.Method == http.MethodDelete:
+			_, _ = w.Write([]byte(`{"success":true,"result":{}}`))
+		default:
+			t.Errorf("unexpected request: %s %s", r.Method, r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	if _, err := purgeChallengeRecords("*.cp.librem.freehold.technology", "cloudflare", map[string]string{
+		"CLOUDFLARE_DNS_API_TOKEN": "test-token",
+		"CLOUDFLARE_BASE_URL":      srv.URL,
+	}); err != nil {
+		t.Fatalf("purge: %v", err)
+	}
+	for _, name := range seen {
+		if strings.Contains(name, "*") {
+			t.Fatalf("the purge must query the base's challenge name, got %q", name)
+		}
+		if !strings.HasPrefix(name, "_acme-challenge.cp.librem.freehold.technology") {
+			t.Fatalf("the purge must target the base's challenge name, got %q", name)
+		}
 	}
 }

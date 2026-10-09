@@ -1213,6 +1213,7 @@ func (s *Spec) openCertOrder(slot, host, provider string, env map[string]string)
 	statePath := filepath.Join(s.StateDir, "world-secrets", "cert-pending-"+slot+".json")
 	resume := &cert.Resume{
 		Domain:   host,
+		Wildcard: strings.HasPrefix(host, "*."),
 		Provider: dp,
 		Seal:     func(pub, aad, plain []byte) ([]byte, error) { return crypto.Seal(pub, aad, plain) },
 		Open:     func(secret, aad, blob []byte) ([]byte, error) { return crypto.Open(secret, aad, blob) },

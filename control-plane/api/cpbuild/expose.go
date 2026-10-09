@@ -46,9 +46,6 @@ func appFQDN(cpHost, name string) string {
 	return name + "." + cpHost
 }
 
-// appSlot is an app cert's slot name (the PVC + durable-mirror dir).
-func appSlot(name string) string { return "app-" + name }
-
 // looksLikeChannelID reports whether g is already a dashed-uuid channel id
 // (xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx) rather than a display name.
 func looksLikeChannelID(g string) bool {
@@ -131,8 +128,18 @@ func shortHex(s string) string {
 	return s
 }
 
+// appsCertSlot is the SHARED cert slot for every app vhost: ONE wildcard
+// cert (*.cp-host) issued once — an expose is DNS + config only after that,
+// never a per-app LE order (no per-app rate-limit accumulation, no
+// propagation wait per app).
+const appsCertSlot = "apps"
+
+// appWildcardHost is the wildcard the apps' shared cert covers.
+func appWildcardHost(cpHost string) string { return "*." + cpHost }
+
 // appVhost builds one registry row's site block. Gated apps forward through
-// the console's member gate on the CP guest (the CP's LAN IP, port 8080).
+// the console's member gate on the CP guest (the CP's LAN IP, port 8080);
+// every app presents the SHARED wildcard cert.
 func (s *Spec) appVhost(rec agenttools.AppRecord) caddydeploy.AppVhost {
 	gate := ""
 	if rec.Auth == agenttools.AuthGate {
@@ -141,17 +148,20 @@ func (s *Spec) appVhost(rec agenttools.AppRecord) caddydeploy.AppVhost {
 	return caddydeploy.AppVhost{
 		FQDN:     rec.FQDN,
 		Upstream: rec.Target,
-		Slot:     appSlot(rec.Name),
+		Slot:     appsCertSlot,
 		Gate:     gate,
 	}
 }
 
-// appCertEnsure runs an app slot's cert chain: the durable-reuse gate (a
-// valid mirror cert seeds the PVC — no LE order), then the box seed cache,
-// then the in-process resumable DNS-01 issue. Returns whether a cert was
-// installed NOW (vs already present). The zone credential comes from the
-// relay slot's sealed store — one token, one zone, every slot.
-func (s *Spec) appCertEnsure(slot, host string) (bool, error) {
+// appsCertEnsure runs the SHARED wildcard cert's chain (*.cp-host): the
+// durable-reuse gate (a valid mirror cert seeds the PVC — no LE order), the
+// box seed cache, then the in-process resumable DNS-01 issue. Returns
+// whether a cert was installed NOW (vs already present). ONE order covers
+// every app under the cp host; the zone credential comes from the relay
+// slot's sealed store — one token, one zone, every slot.
+func (s *Spec) appsCertEnsure() (bool, error) {
+	slot := appsCertSlot
+	host := appWildcardHost(s.CpHost)
 	if fc, err := s.durableFullchain(s.K3sVmid, slot); err == nil && s.durableKeyPresent(s.K3sVmid, slot) {
 		if _, ok := cert.ReuseIfValidBytes(fc, time.Now(), 30*24*time.Hour); ok {
 			if err := s.seedCaddyCertFromDurable(s.K3sVmid, slot); err != nil {
@@ -190,6 +200,7 @@ func (s *Spec) appCertEnsure(slot, host string) (bool, error) {
 	if err := s.installCaddyCertFile(s.K3sVmid, slot, issued.Fullchain, issued.Key); err != nil {
 		return false, fmt.Errorf("cert %s install: %w", slot, err)
 	}
+	// The wildcard's challenge lives at the BASE's name (lego strips the "*").
 	if n, perr := cert.PurgeChallengeRecords(host, provider, env); perr == nil && n > 0 {
 		fmt.Fprintf(os.Stderr, "cert %s: cleaned %d challenge record(s) after issue\n", slot, n)
 	}
@@ -231,13 +242,15 @@ func (s *Spec) renderCaddyfile() string {
 	}
 	var apps []caddydeploy.AppVhost
 	if s.Apps != nil {
-		for _, rec := range s.Apps.List() {
-			fc, err := s.durableFullchain(s.K3sVmid, appSlot(rec.Name))
-			if err != nil {
-				continue
-			}
-			if _, ok := cert.ReuseIfValidBytes(fc, time.Now(), 0); ok {
-				apps = append(apps, s.appVhost(rec))
+		// Cert-before-config: the apps' blocks ride only when the SHARED
+		// wildcard cert exists (one check covers every app under the cp
+		// host — that is the point of the shared cert).
+		wc, err := s.durableFullchain(s.K3sVmid, appsCertSlot)
+		if err == nil {
+			if _, ok := cert.ReuseIfValidBytes(wc, time.Now(), 0); ok {
+				for _, rec := range s.Apps.List() {
+					apps = append(apps, s.appVhost(rec))
+				}
 			}
 		}
 	}
@@ -325,11 +338,10 @@ func (s *Spec) worldApps() (string, error) {
 	for _, rec := range records {
 		if _, err := s.appDNSEnsure(rec); err != nil {
 			failed = append(failed, rec.Name+" dns: "+err.Error())
-			continue
 		}
-		if _, err := s.appCertEnsure(appSlot(rec.Name), rec.FQDN); err != nil {
-			failed = append(failed, rec.Name+" cert: "+err.Error())
-		}
+	}
+	if _, err := s.appsCertEnsure(); err != nil {
+		failed = append(failed, "shared wildcard cert: "+err.Error())
 	}
 	if err := s.applyCaddyfile(); err != nil {
 		return "", fmt.Errorf("edge config: %w", err)
@@ -391,8 +403,8 @@ func BuildExposeAppFn(spec *Spec, apps *agenttools.AppsStore, consoleSecret []by
 		if _, err := spec.appDNSEnsure(rec); err != nil {
 			return report + " — RECORDED; the DNS step failed and the next build re-ensures it: " + err.Error(), nil
 		}
-		if _, err := spec.appCertEnsure(appSlot(rec.Name), rec.FQDN); err != nil {
-			return report + " — RECORDED and DNS pointed; the cert step failed and the next build re-ensures it: " + err.Error(), nil
+		if _, err := spec.appsCertEnsure(); err != nil {
+			return report + " — RECORDED and DNS pointed; the wildcard cert step failed and the next build re-ensures it: " + err.Error(), nil
 		}
 		if err := spec.applyCaddyfile(); err != nil {
 			return report + " — RECORDED, DNS pointed, cert installed; the edge config apply failed and the next build re-ensures it: " + err.Error(), nil
