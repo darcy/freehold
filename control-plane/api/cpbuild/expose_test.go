@@ -389,26 +389,28 @@ func selfSigned(t *testing.T, host string) []byte {
 	return pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
 }
 
-// TestExposeRefusesTheEdgeHosts pins the collision guard: an app named
-// "relay" or "cp" composes the EDGE's own hostname — two site blocks for one
-// address is a config that cannot load (the whole edge, relay included,
-// crash-loops, and kubectl apply exits 0 so nothing reports it). Refused
-// before anything is recorded.
+// TestExposeRefusesTheEdgeHosts pins the collision guard: an app whose
+// composed hostname IS one of the edge's own site blocks (the relay hosted
+// under the cp host's domain — a name collision means TWO site blocks for
+// one address: an unloadable config, a crash-looping edge, and kubectl
+// apply exits 0 so nothing reports it) is refused before anything is
+// recorded.
 func TestExposeRefusesTheEdgeHosts(t *testing.T) {
 	family := "3fa85f64-5717-4562-b3fc-2c963f66afa6"
 	consoleSec := make([]byte, 32)
 	consoleSec[0] = 0x42
-	for _, name := range []string{"relay", "cp"} {
-		te := newTestExposer(t, []relayChannel{{family, "family"}},
-			[]memberEvent{{channelID: family, pubkey: strings.Repeat("b", 64), kind: wire.PutUser, ts: 100}})
-		if _, err := te.exposeFn(consoleSec)(agent.ExposeArgs{
-			Name: name, Target: "10.78.0.13:3000", Group: family, Requester: strings.Repeat("b", 64),
-		}); err == nil || !strings.Contains(err.Error(), "the edge's own host") {
-			t.Fatalf("expose %q must refuse the edge's own host, got %v", name, err)
-		}
-		if _, ok := te.apps.Get(name); ok {
-			t.Fatalf("expose %q must not record", name)
-		}
+	te := newTestExposer(t, []relayChannel{{family, "family"}},
+		[]memberEvent{{channelID: family, pubkey: strings.Repeat("b", 64), kind: wire.PutUser, ts: 100}})
+	// The relay lives under the cp host's domain: the app name "relay"
+	// would compose exactly the relay's own site block.
+	te.spec.RelayHost = "relay.cp.librem.example"
+	if _, err := te.exposeFn(consoleSec)(agent.ExposeArgs{
+		Name: "relay", Target: "10.78.0.13:3000", Group: family, Requester: strings.Repeat("b", 64),
+	}); err == nil || !strings.Contains(err.Error(), "the edge's own host") {
+		t.Fatalf("expose must refuse the edge's own host, got %v", err)
+	}
+	if _, ok := te.apps.Get("relay"); ok {
+		t.Fatal("the refused expose must not record")
 	}
 }
 
