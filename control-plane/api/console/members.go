@@ -599,12 +599,25 @@ func (s *Server) forwardAuthVerify(w http.ResponseWriter, r *http.Request) {
 	}
 	if s.Auth != nil {
 		if tok := cookieValue(r, sessionCookie); tok != "" {
-			// Any console session role passes the gate — operator or member:
-			// both are admitted identities (the member role was verified
-			// against the relay's list at ITS login).
-			if _, _, ok := s.Auth.SessionIdentity(tok); ok {
-				w.WriteHeader(http.StatusNoContent)
-				return
+			if pk, role, ok := s.Auth.SessionIdentity(tok); ok {
+				// The OPERATOR passes outright. A member-role console session
+				// does NOT: it holds a live pubkey, so it goes through the
+				// SAME app-aware check a nostr session does — otherwise the
+				// cookie replays past the channel check and channel removal
+				// never revokes anything.
+				if role == RoleOperator {
+					w.WriteHeader(http.StatusNoContent)
+					return
+				}
+				admitted, err := s.memberAdmits(MemberInfo{Pubkey: pk, Name: pk}, r)
+				if err != nil {
+					writeErr(w, http.StatusServiceUnavailable, "membership unavailable: "+err.Error())
+					return
+				}
+				if admitted {
+					w.WriteHeader(http.StatusNoContent)
+					return
+				}
 			}
 		}
 	}

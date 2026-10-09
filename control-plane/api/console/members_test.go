@@ -632,3 +632,55 @@ func TestGateChannelRevocation(t *testing.T) {
 		t.Fatal("a pubkey outside the app's channel must not admit")
 	}
 }
+
+// TestConsoleMemberSessionCannotBypassTheGate pins the replay hole: a
+// member-role console session (minted by the public login to every relay
+// member) holds a live pubkey — replaying its cookie against a gated app
+// goes through the SAME channel check a nostr session does; it is never a
+// free pass. The operator role passes outright.
+func TestConsoleMemberSessionCannotBypassTheGate(t *testing.T) {
+	// An in-channel member's console session admits the app.
+	f := newMemberFixture(t)
+	tok, err := f.s.Auth.IssueSessionRole(f.memberPK, RoleMember)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/auth/verify", nil)
+	req.Header.Set("X-Original-Host", "yuvomi.cp.example.com")
+	req.AddCookie(&http.Cookie{Name: sessionCookie, Value: tok})
+	rec := httptest.NewRecorder()
+	f.s.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("an in-channel member's console session admits: %d", rec.Code)
+	}
+
+	// An OUT-of-channel member's console session denies the same app — the
+	// cookie is not a bypass.
+	f2 := newMemberFixtureOpts(t, false)
+	tok2, err := f2.s.Auth.IssueSessionRole(f2.memberPK, RoleMember)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req = httptest.NewRequest(http.MethodGet, "/auth/verify", nil)
+	req.Header.Set("X-Original-Host", "yuvomi.cp.example.com")
+	req.AddCookie(&http.Cookie{Name: sessionCookie, Value: tok2})
+	rec = httptest.NewRecorder()
+	f2.s.ServeHTTP(rec, req)
+	if rec.Code == http.StatusNoContent {
+		t.Fatal("a member-role session must not bypass the channel check")
+	}
+
+	// The operator role passes outright.
+	tok3, err := f.s.Auth.IssueSessionRole(f.opPK, RoleOperator)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req = httptest.NewRequest(http.MethodGet, "/auth/verify", nil)
+	req.Header.Set("X-Original-Host", "yuvomi.cp.example.com")
+	req.AddCookie(&http.Cookie{Name: sessionCookie, Value: tok3})
+	rec = httptest.NewRecorder()
+	f.s.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("the operator passes the gate outright: %d", rec.Code)
+	}
+}
