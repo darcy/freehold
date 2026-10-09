@@ -739,15 +739,22 @@ func (s *Server) memberChannelAllowed(pubkey, groupID string) (bool, error) {
 // browser falls back to the login page alone. Same-site validated by
 // safeNext before use.
 func (s *Server) gateNext(r *http.Request) string {
-	host := r.Header.Get("X-Forwarded-Host")
+	// The ORIGINALS the vhost template forwards explicitly (the gate controls
+	// both ends), falling back to Caddy's X-Forwarded-* when present. The
+	// scheme is https — the edge is TLS-terminated; there is no plain-HTTP
+	// path to the gate.
+	host := r.Header.Get("X-Original-Host")
+	if host == "" {
+		host = r.Header.Get("X-Forwarded-Host")
+	}
 	if host == "" {
 		return ""
 	}
-	proto := r.Header.Get("X-Forwarded-Proto")
-	if proto == "" {
-		proto = "https"
+	uri := r.Header.Get("X-Original-Uri")
+	if uri == "" {
+		uri = r.Header.Get("X-Forwarded-Uri")
 	}
-	return s.safeNext(proto + "://" + host + r.Header.Get("X-Forwarded-Uri"))
+	return s.safeNext("https://" + host + uri)
 }
 
 func (s *Server) memberLogout(w http.ResponseWriter, r *http.Request) {

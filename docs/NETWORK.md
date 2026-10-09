@@ -59,8 +59,8 @@ The gateway has TWO shapes, one per substrate:
     service up (a homelab agent deploying a family calendar), reaching it is a Network
     capability: the **exposure verbs** (`expose_app` / `unexpose_app` on the agent toolset)
     turn {name, target, group} into a public TLS vhost on the edge — DNS pointed
-    (`<name>.<cp host>` — an app sits under the CP host, the domain the member cookie is scoped to — → the proxy), a per-app cert issued through the same
-    in-process lego chain, the Caddy config rendered + applied live — and the record lands
+    (`<name>.<cp host>` — an app sits under the CP host, the domain the member cookie is scoped to — → the proxy), a cert — ONE SHARED wildcard for the cp host's domain, issued once through the same
+    in-process lego chain (an expose after that is DNS + config only — no per-app LE order), the Caddy config rendered + applied live — and the record lands
     in the **apps registry** (`apps.json`, the toolset's durable dir), which the build tail
     re-ensures so teardown/rebuild restores the apps. Two invariants: **cert before
     config** (a vhost whose cert is missing crash-loops the whole edge — an app's block
