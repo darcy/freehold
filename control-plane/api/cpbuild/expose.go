@@ -23,6 +23,8 @@
 package cpbuild
 
 import (
+	"crypto/x509"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"os"
@@ -186,11 +188,32 @@ func (s *Spec) appVhost(rec agenttools.AppRecord) caddydeploy.AppVhost {
 // whether a cert was installed NOW (vs already present). ONE order covers
 // every app under the cp host; the zone credential comes from the relay
 // slot's sealed store — one token, one zone, every slot.
+// certCovers reports whether the fullchain's leaf cert's SANs carry the
+// wanted host EXACTLY (the wildcard form included) — the durable-reuse gate
+// must not serve a stale shape's cert after the covered domain moves (an
+// old-shape wildcard in the mirror would otherwise TLS-mismatch every app).
+func certCovers(fullchain []byte, host string) bool {
+	block, _ := pem.Decode(fullchain)
+	if block == nil {
+		return false
+	}
+	leaf, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return false
+	}
+	for _, name := range leaf.DNSNames {
+		if name == host {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *Spec) appsCertEnsure() (bool, error) {
 	slot := appsCertSlot
 	host := appWildcardHost(s.CpHost)
 	if fc, err := s.durableFullchain(s.K3sVmid, slot); err == nil && s.durableKeyPresent(s.K3sVmid, slot) {
-		if _, ok := cert.ReuseIfValidBytes(fc, time.Now(), 30*24*time.Hour); ok {
+		if _, ok := cert.ReuseIfValidBytes(fc, time.Now(), 30*24*time.Hour); ok && certCovers(fc, host) {
 			if err := s.seedCaddyCertFromDurable(s.K3sVmid, slot); err != nil {
 				return false, fmt.Errorf("cert %s durable seed: %w", slot, err)
 			}

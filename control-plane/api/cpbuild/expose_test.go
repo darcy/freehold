@@ -517,3 +517,21 @@ func TestLanVisibilitySkipsPublicDNS(t *testing.T) {
 		t.Fatal("a family app must point its public DNS record")
 	}
 }
+
+// TestAppsCertReuseCoversTheHost pins the reuse gate's domain check: a
+// mirror cert for the OLD shape (*.cp.librem…) must not seed as the apps'
+// wildcard after the covered domain moved to the world domain — a stale
+// shape's cert would TLS-mismatch every app behind an "apps reconciled"
+// report; the mirror miss falls through to a fresh issue.
+func TestAppsCertReuseCoversTheHost(t *testing.T) {
+	oldShape := selfSigned(t, "*.cp.librem.example")
+	if certCovers(oldShape, "*.librem.example") {
+		t.Fatal("the old shape's cert must not cover the moved wildcard")
+	}
+	if !certCovers(selfSigned(t, "*.librem.example"), "*.librem.example") {
+		t.Fatal("the matching wildcard must cover")
+	}
+	if certCovers([]byte("not a pem"), "*.librem.example") {
+		t.Fatal("garbage must not cover")
+	}
+}
