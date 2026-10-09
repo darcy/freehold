@@ -65,12 +65,23 @@ type memberInvite struct {
 	apps      []string
 }
 
+// memberPortal is a single-use token binding a PUBKEY to a member session —
+// the bridge for a key-holder whose browser has no NIP-07 extension: the
+// operator mints it (their own session's pubkey), the link lands a FULL
+// member session (dynamic channel checks), the key never touches a browser.
+type memberPortal struct {
+	expires time.Time
+	pubkey  string
+	name    string
+}
+
 // Members is the member session + invite store, persisted to members.json.
 type Members struct {
 	file     string
 	mu       sync.Mutex
 	sessions map[string]MemberSession // token -> session
 	invites  map[string]memberInvite  // sha256(token) -> invite
+	portals  map[string]memberPortal  // token -> portal (single-use)
 }
 
 // memberSessionRow / memberInviteRow are the on-disk shapes (expires as unix
@@ -93,6 +104,7 @@ type memberInviteRow struct {
 type memberFile struct {
 	Sessions map[string]memberSessionRow `json:"sessions"`
 	Invites  map[string]memberInviteRow  `json:"invites"`
+	Portals  map[string]memberPortal     `json:"portals"`
 }
 
 // NewMembers loads the member store ("" = memory-only, for tests). A missing
@@ -102,6 +114,7 @@ func NewMembers(file string) *Members {
 		file:     file,
 		sessions: map[string]MemberSession{},
 		invites:  map[string]memberInvite{},
+		portals:  map[string]memberPortal{},
 	}
 	m.load()
 	return m
@@ -133,6 +146,12 @@ func (m *Members) load() {
 		}
 		m.invites[h] = memberInvite{expires: exp, createdBy: r.CreatedBy, name: r.Name, apps: r.Apps}
 	}
+	for tok, r := range f.Portals {
+		if r.expires.Before(now()) {
+			continue
+		}
+		m.portals[tok] = r
+	}
 }
 
 // save persists the store (0600, temp+rename — a crash mid-write never
@@ -146,12 +165,16 @@ func (m *Members) save() error {
 	f := memberFile{
 		Sessions: make(map[string]memberSessionRow, len(m.sessions)),
 		Invites:  make(map[string]memberInviteRow, len(m.invites)),
+		Portals:  make(map[string]memberPortal, len(m.portals)),
 	}
 	for tok, s := range m.sessions {
 		f.Sessions[tok] = memberSessionRow{Pubkey: s.pubkey, Name: s.name, Device: s.device, Apps: s.apps, Expires: s.expires.Unix()}
 	}
 	for h, i := range m.invites {
 		f.Invites[h] = memberInviteRow{Name: i.name, CreatedBy: i.createdBy, Apps: i.apps, Expires: i.expires.Unix()}
+	}
+	for tok, p := range m.portals {
+		f.Portals[tok] = p
 	}
 	raw, err := json.Marshal(f)
 	if err != nil {
@@ -216,6 +239,39 @@ func (m *Members) RevokeInvite(hash string) (notFound bool, err error) {
 	}
 	delete(m.invites, hash)
 	return false, m.save()
+}
+
+// IssueMemberPortal mints a single-use token binding pubkey to a member
+// session (the operator opening their own member login in a browser without
+// a NIP-07 extension). Short-lived like the operator portal tokens.
+func (m *Members) IssueMemberPortal(pubkey, name string) (string, error) {
+	token, err := randomHex(16)
+	if err != nil {
+		return "", err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.portals[token] = memberPortal{expires: now().Add(portalTTL), pubkey: pubkey, name: name}
+	if err := m.save(); err != nil {
+		return "", err
+	}
+	return token, nil
+}
+
+// ConsumeMemberPortal single-use consumes a portal token if fresh.
+func (m *Members) ConsumeMemberPortal(token string) (pubkey, name string, ok bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	p, found := m.portals[token]
+	if !found {
+		return "", "", false
+	}
+	delete(m.portals, token)
+	_ = m.save()
+	if p.expires.Before(now()) {
+		return "", "", false
+	}
+	return p.pubkey, p.name, true
 }
 
 // IssueMemberSession mints a member session token (apps ride device
@@ -585,6 +641,61 @@ func (s *Server) memberLinkLand(w http.ResponseWriter, r *http.Request, token st
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_, _ = w.Write([]byte("<!doctype html><meta charset='utf-8'><body style='background:#0d1117;color:#c9d1d9;font-family:monospace;display:flex;align-items:center;justify-content:center;min-height:100vh;text-align:center'><div><h1 style='font-size:16px;letter-spacing:2px'>signed in</h1><p style='color:#8b949e'>Welcome, " + htmlEsc(name) + " — you can close this tab and open your app.</p></div></body>"))
+}
+
+// memberPortalMint is the key-holder's bridge: the operator mints a
+// single-use link that opens a FULL member session for THEIR OWN pubkey —
+// the identity their Nostr login would carry, no NIP-07 extension needed.
+// It is not a widening lever: the pubkey is the MINTER's (the session's
+// admission is still whatever channels that pubkey belongs to).
+func (s *Server) memberPortalMint(w http.ResponseWriter, r *http.Request) {
+	operator, err := s.requireAdmin(r)
+	if err != nil {
+		writeErr(w, statusFor(err), err.Error())
+		return
+	}
+	if err := checkOrigin(r, s.PublicOrigin); err != nil {
+		writeErr(w, http.StatusForbidden, err.Error())
+		return
+	}
+	if s.Members == nil {
+		writeErr(w, http.StatusNotFound, "member login is not enabled on this console")
+		return
+	}
+	token, err := s.Members.IssueMemberPortal(operator, "member session")
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"link": "/auth/portal/" + token})
+}
+
+// memberPortalLand consumes the token and lands the member session (the
+// pubkey rides the token, so the app gate checks the channels that pubkey
+// belongs to — the same as a Nostr login's session).
+func (s *Server) memberPortalLand(w http.ResponseWriter, r *http.Request, token string) {
+	if s.Members == nil {
+		writeErr(w, http.StatusNotFound, "member login is not enabled on this console")
+		return
+	}
+	pubkey, name, ok := s.Members.ConsumeMemberPortal(token)
+	if !ok {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte("<!doctype html><meta charset='utf-8'><body style='background:#0d1117;color:#8b949e;font-family:monospace;display:flex;align-items:center;justify-content:center;min-height:100vh'><p>This link is unknown, expired, or already used. Mint a fresh one.</p></body>"))
+		return
+	}
+	mtok, err := s.Members.IssueMemberSession(pubkey, name, false, nil)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	setMemberCookie(w, mtok, s.memberCookieDomain())
+	next := s.safeNext(r.URL.Query().Get("next"))
+	if next == "" {
+		next = strings.TrimSuffix(ofStr(s.PublicOrigin), "/")
+	}
+	http.Redirect(w, r, next, http.StatusFound)
 }
 
 // forwardAuthVerify is the gate endpoint Caddy's forward_auth calls for every

@@ -202,6 +202,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.settingsSet(w, r)
 	case path == "/api/apps" && method == http.MethodGet:
 		s.appsList(w, r)
+	case path == "/api/members/portal" && method == http.MethodPost:
+		s.memberPortalMint(w, r)
+	case strings.HasPrefix(path, "/auth/portal/") && method == http.MethodGet:
+		s.memberPortalLand(w, r, strings.TrimPrefix(path, "/auth/portal/"))
 	default:
 		writeErr(w, http.StatusNotFound, "no such route: "+method+" "+path)
 	}

@@ -684,3 +684,70 @@ func TestConsoleMemberSessionCannotBypassTheGate(t *testing.T) {
 		t.Fatalf("the operator passes the gate outright: %d", rec.Code)
 	}
 }
+
+// TestMemberPortalLandsThePubkeySession pins the key-holder's bridge: the
+// operator mints a single-use portal link, the click lands a FULL member
+// session for THEIR pubkey (the channel checks apply — the same admission a
+// Nostr login would give), and the second open is dead.
+func TestMemberPortalLandsThePubkeySession(t *testing.T) {
+	f := newMemberFixture(t)
+	op := opCookie(t, f)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/members/portal", strings.NewReader("{}"))
+	req.AddCookie(op)
+	rec := httptest.NewRecorder()
+	f.s.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("portal mint: %d %s", rec.Code, rec.Body.String())
+	}
+	var out struct {
+		Link string `json:"link"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil || !strings.HasPrefix(out.Link, "/auth/portal/") {
+		t.Fatalf("portal mint response: %s", rec.Body.String())
+	}
+
+	// The click lands the member session (redirect + cookie), and the
+	// session's PUBKEY is the operator's — the app gate checks channels.
+	rec = httptest.NewRecorder()
+	f.s.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, out.Link, nil))
+	if rec.Code != http.StatusFound {
+		t.Fatalf("portal land: %d", rec.Code)
+	}
+	tok := cookieOf(t, rec, memberCookie)
+	if tok == "" {
+		t.Fatal("no member cookie on the portal land")
+	}
+	info, ok := f.s.Members.MemberIdentity(tok)
+	if !ok || info.Pubkey != f.opPK || info.Device {
+		t.Fatalf("the portal session must carry the operator's pubkey as a member: %+v", info)
+	}
+	req = httptest.NewRequest(http.MethodGet, "/auth/verify", nil)
+	req.Header.Set("X-Original-Host", "yuvomi.cp.example.com")
+	req.AddCookie(&http.Cookie{Name: memberCookie, Value: tok})
+	rec = httptest.NewRecorder()
+	f.s.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("the portal session admits via the channel check: %d", rec.Code)
+	}
+
+	// Single-use.
+	rec = httptest.NewRecorder()
+	f.s.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, out.Link, nil))
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("a reused portal link must be 404, got %d", rec.Code)
+	}
+
+	// A member session cannot MINT one (operator-only).
+	mtok, err := f.s.Auth.IssueSessionRole(f.memberPK, RoleMember)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req = httptest.NewRequest(http.MethodPost, "/api/members/portal", strings.NewReader("{}"))
+	req.AddCookie(&http.Cookie{Name: sessionCookie, Value: mtok})
+	rec = httptest.NewRecorder()
+	f.s.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("a member session must not mint portal links, got %d", rec.Code)
+	}
+}

@@ -92,6 +92,8 @@
   <div id="invite-apps" style="margin-top:8px" class="small">apps: loading…</div>
   <div class="row" style="margin-top:8px">
     <button id="invite-mint">mint device link</button>
+    <button id="member-portal">open my member session here</button>
+    <span class="small">signs THIS browser in with your own pubkey — no Nostr extension needed</span>
   </div>
   <div class="small" id="invite-out"></div>
   <table>
@@ -290,6 +292,16 @@ $("#provision-form").onsubmit = async (ev) => {
     });
     ev.target.reset();
     await refresh();
+  } catch (e) { $("#err").textContent = "error: " + e.message; }
+};
+
+// The member portal: a single-use link that opens a FULL member session
+// for the operator's own pubkey in THIS browser (the key never leaves the
+// box — the link carries a token, not a key).
+$("#member-portal").onclick = async () => {
+  try {
+    const res = await api("/api/members/portal", {});
+    location.href = res.link;
   } catch (e) { $("#err").textContent = "error: " + e.message; }
 };
 
