@@ -930,6 +930,25 @@ func (s *Spec) durableFullchain(k3sVmid uint32, slot string) ([]byte, error) {
 	return base64.StdEncoding.DecodeString(strings.TrimSpace(out))
 }
 
+// resolveCaddyPVDir is the shared sh snippet that resolves the caddy-data
+// PVC's backing dir inside the k3s guest. A fresh world's services phase can
+// lag the k3s API by seconds: an EMPTY $PDIR here once silently misdirected
+// the cert write onto the guest rootfs at /tls/<slot> (set -e never tripped;
+// the mirror looked fine; the pod then crashlooped on the missing cert and
+// the PV migration died waiting for a never-ready caddy). Bound the race,
+// then fail LOUDLY — the next build re-seeds, never a green install with the
+// cert on the rootfs.
+const resolveCaddyPVDir = `PV=$($K get pvc caddy-data -n caddy -o jsonpath={.spec.volumeName})
+PDIR=$($K get pv $PV -o jsonpath={.spec.local.path})
+i=0
+while [ -z "$PDIR" ] && [ "$i" -lt 9 ]; do
+  sleep 10
+  PV=$($K get pvc caddy-data -n caddy -o jsonpath={.spec.volumeName})
+  [ -n "$PV" ] && PDIR=$($K get pv $PV -o jsonpath={.spec.local.path})
+  i=$((i + 1))
+done
+[ -n "$PDIR" ] || { echo "FATAL: caddy-data PVC never resolved (k3s API up? services applied?)"; exit 1; }`
+
 // durableKeyPresent reports whether the durable mirror also holds a non-empty
 // key.pem (a fullchain alone is not enough to serve TLS).
 func (s *Spec) durableKeyPresent(k3sVmid uint32, slot string) bool {
@@ -944,8 +963,7 @@ func (s *Spec) seedCaddyCertFromDurable(k3sVmid uint32, slot string) error {
 pct exec %d -- bash -c '
 set -e
 K="/usr/local/bin/kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml"
-PV=$($K get pvc caddy-data -n caddy -o jsonpath={.spec.volumeName})
-PDIR=$($K get pv $PV -o jsonpath={.spec.local.path})
+` + resolveCaddyPVDir + `
 DIR=$PDIR/tls/%s
 SRC=%s
 mkdir -p "$DIR"
@@ -1279,8 +1297,7 @@ pct push %d /tmp/fh-key-%s.pem /tmp/key-%s.pem
 pct exec %d -- sh -c '
 set -e
 K="/usr/local/bin/kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml"
-PV=$($K get pvc caddy-data -n caddy -o jsonpath={.spec.volumeName})
-PDIR=$($K get pv $PV -o jsonpath={.spec.local.path})
+` + resolveCaddyPVDir + `
 DIR=$PDIR/tls/%s
 DUR=%s
 mkdir -p "$DIR" "$DUR"
@@ -1455,6 +1472,17 @@ func BuildWorldApply(spec *Spec) agent.WorldApply {
 			}
 			report = append(report, "relay booted + stack deployed")
 		}
+		// 2.2. The operator's Buzz profile (kind 0) — the event that makes the
+		// desktop app skip its first-run onboarding (starter channels, private
+		// Welcome, built-in welcome-team agents). Published HERE, the moment the
+		// relay answers on its LAN dial and before the public edge exists: the
+		// app connects the instant the relay is reachable, and its onboarding
+		// gate fails OPEN (a missed profile check runs the full onboarding —
+		// starter channels, Fizz + the welcome kickoff, and the app's own
+		// kind:0, which would then make this stage skip as "already present"
+		// forever). Seeding before anything can connect is the only ordering
+		// that holds. Reads first; never overwrites.
+		report = spec.stageOperatorProfile(report)
 		// 2.4. Re-assert the CONSOLE identity's relay membership on EVERY build.
 		// A relay rebuild/reseed can drop it, and then every console-signed
 		// publish (the runner channels, agent rosters, agent-tools seeding) 403s
@@ -1651,7 +1679,11 @@ func BuildWorldApply(spec *Spec) agent.WorldApply {
 				// not here, so the world_migrate tool gets it too.
 				report = spec.appendMigrations(report)
 				report = spec.appendMemoryPlane(report)
-				report = spec.appendAgentToolsAudience(report)
+				rep, aerr := spec.appendAgentToolsAudience(report)
+				report = append(report, rep...)
+				if aerr != nil {
+					return "", fmt.Errorf("world-build agent-tools coords: %w", aerr)
+				}
 			} else {
 				// Console executor: write the files, then reload the serve process.
 				// The serve is deliberately left RUNNING across this whole block: the
@@ -1675,15 +1707,19 @@ func BuildWorldApply(spec *Spec) agent.WorldApply {
 				// process that comes up loads their result as its starting state.
 				report = spec.appendMigrations(report)
 				report = spec.appendMemoryPlane(report)
-				report = spec.appendAgentToolsAudience(report)
+				rep, aerr := spec.appendAgentToolsAudience(report)
+				report = append(report, rep...)
+				if aerr != nil {
+					return "", fmt.Errorf("world-build agent-tools coords: %w", aerr)
+				}
 				if err := spec.startAgentTools(); err != nil {
 					return "", fmt.Errorf("world-build agent-tools reload: %w", err)
 				}
 			}
 		}
-		// 8.5. The operator's Buzz profile (kind 0) — the event that makes the
-		// desktop app skip its first-run onboarding (starter channels, private
-		// Welcome, built-in welcome-team agents). Reads first; never overwrites.
+		// 8.5. Self-heal re-check of 2.2 — a transient miss on the early stage
+		// (the relay API was still settling) degrades to the stock onboarding;
+		// the stage is read-first so this is a no-op on a healthy build.
 		report = spec.stageOperatorProfile(report)
 		// 9. The release pulse: the CPA posts the world's RUNNING version to
 		// Pulse — a stable build its own release's notes + link, a dev build
@@ -2076,38 +2112,60 @@ func (s *Spec) appendMigrations(report []string) []string {
 // dead audience, so every CP tool call fails signature verify while the
 // world otherwise looks healthy. Detection only — the repair (restore the
 // durable agent-tools state from backup, or a deliberate re-point + pod
-// re-create) is an operator decision, never an auto-write.
-func (s *Spec) appendAgentToolsAudience(report []string) []string {
+// re-create) is an operator decision, never an auto-write. The
+// pre-recording write FAILS the stage on a persistence error (the same
+// fail-loud contract as the cert seed): a green build whose restarted
+// console 503s world-migrate is exactly the defect this stage heals.
+func (s *Spec) appendAgentToolsAudience(report []string) ([]string, error) {
 	audience, aerr := s.agentToolsAudience()
 	if aerr != nil {
 		// The durable identity is unreadable — the very failure the line
 		// exists to surface. Say so; never misattribute another identity as
 		// the "live" audience.
-		return append(report, "WARN: agent-tools: "+aerr.Error()+" — pods' bridge audience is undeterminable; restore the durable agent-tools state from backup")
+		return append(report, "WARN: agent-tools: "+aerr.Error()+" — pods' bridge audience is undeterminable; restore the durable agent-tools state from backup"), nil
 	}
 	if audience == "" {
-		return report
+		return report, nil
 	}
 	if _, err := os.Stat(filepath.Join(s.consoleStateRoot(), state.StateFile)); os.IsNotExist(err) {
-		return append(report, "agent-tools: audience "+agenttools.ShortHex(audience)+" (no console state — nothing recorded to compare)")
+		return append(report, "agent-tools: audience "+agenttools.ShortHex(audience)+" (no console state — nothing recorded to compare)"), nil
 	} else if err != nil {
-		return append(report, "WARN: agent-tools: console state unreadable: "+err.Error())
+		return append(report, "WARN: agent-tools: console state unreadable: "+err.Error()), nil
 	}
 	store, err := state.Open(s.consoleStateRoot())
 	if err != nil {
-		return append(report, "WARN: agent-tools: console state unreadable: "+err.Error())
+		return append(report, "WARN: agent-tools: console state unreadable: "+err.Error()), nil
 	}
 	rec := store.AgentToolsPubkey()
+	if rec == nil || *rec == "" {
+		// Pre-recording world: write the coords NOW. The console restarts on
+		// every update redeploy with the BOX config's flags, and a young
+		// world's config has no agent_tools_pubkey yet (only a login records
+		// it) — the restarted console would then 503 world-migrate/world-exec
+		// until a login happened to save them. The state file persists across
+		// restarts, so recording here heals the world for good. The URL is the
+		// CP-guest form the box config itself records (the LAN dial both the
+		// console and login boxes reach).
+		if s.CpIP == "" {
+			return append(report, "agent-tools: audience "+agenttools.ShortHex(audience)+" (console state records none — no cp IP to record the coords against)"), nil
+		}
+		u := fmt.Sprintf("http://%s:%s", s.CpIP, AgentToolsPort)
+		if err := store.SetAgentToolsURL(&u); err != nil {
+			return report, fmt.Errorf("pre-recording agent-tools write (url): %w", err)
+		}
+		if err := store.SetAgentToolsPubkey(&audience); err != nil {
+			return report, fmt.Errorf("pre-recording agent-tools write (pubkey; the url landed): %w", err)
+		}
+		return append(report, "agent-tools: audience "+agenttools.ShortHex(audience)+" recorded to the console state"), nil
+	}
 	switch {
-	case rec == nil || *rec == "":
-		return append(report, "agent-tools: audience "+agenttools.ShortHex(audience)+" (console state records none — pre-recording world)")
 	case *rec == audience:
-		return append(report, "agent-tools: audience "+agenttools.ShortHex(audience)+" matches the console record")
+		return append(report, "agent-tools: audience "+agenttools.ShortHex(audience)+" matches the console record"), nil
 	default:
 		return append(report, "WARN: agent-tools: AUDIENCE DRIFT — the live identity is "+agenttools.ShortHex(audience)+
 			" but the console/box profile records "+agenttools.ShortHex(*rec)+
 			": every existing agent pod signs the stale pubkey and every CP tool call fails signature verify. "+
-			"Restore the durable agent-tools state from backup (do not hand-patch), or deliberately re-point the profile and re-create the pods.")
+			"Restore the durable agent-tools state from backup (do not hand-patch), or deliberately re-point the profile and re-create the pods."), nil
 	}
 }
 

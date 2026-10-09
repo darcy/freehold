@@ -33,7 +33,10 @@ func TestAppendAgentToolsAudience(t *testing.T) {
 
 	// A fresh world with no console state: nothing recorded to compare, and
 	// the check must not CREATE the state as a side effect of looking.
-	line := spec.appendAgentToolsAudience(nil)
+	line, err := spec.appendAgentToolsAudience(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(line) != 1 || !strings.Contains(line[0], "no console state") {
 		t.Fatalf("no-state report = %q, want one no-console-state line", line)
 	}
@@ -48,14 +51,18 @@ func TestAppendAgentToolsAudience(t *testing.T) {
 	if err := store.SetAgentToolsPubkey(&live); err != nil {
 		t.Fatal(err)
 	}
-	if line := spec.appendAgentToolsAudience(nil); len(line) != 1 || !strings.Contains(line[0], "matches") {
-		t.Fatalf("match report = %q, want a clean match line", line)
+	line, aerr := spec.appendAgentToolsAudience(nil)
+	if aerr != nil || len(line) != 1 || !strings.Contains(line[0], "matches") {
+		t.Fatalf("match report = %q err %v, want a clean match line", line, aerr)
 	}
 
 	if err := store.SetAgentToolsPubkey(&stale); err != nil {
 		t.Fatal(err)
 	}
-	line = spec.appendAgentToolsAudience(nil)
+	line, aerr = spec.appendAgentToolsAudience(nil)
+	if aerr != nil {
+		t.Fatal(aerr)
+	}
 	// The drift line names BOTH pubkeys (truncated) — assert on the names,
 	// not on any truncation detail.
 	if len(line) != 1 || !strings.HasPrefix(line[0], "WARN:") || !strings.Contains(line[0], "AUDIENCE DRIFT") {
@@ -67,8 +74,8 @@ func TestAppendAgentToolsAudience(t *testing.T) {
 
 	// A spec that never carried a live audience and has no durable identity
 	// resolves to nothing — silent.
-	if got := (&Spec{StateDir: stateDir}).appendAgentToolsAudience(nil); got != nil {
-		t.Fatalf("empty-audience spec must stay silent, got %q", got)
+	if got, aerr := (&Spec{StateDir: stateDir}).appendAgentToolsAudience(nil); got != nil || aerr != nil {
+		t.Fatalf("empty-audience spec must stay silent, got %q err %v", got, aerr)
 	}
 
 	// The console-executor resolution: the live audience comes from the
@@ -81,9 +88,9 @@ func TestAppendAgentToolsAudience(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	line = spec.appendAgentToolsAudience(nil)
-	if len(line) != 1 || !strings.Contains(line[0], agenttools.ShortHex(disk)) {
-		t.Fatalf("resolved-audience report = %q, want the disk identity's pubkey named", line)
+	line, aerr = spec.appendAgentToolsAudience(nil)
+	if aerr != nil || len(line) != 1 || !strings.Contains(line[0], agenttools.ShortHex(disk)) {
+		t.Fatalf("resolved-audience report = %q err %v, want the disk identity's pubkey named", line, aerr)
 	}
 
 	// The console executor with the durable identity DESTROYED (the drift
@@ -94,9 +101,9 @@ func TestAppendAgentToolsAudience(t *testing.T) {
 		t.Fatal(err)
 	}
 	consoleExecutor := &Spec{StateDir: stateDir, Audience: live, AgentIdentityDir: stateDir}
-	line = consoleExecutor.appendAgentToolsAudience(nil)
-	if len(line) != 1 || !strings.HasPrefix(line[0], "WARN:") || !strings.Contains(line[0], "unreadable") {
-		t.Fatalf("destroyed-identity report = %q, want a WARN naming the unreadable identity", line)
+	line, aerr = consoleExecutor.appendAgentToolsAudience(nil)
+	if aerr != nil || len(line) != 1 || !strings.HasPrefix(line[0], "WARN:") || !strings.Contains(line[0], "unreadable") {
+		t.Fatalf("destroyed-identity report = %q err %v, want a WARN naming the unreadable identity", line, aerr)
 	}
 	if strings.Contains(line[0], live) {
 		t.Fatalf("destroyed-identity report must not name Spec.Audience as the live identity: %q", line[0])
