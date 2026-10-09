@@ -29,11 +29,18 @@ import (
 // ---- pure pieces ----
 
 // TestAppFQDNPinsDerivation pins the hostname composition: the app is a
-// SUBDOMAIN OF THE CP HOST — the member cookie is scoped to the cp host's
-// domain, so the gate's cookie and the app's hostname must agree or the
-// gate loops (deny → login → the cookie never reaches the app).
+// SIBLING of the relay/cp hosts — the member cookie scopes to the
+// appliance's own ZONE (the world domain), so the cookie reaches every
+// sibling app, and the shared wildcard's challenge name is unique in the
+// zone (no collision with the cp cert's challenge).
 func TestAppFQDNPinsDerivation(t *testing.T) {
-	if got := appFQDN("cp.librem.freehold.technology", "yuvomi"); got != "yuvomi.cp.librem.freehold.technology" {
+	if got := appDomainBase("cp.librem.freehold.technology"); got != "librem.freehold.technology" {
+		t.Fatalf("appDomainBase: %q", got)
+	}
+	if got := appWildcardHost("cp.librem.freehold.technology"); got != "*.librem.freehold.technology" {
+		t.Fatalf("appWildcardHost: %q", got)
+	}
+	if got := appFQDN("cp.librem.freehold.technology", "yuvomi"); got != "yuvomi.librem.freehold.technology" {
 		t.Fatalf("appFQDN: %q", got)
 	}
 	if !looksLikeChannelID("3fa85f64-5717-4562-b3fc-2c963f66afa6") {
@@ -126,7 +133,7 @@ func newTestExposer(t *testing.T, channels []relayChannel, members []memberEvent
 
 	// A self-signed cert for the durable-mirror reads (the render's
 	// cert-existence filter parses it).
-	fc := selfSigned(t, "*.cp.librem.example")
+	fc := selfSigned(t, "*.librem.example")
 
 	spec := &Spec{
 		StateDir: toolsetState, AgentRegistry: testRegistryForExpose(t),
@@ -265,10 +272,10 @@ func TestExposePinsRequesterInGroup(t *testing.T) {
 		t.Fatalf("a requester in the group must pass, got %v", err)
 	}
 	rec, ok := te.apps.Get("yuvomi")
-	if !ok || rec.Group != family || rec.FQDN != "yuvomi.cp.librem.example" {
+	if !ok || rec.Group != family || rec.FQDN != "yuvomi.librem.example" {
 		t.Fatalf("record: %+v ok=%v", rec, ok)
 	}
-	if !strings.Contains(report, "https://yuvomi.cp.librem.example") {
+	if !strings.Contains(report, "https://yuvomi.librem.example") {
 		t.Fatalf("report must carry the URL: %s", report)
 	}
 }
@@ -302,7 +309,7 @@ func TestExposeRecordFirstAndEdgeSafe(t *testing.T) {
 	// The rendered config the apply CARRIES (file-transit): the app vhost
 	// with its gate — forward_auth to the console on the CP guest.
 	cfg := te.bodies["/tmp/fh-caddyfile"]
-	if !strings.Contains(cfg, "yuvomi.cp.librem.example {") ||
+	if !strings.Contains(cfg, "yuvomi.librem.example {") ||
 		!strings.Contains(cfg, "forward_auth 10.78.0.12:8080") ||
 		!strings.Contains(cfg, "tls /data/tls/apps/fullchain.pem") {
 		t.Fatalf("the rendered edge config must carry the gated app vhost: %s", cfg)
@@ -401,9 +408,9 @@ func TestExposeRefusesTheEdgeHosts(t *testing.T) {
 	consoleSec[0] = 0x42
 	te := newTestExposer(t, []relayChannel{{family, "family"}},
 		[]memberEvent{{channelID: family, pubkey: strings.Repeat("b", 64), kind: wire.PutUser, ts: 100}})
-	// The relay lives under the cp host's domain: the app name "relay"
-	// would compose exactly the relay's own site block.
-	te.spec.RelayHost = "relay.cp.librem.example"
+	// The app name "relay" composes EXACTLY the relay's own site block
+	// (siblings): two site blocks for one address is a config that cannot
+	// load — the whole edge crash-loops, and kubectl apply exits 0.
 	if _, err := te.exposeFn(consoleSec)(agent.ExposeArgs{
 		Name: "relay", Target: "10.78.0.13:3000", Group: family, Requester: strings.Repeat("b", 64),
 	}); err == nil || !strings.Contains(err.Error(), "the edge's own host") {

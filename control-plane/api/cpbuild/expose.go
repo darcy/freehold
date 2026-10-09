@@ -37,13 +37,21 @@ import (
 	caddydeploy "freehold/platform/services/webproxy/caddy"
 )
 
-// appFQDN is an app's public hostname: a SUBDOMAIN OF THE CP HOST
-// (yuvomi.cp.librem.freehold.technology) — the member cookie is scoped to
-// the cp host's domain (memberCookieDomain), so an app the gate fronts MUST
-// sit under it or the cookie never arrives (deny → login → deny, forever).
-// Both ends of the gate agree on this shape.
+// appDomainBase strips the CP host's own label: cp.librem.freehold.technology
+// → librem.freehold.technology — the WORLD DOMAIN apps compose onto.
+func appDomainBase(cpHost string) string {
+	return strings.TrimPrefix(cpHost, "cp.")
+}
+
+// appFQDN is an app's public hostname: a SIBLING of the relay/cp hosts
+// (yuvomi.librem.freehold.technology). The member cookie scopes to the
+// appliance's own zone (memberDomain — the same world domain), so the cookie
+// reaches every sibling app AND the shared wildcard's challenge name
+// (_acme-challenge.<world-domain>) collides with NOTHING — the relay/cp
+// certs challenge at their own label names. Both ends of the gate agree on
+// this shape.
 func appFQDN(cpHost, name string) string {
-	return name + "." + cpHost
+	return name + "." + appDomainBase(cpHost)
 }
 
 // looksLikeChannelID reports whether g is already a dashed-uuid channel id
@@ -134,8 +142,10 @@ func shortHex(s string) string {
 // propagation wait per app).
 const appsCertSlot = "apps"
 
-// appWildcardHost is the wildcard the apps' shared cert covers.
-func appWildcardHost(cpHost string) string { return "*." + cpHost }
+// appWildcardHost is the wildcard the apps' shared cert covers — the WORLD
+// DOMAIN's wildcard (its challenge name is unique in the zone; the relay/cp
+// certs' challenges live at their own label names and can never collide).
+func appWildcardHost(cpHost string) string { return "*." + appDomainBase(cpHost) }
 
 // appVhost builds one registry row's site block. Gated apps forward through
 // the console's member gate on the CP guest (the CP's LAN IP, port 8080);

@@ -64,7 +64,7 @@ func newMemberFixtureOpts(t *testing.T, memberInChannel bool) *memberFixture {
 		t.Fatal(err)
 	}
 	if err := apps.Expose(agenttools.AppRecord{
-		Name: "yuvomi", FQDN: "yuvomi.cp.example.com", Target: "10.0.0.9:3000",
+		Name: "yuvomi", FQDN: "yuvomi.example.com", Target: "10.0.0.9:3000",
 		Visibility: agenttools.VisibilityFamily, Auth: agenttools.AuthGate,
 		Group: testChannelID, Owner: "op", Requester: f.memberPK, CreatedAt: 1,
 	}); err != nil {
@@ -274,7 +274,7 @@ func TestForwardAuthVerify(t *testing.T) {
 	// The app-aware gate: the member is IN the app's channel (the fixture's
 	// fake roster grants them) — the forwarded host resolves the app.
 	req := httptest.NewRequest(http.MethodGet, "/auth/verify", nil)
-	req.Header.Set("X-Original-Host", "yuvomi.cp.example.com")
+	req.Header.Set("X-Original-Host", "yuvomi.example.com")
 	req.AddCookie(&http.Cookie{Name: memberCookie, Value: mtok})
 	rec = httptest.NewRecorder()
 	f.s.ServeHTTP(rec, req)
@@ -284,7 +284,7 @@ func TestForwardAuthVerify(t *testing.T) {
 	// A host with no app record fails CLOSED — even a member who just
 	// logged in.
 	req = httptest.NewRequest(http.MethodGet, "/auth/verify", nil)
-	req.Header.Set("X-Original-Host", "unknown.cp.example.com")
+	req.Header.Set("X-Original-Host", "unknown.example.com")
 	req.AddCookie(&http.Cookie{Name: memberCookie, Value: mtok})
 	rec = httptest.NewRecorder()
 	f.s.ServeHTTP(rec, req)
@@ -368,7 +368,7 @@ func TestDeviceLinkLifecycle(t *testing.T) {
 		t.Fatalf("restart must keep the device session WITH its app binding: %+v ok=%v", info, ok)
 	}
 	req = httptest.NewRequest(http.MethodGet, "/auth/verify", nil)
-	req.Header.Set("X-Original-Host", "yuvomi.cp.example.com")
+	req.Header.Set("X-Original-Host", "yuvomi.example.com")
 	req.AddCookie(&http.Cookie{Name: memberCookie, Value: tok})
 	rec = httptest.NewRecorder()
 	f.s.ServeHTTP(rec, req)
@@ -500,6 +500,7 @@ func TestSafeNext(t *testing.T) {
 		"//evil.com":                       "",
 		`/\evil.com`:                       "",
 		"https://app.cp.example.com/y":     "https://app.cp.example.com/y",
+		"https://yuvomi.example.com/y":     "https://yuvomi.example.com/y",
 		"https://cp.example.com/z":         "https://cp.example.com/z",
 		"https://evil.com":                 "",
 		"https://cp.example.com.evil.com/": "",
@@ -597,7 +598,7 @@ func TestDeviceLinkBindsApps(t *testing.T) {
 
 	// The named app admits.
 	req = httptest.NewRequest(http.MethodGet, "/auth/verify", nil)
-	req.Header.Set("X-Original-Host", "yuvomi.cp.example.com")
+	req.Header.Set("X-Original-Host", "yuvomi.example.com")
 	req.AddCookie(&http.Cookie{Name: memberCookie, Value: tok})
 	rec = httptest.NewRecorder()
 	f.s.ServeHTTP(rec, req)
@@ -607,7 +608,7 @@ func TestDeviceLinkBindsApps(t *testing.T) {
 	// ANY other host denies — even a second app on the same channel: the
 	// device link is per-app, and there is no path to all apps.
 	req = httptest.NewRequest(http.MethodGet, "/auth/verify", nil)
-	req.Header.Set("X-Original-Host", "photos.cp.example.com")
+	req.Header.Set("X-Original-Host", "photos.example.com")
 	req.AddCookie(&http.Cookie{Name: memberCookie, Value: tok})
 	rec = httptest.NewRecorder()
 	f.s.ServeHTTP(rec, req)
@@ -627,7 +628,7 @@ func TestGateChannelRevocation(t *testing.T) {
 	}
 	tok := cookieOf(t, rec, memberCookie)
 	req := httptest.NewRequest(http.MethodGet, "/auth/verify", nil)
-	req.Header.Set("X-Original-Host", "yuvomi.cp.example.com")
+	req.Header.Set("X-Original-Host", "yuvomi.example.com")
 	req.AddCookie(&http.Cookie{Name: memberCookie, Value: tok})
 	rec = httptest.NewRecorder()
 	f.s.ServeHTTP(rec, req)
@@ -649,7 +650,7 @@ func TestConsoleMemberSessionCannotBypassTheGate(t *testing.T) {
 		t.Fatal(err)
 	}
 	req := httptest.NewRequest(http.MethodGet, "/auth/verify", nil)
-	req.Header.Set("X-Original-Host", "yuvomi.cp.example.com")
+	req.Header.Set("X-Original-Host", "yuvomi.example.com")
 	req.AddCookie(&http.Cookie{Name: sessionCookie, Value: tok})
 	rec := httptest.NewRecorder()
 	f.s.ServeHTTP(rec, req)
@@ -665,7 +666,7 @@ func TestConsoleMemberSessionCannotBypassTheGate(t *testing.T) {
 		t.Fatal(err)
 	}
 	req = httptest.NewRequest(http.MethodGet, "/auth/verify", nil)
-	req.Header.Set("X-Original-Host", "yuvomi.cp.example.com")
+	req.Header.Set("X-Original-Host", "yuvomi.example.com")
 	req.AddCookie(&http.Cookie{Name: sessionCookie, Value: tok2})
 	rec = httptest.NewRecorder()
 	f2.s.ServeHTTP(rec, req)
@@ -679,7 +680,7 @@ func TestConsoleMemberSessionCannotBypassTheGate(t *testing.T) {
 		t.Fatal(err)
 	}
 	req = httptest.NewRequest(http.MethodGet, "/auth/verify", nil)
-	req.Header.Set("X-Original-Host", "yuvomi.cp.example.com")
+	req.Header.Set("X-Original-Host", "yuvomi.example.com")
 	req.AddCookie(&http.Cookie{Name: sessionCookie, Value: tok3})
 	rec = httptest.NewRecorder()
 	f.s.ServeHTTP(rec, req)
@@ -726,7 +727,7 @@ func TestMemberPortalLandsThePubkeySession(t *testing.T) {
 		t.Fatalf("the portal session must carry the operator's pubkey as a member: %+v", info)
 	}
 	req = httptest.NewRequest(http.MethodGet, "/auth/verify", nil)
-	req.Header.Set("X-Original-Host", "yuvomi.cp.example.com")
+	req.Header.Set("X-Original-Host", "yuvomi.example.com")
 	req.AddCookie(&http.Cookie{Name: memberCookie, Value: tok})
 	rec = httptest.NewRecorder()
 	f.s.ServeHTTP(rec, req)

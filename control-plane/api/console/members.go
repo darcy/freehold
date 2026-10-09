@@ -258,20 +258,26 @@ func (m *Members) IssueMemberPortal(pubkey, name string) (string, error) {
 	return token, nil
 }
 
-// ConsumeMemberPortal single-use consumes a portal token if fresh.
-func (m *Members) ConsumeMemberPortal(token string) (pubkey, name string, ok bool) {
+// ConsumeMemberPortal single-use consumes a portal token if fresh. A
+// persistence failure propagates — swallowing it here would resurrect the
+// consumed token on the next restart, and a consumed portal token lands a
+// FULL member session bound to the operator's pubkey.
+func (m *Members) ConsumeMemberPortal(token string) (pubkey, name string, ok bool, err error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	p, found := m.portals[token]
 	if !found {
-		return "", "", false
+		return "", "", false, nil
 	}
 	delete(m.portals, token)
-	_ = m.save()
-	if p.expires.Before(now()) {
-		return "", "", false
+	if err := m.save(); err != nil {
+		m.portals[token] = p // the disk kept it — the memory must match
+		return "", "", false, err
 	}
-	return p.pubkey, p.name, true
+	if p.expires.Before(now()) {
+		return "", "", false, nil
+	}
+	return p.pubkey, p.name, true, nil
 }
 
 // IssueMemberSession mints a member session token (apps ride device
@@ -402,14 +408,26 @@ func hostOf(origin string) string {
 	return rest
 }
 
-// memberCookieDomain scopes the member cookie to the appliance's whole
-// registrable domain — every gated app subdomain must present it. Host-only
-// when no public origin is configured (loopback/dev).
-func (s *Server) memberCookieDomain() string {
+// memberDomain is the appliance's own ZONE: the console host's world domain
+// (cp.librem.freehold.technology → librem.freehold.technology). Apps are
+// SIBLINGS of the cp host (yuvomi.librem…), so the member cookie and the
+// post-login targets scope to the zone — the appliance's own DNS zone, the
+// trust boundary the operator already controls.
+func (s *Server) memberDomain() string {
 	if s.PublicOrigin == nil || *s.PublicOrigin == "" {
 		return ""
 	}
-	return "." + hostOf(*s.PublicOrigin)
+	return strings.TrimPrefix(hostOf(*s.PublicOrigin), "cp.")
+}
+
+// memberCookieDomain scopes the member cookie to the appliance's zone —
+// every gated app (a sibling of the cp host) must present it. Host-only
+// when no public origin is configured (loopback/dev).
+func (s *Server) memberCookieDomain() string {
+	if d := s.memberDomain(); d != "" {
+		return "." + d
+	}
+	return ""
 }
 
 // safeNext validates a post-login redirect target: a relative path on this
@@ -433,7 +451,10 @@ func (s *Server) safeNext(next string) string {
 	if err != nil || (u.Scheme != "https" && u.Scheme != "http") {
 		return ""
 	}
-	pub := hostOf(*s.PublicOrigin)
+	pub := s.memberDomain()
+	if pub == "" {
+		return ""
+	}
 	host := u.Hostname()
 	if host == pub || strings.HasSuffix(host, "."+pub) {
 		return next
@@ -678,7 +699,11 @@ func (s *Server) memberPortalLand(w http.ResponseWriter, r *http.Request, token 
 		writeErr(w, http.StatusNotFound, "member login is not enabled on this console")
 		return
 	}
-	pubkey, name, ok := s.Members.ConsumeMemberPortal(token)
+	pubkey, name, ok, cerr := s.Members.ConsumeMemberPortal(token)
+	if cerr != nil {
+		writeErr(w, http.StatusInternalServerError, cerr.Error())
+		return
+	}
 	if !ok {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.WriteHeader(http.StatusNotFound)
