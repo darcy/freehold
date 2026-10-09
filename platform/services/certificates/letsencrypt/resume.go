@@ -354,9 +354,13 @@ func (r *Resume) Resolve(po *pendingOrder) (*Issued, error) {
 		// already finalized (or in flight) — nothing to do here; poll below.
 	case acme.StatusReady:
 		// Finalize with a CSR for the SAN(s). Wildcard certs carry only the
-		// wildcard SAN ("*.base"), single-name certs the host.
+		// wildcard SAN ("*.base"), single-name certs the host. The CN is the
+		// DOMAIN VERBATIM (the wildcard form included): LE counts the CN as
+		// an order identifier alongside the SANs — a stripped base CN would
+		// specify a second identifier the order never asked for
+		// ("CSR does not specify same identifiers as Order").
 		san := []string{r.Domain}
-		commonName := strings.TrimPrefix(r.Domain, "*.")
+		commonName := r.Domain
 		csr, err := certcrypto.CreateCSR(certKey, certcrypto.CSROptions{Domain: commonName, SAN: san})
 		if err != nil {
 			return nil, err
