@@ -112,11 +112,19 @@ func (a *AppsStore) save() error {
 // disk NOW, never the startup-frozen snapshot. The agent-tools process
 // (which does the writes) re-reads harmlessly.
 func (a *AppsStore) Reload() error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.reloadLocked()
+}
+
+// reloadLocked re-reads the file (the CALLER holds the mutex) — also the
+// save-failure recovery: tmp+rename is atomic, so a failed save leaves the
+// ORIGINAL file intact, and the disk is the truth the memory re-derives
+// from (no phantom rows, no lost records).
+func (a *AppsStore) reloadLocked() error {
 	if a.path == "" {
 		return nil
 	}
-	a.mu.Lock()
-	defer a.mu.Unlock()
 	a.apps = map[string]AppRecord{}
 	a.order = nil
 	raw, err := os.ReadFile(a.path)
@@ -146,9 +154,10 @@ func (a *AppsStore) Reload() error {
 func ValidAppName(name string) bool { return appNameRe.MatchString(name) }
 
 // ValidTarget reports whether target is a host:port the edge can proxy to.
-// The host part must be printable and blank-free — it composes the SHARED
-// Caddyfile verbatim (`reverse_proxy <target>`), so a stray space or control
-// char is a broken (or injected) site block, not a value.
+// The host part is restricted to a hostname/IP charset (letters, digits,
+// dash, dot, colon for v6) — it composes the SHARED Caddyfile verbatim
+// (`reverse_proxy <target>`), so a stray space, quote, or brace is a broken
+// or injected site block (the whole edge crash-loops on it), not a value.
 func ValidTarget(target string) bool {
 	host, port, err := net.SplitHostPort(target)
 	if err != nil || host == "" || port == "" {
@@ -159,7 +168,8 @@ func ValidTarget(target string) bool {
 	}
 	for i := 0; i < len(host); i++ {
 		c := host[i]
-		if c <= ' ' || c > '~' {
+		if !('a' <= c && c <= 'z') && !('A' <= c && c <= 'Z') && !('0' <= c && c <= '9') &&
+			c != '-' && c != '.' && c != ':' {
 			return false
 		}
 	}
@@ -211,7 +221,14 @@ func (a *AppsStore) Expose(rec AppRecord) error {
 	}
 	a.apps[rec.Name] = rec
 	a.order = append(a.order, rec.Name)
-	return a.save()
+	if err := a.save(); err != nil {
+		// The disk kept the old state — the memory must match it again (a
+		// phantom row would refuse the retry "already exists" until restart
+		// and ride the next successful save retroactively).
+		_ = a.reloadLocked()
+		return err
+	}
+	return nil
 }
 
 // Path is the registry's file path (the cross-process freshness tests open
@@ -235,7 +252,10 @@ func (a *AppsStore) Unexpose(name string) (AppRecord, error) {
 		}
 	}
 	if err := a.save(); err != nil {
-		a.apps[name] = rec // the record is the intent — put it back on a failed save
+		// The disk kept the record — the memory must match it again (a
+		// memory-only removal would hide a live row from List — the render's
+		// source — while Get still found it).
+		_ = a.reloadLocked()
 		return rec, err
 	}
 	return rec, nil

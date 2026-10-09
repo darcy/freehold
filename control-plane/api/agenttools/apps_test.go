@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -179,5 +180,59 @@ func TestExposureDispatchScope(t *testing.T) {
 	out = call(opSec, opPK, "expose_app", `{"name":"x","target":"h:80","group":"g","visibility":"public","auth":"none"}`)
 	if !strings.Contains(out, "exposed x") {
 		t.Fatalf("the operator widens: %s", out)
+	}
+}
+
+// TestValidTargetCharset pins the injection guard: the target composes the
+// SHARED Caddyfile verbatim, so the host part is hostname/IP-charset only —
+// whitespace, quotes, braces, and backslashes are a broken or injected site
+// block (the whole edge crash-loops on it), never a value.
+func TestValidTargetCharset(t *testing.T) {
+	for _, ok := range []string{"10.0.0.9:3000", "yuvomi.lan:8080", "[::1]:8080", "host-name.example:443"} {
+		if !ValidTarget(ok) {
+			t.Fatalf("%q must pass", ok)
+		}
+	}
+	for _, bad := range []string{"10.0.0.9 :3000", "\"h\":80", "h{:80", "h}:80", "h\\:80", "h\nx:80", "h x:80"} {
+		if ValidTarget(bad) {
+			t.Fatalf("%q must be refused", bad)
+		}
+	}
+}
+
+// TestFailedSaveKeepsDiskTruth pins the save-failure recovery: tmp+rename is
+// atomic, so a failed save leaves the ORIGINAL file intact — and the memory
+// must re-derive from it (no phantom Expose row refusing retries, no
+// memory-only Unexpose hiding a live row from List — the render's source).
+func TestFailedSaveKeepsDiskTruth(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "apps.json")
+	apps, err := OpenApps(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := AppRecord{Name: "yuvomi", FQDN: "yuvomi.example", Target: "10.0.0.9:3000",
+		Visibility: VisibilityFamily, Auth: AuthGate, Group: "g", CreatedAt: 1}
+	if err := apps.Expose(rec); err != nil {
+		t.Fatal(err)
+	}
+	// Break persistence: the store's own dir stays, writes into it fail.
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dir, 0o700) })
+	if _, err := apps.Unexpose("yuvomi"); err == nil {
+		t.Fatal("the unexpose must fail (the save cannot land)")
+	}
+	// The memory matches the DISK: the row is still listed (it never left)
+	// and a second expose is still the honest "already exists".
+	if _, ok := apps.Get("yuvomi"); !ok {
+		t.Fatal("the record must survive a failed unexpose save")
+	}
+	if n := len(apps.List()); n != 1 {
+		t.Fatalf("List must still see the record after a failed save: %d", n)
+	}
+	if err := apps.Expose(rec); err == nil || !strings.Contains(err.Error(), "already exists") {
+		t.Fatalf("the retry must be refused by the surviving record, got %v", err)
 	}
 }
