@@ -37,15 +37,13 @@ import (
 	caddydeploy "freehold/platform/services/webproxy/caddy"
 )
 
-// appDomainBase strips the CP host's own label: cp.librem.freehold.technology
-// → librem.freehold.technology — the base app fqdns compose onto.
-func appDomainBase(cpHost string) string {
-	return strings.TrimPrefix(cpHost, "cp.")
-}
-
-// appFQDN is an app's public hostname.
+// appFQDN is an app's public hostname: a SUBDOMAIN OF THE CP HOST
+// (yuvomi.cp.librem.freehold.technology) — the member cookie is scoped to
+// the cp host's domain (memberCookieDomain), so an app the gate fronts MUST
+// sit under it or the cookie never arrives (deny → login → deny, forever).
+// Both ends of the gate agree on this shape.
 func appFQDN(cpHost, name string) string {
-	return name + "." + appDomainBase(cpHost)
+	return name + "." + cpHost
 }
 
 // appSlot is an app cert's slot name (the PVC + durable-mirror dir).

@@ -20,6 +20,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -163,7 +164,10 @@ func ValidTarget(target string) bool {
 	if err != nil || host == "" || port == "" {
 		return false
 	}
-	if _, err := net.LookupPort("tcp", port); err != nil {
+	// NUMERIC ports only — Caddy parses upstream ports as numbers; a named
+	// port ("host:http") makes the whole Caddyfile fail to load.
+	p, err := strconv.Atoi(port)
+	if err != nil || p < 1 || p > 65535 {
 		return false
 	}
 	for i := 0; i < len(host); i++ {

@@ -28,13 +28,12 @@ import (
 
 // ---- pure pieces ----
 
-// TestAppFQDNPinsDerivation pins the hostname composition: the app label
-// composes onto the CP host's domain (the "cp." label stripped).
+// TestAppFQDNPinsDerivation pins the hostname composition: the app is a
+// SUBDOMAIN OF THE CP HOST — the member cookie is scoped to the cp host's
+// domain, so the gate's cookie and the app's hostname must agree or the
+// gate loops (deny → login → the cookie never reaches the app).
 func TestAppFQDNPinsDerivation(t *testing.T) {
-	if got := appDomainBase("cp.librem.freehold.technology"); got != "librem.freehold.technology" {
-		t.Fatalf("appDomainBase: %q", got)
-	}
-	if got := appFQDN("cp.librem.freehold.technology", "yuvomi"); got != "yuvomi.librem.freehold.technology" {
+	if got := appFQDN("cp.librem.freehold.technology", "yuvomi"); got != "yuvomi.cp.librem.freehold.technology" {
 		t.Fatalf("appFQDN: %q", got)
 	}
 	if !looksLikeChannelID("3fa85f64-5717-4562-b3fc-2c963f66afa6") {
@@ -127,7 +126,7 @@ func newTestExposer(t *testing.T, channels []relayChannel, members []memberEvent
 
 	// A self-signed cert for the durable-mirror reads (the render's
 	// cert-existence filter parses it).
-	fc := selfSigned(t, "yuvomi.librem.example")
+	fc := selfSigned(t, "yuvomi.cp.librem.example")
 
 	spec := &Spec{
 		StateDir: toolsetState, AgentRegistry: testRegistryForExpose(t),
@@ -266,10 +265,10 @@ func TestExposePinsRequesterInGroup(t *testing.T) {
 		t.Fatalf("a requester in the group must pass, got %v", err)
 	}
 	rec, ok := te.apps.Get("yuvomi")
-	if !ok || rec.Group != family || rec.FQDN != "yuvomi.librem.example" {
+	if !ok || rec.Group != family || rec.FQDN != "yuvomi.cp.librem.example" {
 		t.Fatalf("record: %+v ok=%v", rec, ok)
 	}
-	if !strings.Contains(report, "https://yuvomi.librem.example") {
+	if !strings.Contains(report, "https://yuvomi.cp.librem.example") {
 		t.Fatalf("report must carry the URL: %s", report)
 	}
 }
@@ -303,7 +302,7 @@ func TestExposeRecordFirstAndEdgeSafe(t *testing.T) {
 	// The rendered config the apply CARRIES (file-transit): the app vhost
 	// with its gate — forward_auth to the console on the CP guest.
 	cfg := te.bodies["/tmp/fh-caddyfile"]
-	if !strings.Contains(cfg, "yuvomi.librem.example {") ||
+	if !strings.Contains(cfg, "yuvomi.cp.librem.example {") ||
 		!strings.Contains(cfg, "forward_auth 10.78.0.12:8080") ||
 		!strings.Contains(cfg, "tls /data/tls/app-yuvomi/fullchain.pem") {
 		t.Fatalf("the rendered edge config must carry the gated app vhost: %s", cfg)
