@@ -37,10 +37,18 @@ import (
 	caddydeploy "freehold/platform/services/webproxy/caddy"
 )
 
-// appDomainBase strips the CP host's own label: cp.librem.freehold.technology
-// → librem.freehold.technology — the WORLD DOMAIN apps compose onto.
+// appDomainBase strips the CP host's FIRST label: cp.librem.freehold.technology
+// → librem.freehold.technology (control.example.com → example.com — the rule
+// is the label, not a "cp." prefix) — the WORLD DOMAIN apps compose onto.
+// A two-label cp host (the host IS the zone) has no world domain below it:
+// returned unchanged, and BuildExposeAppFn refuses (a sibling wildcard's
+// challenge would collide with the cp cert's challenge at the same name).
 func appDomainBase(cpHost string) string {
-	return strings.TrimPrefix(cpHost, "cp.")
+	labels := strings.Split(cpHost, ".")
+	if len(labels) >= 3 {
+		return strings.Join(labels[1:], ".")
+	}
+	return cpHost
 }
 
 // appFQDN is an app's public hostname: a SIBLING of the relay/cp hosts
@@ -373,6 +381,9 @@ func BuildExposeAppFn(spec *Spec, apps *agenttools.AppsStore, consoleSecret []by
 		}
 		if apps == nil {
 			return "", fmt.Errorf("expose: the apps registry is not bound")
+		}
+		if appDomainBase(spec.CpHost) == spec.CpHost {
+			return "", fmt.Errorf("expose: the cp host %q has no world domain below it (want a <label>.<domain> host) — the apps' shared wildcard would collide with the cp cert's challenge", spec.CpHost)
 		}
 		fqdn := appFQDN(spec.CpHost, args.Name)
 		if fqdn == spec.RelayHost || fqdn == spec.CpHost {

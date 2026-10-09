@@ -37,6 +37,14 @@ func TestAppFQDNPinsDerivation(t *testing.T) {
 	if got := appDomainBase("cp.librem.freehold.technology"); got != "librem.freehold.technology" {
 		t.Fatalf("appDomainBase: %q", got)
 	}
+	// The rule is the FIRST LABEL, not a "cp." prefix.
+	if got := appDomainBase("control.example.com"); got != "example.com" {
+		t.Fatalf("appDomainBase (non-cp prefix): %q", got)
+	}
+	// A two-label cp host IS the zone: no world domain below it.
+	if got := appDomainBase("example.com"); got != "example.com" {
+		t.Fatalf("appDomainBase (degenerate): %q", got)
+	}
 	if got := appWildcardHost("cp.librem.freehold.technology"); got != "*.librem.freehold.technology" {
 		t.Fatalf("appWildcardHost: %q", got)
 	}
@@ -415,6 +423,15 @@ func TestExposeRefusesTheEdgeHosts(t *testing.T) {
 		Name: "relay", Target: "10.78.0.13:3000", Group: family, Requester: strings.Repeat("b", 64),
 	}); err == nil || !strings.Contains(err.Error(), "the edge's own host") {
 		t.Fatalf("expose must refuse the edge's own host, got %v", err)
+	}
+
+	// The degenerate shape (the cp host IS the zone): refused loud — the
+	// shared wildcard's challenge would collide with the cp cert's.
+	te.spec.CpHost = "librem.example"
+	if _, err := te.exposeFn(consoleSec)(agent.ExposeArgs{
+		Name: "yuvomi", Target: "10.78.0.13:3000", Group: family, Requester: strings.Repeat("b", 64),
+	}); err == nil || !strings.Contains(err.Error(), "no world domain below it") {
+		t.Fatalf("a zone-shaped cp host must refuse, got %v", err)
 	}
 	if _, ok := te.apps.Get("relay"); ok {
 		t.Fatal("the refused expose must not record")
