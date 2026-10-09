@@ -13,10 +13,13 @@ import (
 
 	"freehold/contract/crypto"
 	"freehold/contract/wire"
+	"freehold/control-plane/api/agenttools"
 	"freehold/control-plane/state"
 )
 
 // ---- fixture ----
+
+const testChannelID = "3fa85f64-5717-4562-b3fc-2c963f66afa6"
 
 type memberFixture struct {
 	s           *Server
@@ -31,9 +34,16 @@ type memberFixture struct {
 }
 
 // newMemberFixture builds a console with the member tier enabled, the relay
-// coords pointed at a fake /query serving ONE kind-13534 listing that names
-// the fixture's own member, and a public origin for cookie/next handling.
+// coords pointed at a fake relay serving BY KIND (the NIP-43 community list
+// naming the fixture's member; the app channel's kind-9000 put-user granting
+// them), an exposed app in the toolset's durable dir, and a public origin
+// for cookie/next handling.
 func newMemberFixture(t *testing.T) *memberFixture {
+	return newMemberFixtureOpts(t, true)
+}
+
+// newMemberFixtureOpts(…
+func newMemberFixtureOpts(t *testing.T, memberInChannel bool) *memberFixture {
 	t.Helper()
 	dir := t.TempDir()
 	store, err := state.Open(dir)
@@ -48,7 +58,33 @@ func newMemberFixture(t *testing.T) *memberFixture {
 	f.opPK = pkOf(t, f.opSec)
 	f.memberPK = pkOf(t, f.memberSec)
 	f.relayPK = pkOf(t, f.relaySec)
-	f.relay = fakeRelayQuery(t, []map[string]interface{}{membershipListEvent(t, f.relaySec, 100, f.memberPK)})
+	// The app the gate fronts: yuvomi, riding the test channel.
+	apps, err := agenttools.OpenApps(filepath.Join(dir, "agent-tools", "apps.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := apps.Expose(agenttools.AppRecord{
+		Name: "yuvomi", FQDN: "yuvomi.example.com", Target: "10.0.0.9:3000",
+		Visibility: agenttools.VisibilityFamily, Auth: agenttools.AuthGate,
+		Group: testChannelID, Owner: "op", Requester: f.memberPK, CreatedAt: 1,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// The relay answers by KIND: 13534 (the community list) + 9000 (the
+	// channel roster granting the member — omitted for the not-in-channel
+	// fixtures).
+	// The community list names BOTH (in reality the operator is a member —
+	// their /auth login runs the same community check before the whitelist
+	// promotion).
+	events := []map[string]interface{}{membershipListEvent(t, f.relaySec, 100, f.memberPK, f.opPK)}
+	// The OPERATOR is in the channel too (in reality: #freehold's roster).
+	events = append(events, signEventMap(t, f.relaySec, wire.PutUser, 100,
+		[][]string{{"h", testChannelID}, {"p", f.opPK}}, ""))
+	if memberInChannel {
+		events = append(events, signEventMap(t, f.relaySec, wire.PutUser, 100,
+			[][]string{{"h", testChannelID}, {"p", f.memberPK}}, ""))
+	}
+	f.relay = fakeRelayQuery(t, events)
 	if err := store.SetRelayURL(&f.relay.URL); err != nil {
 		t.Fatal(err)
 	}
@@ -63,6 +99,7 @@ func newMemberFixture(t *testing.T) *memberFixture {
 		Auth:          NewAuth([]string{f.opPK}, filepath.Join(dir, "sessions.json")),
 		Members:       NewMembers(f.membersFile),
 		PublicOrigin:  &pub,
+		AgentToolsDir: filepath.Join(dir, "agent-tools"),
 	}
 	return f
 }
@@ -237,12 +274,25 @@ func TestForwardAuthVerify(t *testing.T) {
 	if mtok == "" {
 		t.Fatal("no member cookie")
 	}
+	// The app-aware gate: the member is IN the app's channel (the fixture's
+	// fake roster grants them) — the forwarded host resolves the app.
 	req := httptest.NewRequest(http.MethodGet, "/auth/verify", nil)
+	req.Header.Set("X-Original-Host", "yuvomi.example.com")
 	req.AddCookie(&http.Cookie{Name: memberCookie, Value: mtok})
 	rec = httptest.NewRecorder()
 	f.s.ServeHTTP(rec, req)
 	if rec.Code != http.StatusNoContent {
-		t.Fatalf("member verify: %d", rec.Code)
+		t.Fatalf("member verify on the app: %d", rec.Code)
+	}
+	// A host with no app record fails CLOSED — even a member who just
+	// logged in.
+	req = httptest.NewRequest(http.MethodGet, "/auth/verify", nil)
+	req.Header.Set("X-Original-Host", "unknown.example.com")
+	req.AddCookie(&http.Cookie{Name: memberCookie, Value: mtok})
+	rec = httptest.NewRecorder()
+	f.s.ServeHTTP(rec, req)
+	if rec.Code == http.StatusNoContent {
+		t.Fatal("an unregistered host must not admit")
 	}
 
 	// The operator passes the gate on their existing session.
@@ -270,13 +320,21 @@ func TestDeviceLinkLifecycle(t *testing.T) {
 	f := newMemberFixture(t)
 	op := opCookie(t, f)
 
-	// Mint.
-	req := httptest.NewRequest(http.MethodPost, "/api/members/invites", strings.NewReader(`{"name":"grandma"}`))
+	// Mint (opens the named app; there is no all-apps link).
+	req := httptest.NewRequest(http.MethodPost, "/api/members/invites", strings.NewReader(`{"name":"grandma","apps":["yuvomi"]}`))
 	req.AddCookie(op)
 	rec := httptest.NewRecorder()
 	f.s.ServeHTTP(rec, req)
 	if rec.Code != 200 {
 		t.Fatalf("mint: %d %s", rec.Code, rec.Body.String())
+	}
+	// No apps = refused outright.
+	reqNoApps := httptest.NewRequest(http.MethodPost, "/api/members/invites", strings.NewReader(`{"name":"nobody"}`))
+	reqNoApps.AddCookie(op)
+	recNoApps := httptest.NewRecorder()
+	f.s.ServeHTTP(recNoApps, reqNoApps)
+	if recNoApps.Code != 400 {
+		t.Fatalf("an invite with no apps must be refused, got %d", recNoApps.Code)
 	}
 	var mint struct {
 		Link string `json:"link"`
@@ -304,10 +362,21 @@ func TestDeviceLinkLifecycle(t *testing.T) {
 		t.Fatalf("reused link must be 404, got %d", rec.Code)
 	}
 
-	// The session survives a serve restart (members.json, 0600).
+	// The session survives a serve restart (members.json, 0600) — the app
+	// BINDING included: a session whose apps were dropped by a restart
+	// validates but admits nothing (the silent-lockout bug this pins).
 	m2 := NewMembers(f.membersFile)
-	if _, name, device, ok := m2.MemberIdentity(tok); !ok || name != "grandma" || !device {
-		t.Fatalf("restart must keep the device session: ok=%v name=%q device=%v", ok, name, device)
+	info, ok := m2.MemberIdentity(tok)
+	if !ok || info.Name != "grandma" || !info.Device || len(info.Apps) != 1 || info.Apps[0] != "yuvomi" {
+		t.Fatalf("restart must keep the device session WITH its app binding: %+v ok=%v", info, ok)
+	}
+	req = httptest.NewRequest(http.MethodGet, "/auth/verify", nil)
+	req.Header.Set("X-Original-Host", "yuvomi.example.com")
+	req.AddCookie(&http.Cookie{Name: memberCookie, Value: tok})
+	rec = httptest.NewRecorder()
+	f.s.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("the restarted device session must still admit its app: %d", rec.Code)
 	}
 
 	// The operator sees the live session and can drop it.
@@ -336,12 +405,12 @@ func TestDeviceLinkLifecycle(t *testing.T) {
 	if rec.Code != 200 {
 		t.Fatalf("drop: %d %s", rec.Code, rec.Body.String())
 	}
-	if _, _, _, ok := f.s.Members.MemberIdentity(tok); ok {
+	if _, ok := f.s.Members.MemberIdentity(tok); ok {
 		t.Fatal("the dropped session must be dead")
 	}
 
 	// A fresh invite can be revoked before use: the link dies unconsumed.
-	req = httptest.NewRequest(http.MethodPost, "/api/members/invites", strings.NewReader(`{"name":"grandpa"}`))
+	req = httptest.NewRequest(http.MethodPost, "/api/members/invites", strings.NewReader(`{"name":"grandpa","apps":["yuvomi"]}`))
 	req.AddCookie(op)
 	rec = httptest.NewRecorder()
 	f.s.ServeHTTP(rec, req)
@@ -434,6 +503,7 @@ func TestSafeNext(t *testing.T) {
 		"//evil.com":                       "",
 		`/\evil.com`:                       "",
 		"https://app.cp.example.com/y":     "https://app.cp.example.com/y",
+		"https://yuvomi.example.com/y":     "https://yuvomi.example.com/y",
 		"https://cp.example.com/z":         "https://cp.example.com/z",
 		"https://evil.com":                 "",
 		"https://cp.example.com.evil.com/": "",
@@ -485,5 +555,343 @@ func TestForwardAuthVerifyBrowserRedirect(t *testing.T) {
 	f.s.ServeHTTP(rec, req)
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("API deny must be 401, got %d", rec.Code)
+	}
+}
+
+// TestDeviceLinkBindsApps pins the per-app device link: the invite names the
+// apps it opens (>=1, validated against the registry), the landed session
+// admits exactly those and NOTHING else — a second app on the same channel
+// does not admit, and there is no all-apps link.
+func TestDeviceLinkBindsApps(t *testing.T) {
+	f := newMemberFixture(t)
+	op := opCookie(t, f)
+
+	mint := func(body string) string {
+		req := httptest.NewRequest(http.MethodPost, "/api/members/invites", strings.NewReader(body))
+		req.AddCookie(op)
+		rec := httptest.NewRecorder()
+		f.s.ServeHTTP(rec, req)
+		if rec.Code != 200 {
+			t.Fatalf("mint %s: %d %s", body, rec.Code, rec.Body.String())
+		}
+		var out struct {
+			Link string `json:"link"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+			t.Fatal(err)
+		}
+		return out.Link
+	}
+	// A mistyped app name is an error, not a dead link.
+	req := httptest.NewRequest(http.MethodPost, "/api/members/invites", strings.NewReader(`{"name":"x","apps":["yuvomi ","typo"]}`))
+	req.AddCookie(op)
+	rec := httptest.NewRecorder()
+	f.s.ServeHTTP(rec, req)
+	if rec.Code != 400 {
+		t.Fatalf("an unknown app in the mint must be refused, got %d %s", rec.Code, rec.Body.String())
+	}
+
+	link := mint(`{"name":"grandma","apps":["yuvomi"]}`)
+	rec = httptest.NewRecorder()
+	f.s.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, link, nil))
+	if rec.Code != 200 {
+		t.Fatalf("link land: %d", rec.Code)
+	}
+	tok := cookieOf(t, rec, memberCookie)
+
+	// The named app admits.
+	req = httptest.NewRequest(http.MethodGet, "/auth/verify", nil)
+	req.Header.Set("X-Original-Host", "yuvomi.example.com")
+	req.AddCookie(&http.Cookie{Name: memberCookie, Value: tok})
+	rec = httptest.NewRecorder()
+	f.s.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("the named app must admit: %d", rec.Code)
+	}
+	// ANY other host denies — even a second app on the same channel: the
+	// device link is per-app, and there is no path to all apps.
+	req = httptest.NewRequest(http.MethodGet, "/auth/verify", nil)
+	req.Header.Set("X-Original-Host", "photos.example.com")
+	req.AddCookie(&http.Cookie{Name: memberCookie, Value: tok})
+	rec = httptest.NewRecorder()
+	f.s.ServeHTTP(rec, req)
+	if rec.Code == http.StatusNoContent {
+		t.Fatal("an unlisted app must not admit a device session")
+	}
+}
+
+// TestGateChannelRevocation pins the nostr side: the app's channel roster is
+// the ACL — a member the channel granted admits; a channel member REMOVED
+// (a newer kind-9001) denies within the cache's TTL.
+func TestGateChannelRevocation(t *testing.T) {
+	f := newMemberFixtureOpts(t, false) // no put-user: not in the channel
+	rec := f.loginAs(t, f.memberSec, "")
+	if rec.Code != 200 {
+		t.Fatalf("community login still works: %d %s", rec.Code, rec.Body.String())
+	}
+	tok := cookieOf(t, rec, memberCookie)
+	req := httptest.NewRequest(http.MethodGet, "/auth/verify", nil)
+	req.Header.Set("X-Original-Host", "yuvomi.example.com")
+	req.AddCookie(&http.Cookie{Name: memberCookie, Value: tok})
+	rec = httptest.NewRecorder()
+	f.s.ServeHTTP(rec, req)
+	if rec.Code == http.StatusNoContent {
+		t.Fatal("a pubkey outside the app's channel must not admit")
+	}
+}
+
+// TestConsoleMemberSessionCannotBypassTheGate pins the replay hole: a
+// member-role console session (minted by the public login to every relay
+// member) holds a live pubkey — replaying its cookie against a gated app
+// goes through the SAME channel check a nostr session does; it is never a
+// free pass. The operator role passes outright.
+func TestConsoleMemberSessionCannotBypassTheGate(t *testing.T) {
+	// An in-channel member's console session admits the app.
+	f := newMemberFixture(t)
+	tok, err := f.s.Auth.IssueSessionRole(f.memberPK, RoleMember)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/auth/verify", nil)
+	req.Header.Set("X-Original-Host", "yuvomi.example.com")
+	req.AddCookie(&http.Cookie{Name: sessionCookie, Value: tok})
+	rec := httptest.NewRecorder()
+	f.s.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("an in-channel member's console session admits: %d", rec.Code)
+	}
+
+	// An OUT-of-channel member's console session denies the same app — the
+	// cookie is not a bypass.
+	f2 := newMemberFixtureOpts(t, false)
+	tok2, err := f2.s.Auth.IssueSessionRole(f2.memberPK, RoleMember)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req = httptest.NewRequest(http.MethodGet, "/auth/verify", nil)
+	req.Header.Set("X-Original-Host", "yuvomi.example.com")
+	req.AddCookie(&http.Cookie{Name: sessionCookie, Value: tok2})
+	rec = httptest.NewRecorder()
+	f2.s.ServeHTTP(rec, req)
+	if rec.Code == http.StatusNoContent {
+		t.Fatal("a member-role session must not bypass the channel check")
+	}
+
+	// The operator role passes outright.
+	tok3, err := f.s.Auth.IssueSessionRole(f.opPK, RoleOperator)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req = httptest.NewRequest(http.MethodGet, "/auth/verify", nil)
+	req.Header.Set("X-Original-Host", "yuvomi.example.com")
+	req.AddCookie(&http.Cookie{Name: sessionCookie, Value: tok3})
+	rec = httptest.NewRecorder()
+	f.s.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("the operator passes the gate outright: %d", rec.Code)
+	}
+}
+
+// TestMemberPortalLandsThePubkeySession pins the key-holder's bridge: the
+// operator mints a single-use portal link, the click lands a FULL member
+// session for THEIR pubkey (the channel checks apply — the same admission a
+// Nostr login would give), and the second open is dead.
+func TestMemberPortalLandsThePubkeySession(t *testing.T) {
+	f := newMemberFixture(t)
+	op := opCookie(t, f)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/members/portal", strings.NewReader("{}"))
+	req.AddCookie(op)
+	rec := httptest.NewRecorder()
+	f.s.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("portal mint: %d %s", rec.Code, rec.Body.String())
+	}
+	var out struct {
+		Link string `json:"link"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil || !strings.HasPrefix(out.Link, "/auth/portal/") {
+		t.Fatalf("portal mint response: %s", rec.Body.String())
+	}
+
+	// The click lands the member session (redirect + cookie), and the
+	// session's PUBKEY is the operator's — the app gate checks channels.
+	rec = httptest.NewRecorder()
+	f.s.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, out.Link, nil))
+	if rec.Code != http.StatusFound {
+		t.Fatalf("portal land: %d", rec.Code)
+	}
+	tok := cookieOf(t, rec, memberCookie)
+	if tok == "" {
+		t.Fatal("no member cookie on the portal land")
+	}
+	info, ok := f.s.Members.MemberIdentity(tok)
+	if !ok || info.Pubkey != f.opPK || info.Device {
+		t.Fatalf("the portal session must carry the operator's pubkey as a member: %+v", info)
+	}
+	req = httptest.NewRequest(http.MethodGet, "/auth/verify", nil)
+	req.Header.Set("X-Original-Host", "yuvomi.example.com")
+	req.AddCookie(&http.Cookie{Name: memberCookie, Value: tok})
+	rec = httptest.NewRecorder()
+	f.s.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("the portal session admits via the channel check: %d", rec.Code)
+	}
+
+	// Single-use.
+	rec = httptest.NewRecorder()
+	f.s.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, out.Link, nil))
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("a reused portal link must be 404, got %d", rec.Code)
+	}
+
+	// A member session cannot MINT one (operator-only).
+	mtok, err := f.s.Auth.IssueSessionRole(f.memberPK, RoleMember)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req = httptest.NewRequest(http.MethodPost, "/api/members/portal", strings.NewReader("{}"))
+	req.AddCookie(&http.Cookie{Name: sessionCookie, Value: mtok})
+	rec = httptest.NewRecorder()
+	f.s.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("a member session must not mint portal links, got %d", rec.Code)
+	}
+}
+
+// TestGateResolvesOldShapeRows pins the migration: a record written by the
+// released per-app shape (stored FQDN <name>.<cpHost>) still gates at its
+// DERIVED hostname (<name>.<world domain>) — the edge renders the derived
+// name, so the gate matching the stale stored FQDN would lock every member
+// out invisibly (the operator passes outright).
+func TestGateResolvesOldShapeRows(t *testing.T) {
+	f := newMemberFixture(t)
+	// Overwrite the row with the OLD shape's stored FQDN.
+	stale, err := agenttools.OpenApps(filepath.Join(f.s.AgentToolsDir, "apps.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	staleRec, _ := stale.Get("yuvomi")
+	staleRec.FQDN = "yuvomi.cp.example.com" // the released shape's stored value
+	_, _ = stale.Unexpose("yuvomi")
+	if err := stale.Expose(staleRec); err != nil {
+		t.Fatal(err)
+	}
+
+	// The member logs in and hits the DERIVED hostname — the stale stored
+	// FQDN must not matter to the gate.
+	loginRec := f.loginAs(t, f.memberSec, "")
+	if loginRec.Code != 200 {
+		t.Fatalf("login: %d %s", loginRec.Code, loginRec.Body.String())
+	}
+	tok := cookieOf(t, loginRec, memberCookie)
+	req := httptest.NewRequest(http.MethodGet, "/auth/verify", nil)
+	req.Header.Set("X-Original-Host", "yuvomi.example.com")
+	req.AddCookie(&http.Cookie{Name: memberCookie, Value: tok})
+	rec := httptest.NewRecorder()
+	f.s.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("the gate must resolve the old-shape row at its derived hostname: %d", rec.Code)
+	}
+}
+
+// TestMemberPortalSurvivesRestart pins the portal store's persistence: the
+// token's row (pubkey + expiry) round-trips through members.json — an
+// unconsumed link must not die on the serve restart every build does.
+func TestMemberPortalSurvivesRestart(t *testing.T) {
+	f := newMemberFixture(t)
+	tok, err := f.s.Members.IssueMemberPortal(f.opPK, "member session")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m2 := NewMembers(f.membersFile)
+	pk, _, ok, err := m2.ConsumeMemberPortal(tok)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok || pk != f.opPK {
+		t.Fatalf("the portal token must survive a restart: pk=%q ok=%v", pk, ok)
+	}
+}
+
+// TestAuthLoginPromotesTheWhitelistKey pins the one-door rule: the /auth
+// member login with a WHITELISTED pubkey lands BOTH sessions — the operator
+// cookie (the console's admin surface answers) AND the member cookie (the
+// app gates). A member key lands the member session only: the overview
+// stays 401.
+func TestAuthLoginPromotesTheWhitelistKey(t *testing.T) {
+	f := newMemberFixture(t)
+	rec := f.loginAs(t, f.opSec, "") // the operator's key — on the whitelist
+	if rec.Code != 200 {
+		t.Fatalf("the operator's /auth login: %d %s", rec.Code, rec.Body.String())
+	}
+	var out struct {
+		Role string `json:"role"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil || out.Role != "operator" {
+		t.Fatalf("the whitelisted login must report operator: %s", rec.Body.String())
+	}
+	if cookieOf(t, rec, memberCookie) == "" {
+		t.Fatal("the member cookie must land (the app gates)")
+	}
+	opTok := cookieOf(t, rec, sessionCookie)
+	if opTok == "" {
+		t.Fatal("the operator cookie must land (the console surface)")
+	}
+	// The console's admin surface answers the operator session.
+	req := httptest.NewRequest(http.MethodGet, "/api/overview", nil)
+	req.AddCookie(&http.Cookie{Name: sessionCookie, Value: opTok})
+	rec = httptest.NewRecorder()
+	f.s.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("the operator session must reach the overview: %d %s", rec.Code, rec.Body.String())
+	}
+
+	// A member key: the member session only.
+	rec = f.loginAs(t, f.memberSec, "")
+	if rec.Code != 200 {
+		t.Fatalf("the member's /auth login: %d %s", rec.Code, rec.Body.String())
+	}
+	if cookieOf(t, rec, sessionCookie) != "" {
+		t.Fatal("a non-whitelisted key must NOT land an operator session")
+	}
+	if cookieOf(t, rec, memberCookie) == "" {
+		t.Fatal("the member cookie must land")
+	}
+}
+
+// TestJobsServesTheMemberCookieSession pins the one member route's fallback:
+// the /auth login's fh_member pubkey session reaches their OWN rows (prompts
+// included) and nobody else's — the same redaction a console member-role
+// session gets. A DEVICE session (no pubkey) stays out entirely.
+func TestJobsServesTheMemberCookieSession(t *testing.T) {
+	f := newMemberFixture(t)
+	rec := f.loginAs(t, f.memberSec, "")
+	mtok := cookieOf(t, rec, memberCookie)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/jobs", nil)
+	req.AddCookie(&http.Cookie{Name: memberCookie, Value: mtok})
+	rec = httptest.NewRecorder()
+	f.s.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("the member session must reach the jobs read: %d %s", rec.Code, rec.Body.String())
+	}
+
+	// A device session (no pubkey): the jobs view stays closed.
+	_, err := f.s.Members.IssueInvite("device-owner", f.opPK, []string{"yuvomi"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = err
+	devTok, err := f.s.Members.IssueMemberSession("", "device-owner", true, []string{"yuvomi"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req = httptest.NewRequest(http.MethodGet, "/api/jobs", nil)
+	req.AddCookie(&http.Cookie{Name: memberCookie, Value: devTok})
+	rec = httptest.NewRecorder()
+	f.s.ServeHTTP(rec, req)
+	if rec.Code != 401 {
+		t.Fatalf("a device session must not read jobs, got %d", rec.Code)
 	}
 }

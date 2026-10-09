@@ -342,6 +342,7 @@ var (
 	errUnauthorized      = errors.New("unauthenticated — log in via NIP-98: GET /api/auth/challenge, POST /api/auth/login")
 	errAuthNotConfigured = errors.New("console auth is not configured")
 	errForbidden         = errors.New("cross-origin request refused (console is loopback-only)")
+	errRelayUnknown      = errors.New("relay coords unknown — the relay's URL and signing pubkey must be recorded")
 )
 
 // checkOrigin is the DNS-rebinding guard: a page hosted anywhere else must not

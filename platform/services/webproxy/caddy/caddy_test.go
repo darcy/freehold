@@ -61,8 +61,8 @@ func TestRenderAppVhosts(t *testing.T) {
 	if alpha < 0 || zeta < 0 || alpha > zeta {
 		t.Fatalf("app blocks must render sorted by fqdn:\n%s", out)
 	}
-	if !strings.Contains(out, "forward_auth 10.78.0.12:8080 {\n    uri /auth/verify\n  }") {
-		t.Fatalf("the gated app must forward to the console:\n%s", out)
+	if !strings.Contains(out, "forward_auth 10.78.0.12:8080 {\n    uri /auth/verify\n    header_up X-Original-Host {host}\n    header_up X-Original-Uri {uri}\n  }") {
+		t.Fatalf("the gated app must forward to the console WITH the original-host headers (the gate reads which app it is gating):\n%s", out)
 	}
 	if !strings.Contains(out, "reverse_proxy 10.0.0.9:3000") {
 		t.Fatalf("the app's upstream must ride:\n%s", out)

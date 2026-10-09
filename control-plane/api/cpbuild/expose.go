@@ -23,6 +23,8 @@
 package cpbuild
 
 import (
+	"crypto/x509"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"os"
@@ -37,17 +39,30 @@ import (
 	caddydeploy "freehold/platform/services/webproxy/caddy"
 )
 
-// appFQDN is an app's public hostname: a SUBDOMAIN OF THE CP HOST
-// (yuvomi.cp.librem.freehold.technology) — the member cookie is scoped to
-// the cp host's domain (memberCookieDomain), so an app the gate fronts MUST
-// sit under it or the cookie never arrives (deny → login → deny, forever).
-// Both ends of the gate agree on this shape.
-func appFQDN(cpHost, name string) string {
-	return name + "." + cpHost
+// appDomainBase strips the CP host's FIRST label: cp.librem.freehold.technology
+// → librem.freehold.technology (control.example.com → example.com — the rule
+// is the label, not a "cp." prefix) — the WORLD DOMAIN apps compose onto.
+// A two-label cp host (the host IS the zone) has no world domain below it:
+// returned unchanged, and BuildExposeAppFn refuses (a sibling wildcard's
+// challenge would collide with the cp cert's challenge at the same name).
+func appDomainBase(cpHost string) string {
+	labels := strings.Split(cpHost, ".")
+	if len(labels) >= 3 {
+		return strings.Join(labels[1:], ".")
+	}
+	return cpHost
 }
 
-// appSlot is an app cert's slot name (the PVC + durable-mirror dir).
-func appSlot(name string) string { return "app-" + name }
+// appFQDN is an app's public hostname: a SIBLING of the relay/cp hosts
+// (yuvomi.librem.freehold.technology). The member cookie scopes to the
+// appliance's own zone (memberDomain — the same world domain), so the cookie
+// reaches every sibling app AND the shared wildcard's challenge name
+// (_acme-challenge.<world-domain>) collides with NOTHING — the relay/cp
+// certs challenge at their own label names. Both ends of the gate agree on
+// this shape.
+func appFQDN(cpHost, name string) string {
+	return name + "." + appDomainBase(cpHost)
+}
 
 // looksLikeChannelID reports whether g is already a dashed-uuid channel id
 // (xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx) rather than a display name.
@@ -131,29 +146,74 @@ func shortHex(s string) string {
 	return s
 }
 
+// appsCertSlot is the SHARED cert slot for every app vhost: ONE wildcard
+// cert (*.cp-host) issued once — an expose is DNS + config only after that,
+// never a per-app LE order (no per-app rate-limit accumulation, no
+// propagation wait per app).
+const appsCertSlot = "apps"
+
+// appWildcardHost is the wildcard the apps' shared cert covers — the WORLD
+// DOMAIN's wildcard (its challenge name is unique in the zone; the relay/cp
+// certs' challenges live at their own label names and can never collide).
+func appWildcardHost(cpHost string) string { return "*." + appDomainBase(cpHost) }
+
+// appRecordFQDN derives the row's hostname FROM ITS NAME at consume time —
+// rows written by the released per-app shape (<name>.<cpHost>) re-derive to
+// the sibling shape (<name>.<world domain>) the shared wildcard covers,
+// instead of re-serving a name the wildcard's one-label coverage misses
+// (a silent TLS mismatch). The stored FQDN is informational.
+func (s *Spec) appRecordFQDN(rec agenttools.AppRecord) string {
+	return appFQDN(s.CpHost, rec.Name)
+}
+
 // appVhost builds one registry row's site block. Gated apps forward through
-// the console's member gate on the CP guest (the CP's LAN IP, port 8080).
+// the console's member gate on the CP guest (the CP's LAN IP, port 8080);
+// every app presents the SHARED wildcard cert.
 func (s *Spec) appVhost(rec agenttools.AppRecord) caddydeploy.AppVhost {
 	gate := ""
 	if rec.Auth == agenttools.AuthGate {
 		gate = s.CpIP + ":8080"
 	}
 	return caddydeploy.AppVhost{
-		FQDN:     rec.FQDN,
+		FQDN:     s.appRecordFQDN(rec),
 		Upstream: rec.Target,
-		Slot:     appSlot(rec.Name),
+		Slot:     appsCertSlot,
 		Gate:     gate,
 	}
 }
 
-// appCertEnsure runs an app slot's cert chain: the durable-reuse gate (a
-// valid mirror cert seeds the PVC — no LE order), then the box seed cache,
-// then the in-process resumable DNS-01 issue. Returns whether a cert was
-// installed NOW (vs already present). The zone credential comes from the
-// relay slot's sealed store — one token, one zone, every slot.
-func (s *Spec) appCertEnsure(slot, host string) (bool, error) {
+// appsCertEnsure runs the SHARED wildcard cert's chain (*.cp-host): the
+// durable-reuse gate (a valid mirror cert seeds the PVC — no LE order), the
+// box seed cache, then the in-process resumable DNS-01 issue. Returns
+// whether a cert was installed NOW (vs already present). ONE order covers
+// every app under the cp host; the zone credential comes from the relay
+// slot's sealed store — one token, one zone, every slot.
+// certCovers reports whether the fullchain's leaf cert's SANs carry the
+// wanted host EXACTLY (the wildcard form included) — the durable-reuse gate
+// must not serve a stale shape's cert after the covered domain moves (an
+// old-shape wildcard in the mirror would otherwise TLS-mismatch every app).
+func certCovers(fullchain []byte, host string) bool {
+	block, _ := pem.Decode(fullchain)
+	if block == nil {
+		return false
+	}
+	leaf, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return false
+	}
+	for _, name := range leaf.DNSNames {
+		if name == host {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Spec) appsCertEnsure() (bool, error) {
+	slot := appsCertSlot
+	host := appWildcardHost(s.CpHost)
 	if fc, err := s.durableFullchain(s.K3sVmid, slot); err == nil && s.durableKeyPresent(s.K3sVmid, slot) {
-		if _, ok := cert.ReuseIfValidBytes(fc, time.Now(), 30*24*time.Hour); ok {
+		if _, ok := cert.ReuseIfValidBytes(fc, time.Now(), 30*24*time.Hour); ok && certCovers(fc, host) {
 			if err := s.seedCaddyCertFromDurable(s.K3sVmid, slot); err != nil {
 				return false, fmt.Errorf("cert %s durable seed: %w", slot, err)
 			}
@@ -190,6 +250,7 @@ func (s *Spec) appCertEnsure(slot, host string) (bool, error) {
 	if err := s.installCaddyCertFile(s.K3sVmid, slot, issued.Fullchain, issued.Key); err != nil {
 		return false, fmt.Errorf("cert %s install: %w", slot, err)
 	}
+	// The wildcard's challenge lives at the BASE's name (lego strips the "*").
 	if n, perr := cert.PurgeChallengeRecords(host, provider, env); perr == nil && n > 0 {
 		fmt.Fprintf(os.Stderr, "cert %s: cleaned %d challenge record(s) after issue\n", slot, n)
 	}
@@ -199,22 +260,24 @@ func (s *Spec) appCertEnsure(slot, host string) (bool, error) {
 // appDNSEnsure points the app's public A record at the proxy. LAN visibility
 // skips it: no public record — the name resolves only inside the world.
 func (s *Spec) appDNSEnsure(rec agenttools.AppRecord) (bool, error) {
+	// LAN visibility: NO public record — the whole point of the mode.
 	if rec.Visibility == agenttools.VisibilityLAN {
 		return false, nil
 	}
+	fqdn := s.appRecordFQDN(rec)
 	if s.ProxyIP == "" {
-		return false, fmt.Errorf("app dns %s: the proxy IP is not in the world coords", rec.FQDN)
+		return false, fmt.Errorf("app dns %s: the proxy IP is not in the world coords", fqdn)
 	}
 	provider, env, err := s.dnsCredFromStore("relay")
 	if err != nil {
-		return false, fmt.Errorf("app dns %s: %w", rec.FQDN, err)
+		return false, fmt.Errorf("app dns %s: %w", fqdn, err)
 	}
 	mgr, err := dnsman.For(provider, env)
 	if err != nil {
-		return false, fmt.Errorf("app dns %s: %w", rec.FQDN, err)
+		return false, fmt.Errorf("app dns %s: %w", fqdn, err)
 	}
-	if err := mgr.UpsertA(rec.FQDN, s.ProxyIP); err != nil {
-		return false, fmt.Errorf("app dns %s: %w", rec.FQDN, err)
+	if err := mgr.UpsertA(fqdn, s.ProxyIP); err != nil {
+		return false, fmt.Errorf("app dns %s: %w", fqdn, err)
 	}
 	return true, nil
 }
@@ -231,13 +294,15 @@ func (s *Spec) renderCaddyfile() string {
 	}
 	var apps []caddydeploy.AppVhost
 	if s.Apps != nil {
-		for _, rec := range s.Apps.List() {
-			fc, err := s.durableFullchain(s.K3sVmid, appSlot(rec.Name))
-			if err != nil {
-				continue
-			}
-			if _, ok := cert.ReuseIfValidBytes(fc, time.Now(), 0); ok {
-				apps = append(apps, s.appVhost(rec))
+		// Cert-before-config: the apps' blocks ride only when the SHARED
+		// wildcard cert exists (one check covers every app under the cp
+		// host — that is the point of the shared cert).
+		wc, err := s.durableFullchain(s.K3sVmid, appsCertSlot)
+		if err == nil {
+			if _, ok := cert.ReuseIfValidBytes(wc, time.Now(), 0); ok {
+				for _, rec := range s.Apps.List() {
+					apps = append(apps, s.appVhost(rec))
+				}
 			}
 		}
 	}
@@ -325,11 +390,10 @@ func (s *Spec) worldApps() (string, error) {
 	for _, rec := range records {
 		if _, err := s.appDNSEnsure(rec); err != nil {
 			failed = append(failed, rec.Name+" dns: "+err.Error())
-			continue
 		}
-		if _, err := s.appCertEnsure(appSlot(rec.Name), rec.FQDN); err != nil {
-			failed = append(failed, rec.Name+" cert: "+err.Error())
-		}
+	}
+	if _, err := s.appsCertEnsure(); err != nil {
+		failed = append(failed, "shared wildcard cert: "+err.Error())
 	}
 	if err := s.applyCaddyfile(); err != nil {
 		return "", fmt.Errorf("edge config: %w", err)
@@ -351,6 +415,9 @@ func BuildExposeAppFn(spec *Spec, apps *agenttools.AppsStore, consoleSecret []by
 		}
 		if apps == nil {
 			return "", fmt.Errorf("expose: the apps registry is not bound")
+		}
+		if appDomainBase(spec.CpHost) == spec.CpHost {
+			return "", fmt.Errorf("expose: the cp host %q has no world domain below it (want a <label>.<domain> host) — the apps' shared wildcard would collide with the cp cert's challenge", spec.CpHost)
 		}
 		fqdn := appFQDN(spec.CpHost, args.Name)
 		if fqdn == spec.RelayHost || fqdn == spec.CpHost {
@@ -391,8 +458,8 @@ func BuildExposeAppFn(spec *Spec, apps *agenttools.AppsStore, consoleSecret []by
 		if _, err := spec.appDNSEnsure(rec); err != nil {
 			return report + " — RECORDED; the DNS step failed and the next build re-ensures it: " + err.Error(), nil
 		}
-		if _, err := spec.appCertEnsure(appSlot(rec.Name), rec.FQDN); err != nil {
-			return report + " — RECORDED and DNS pointed; the cert step failed and the next build re-ensures it: " + err.Error(), nil
+		if _, err := spec.appsCertEnsure(); err != nil {
+			return report + " — RECORDED and DNS pointed; the wildcard cert step failed and the next build re-ensures it: " + err.Error(), nil
 		}
 		if err := spec.applyCaddyfile(); err != nil {
 			return report + " — RECORDED, DNS pointed, cert installed; the edge config apply failed and the next build re-ensures it: " + err.Error(), nil
@@ -418,7 +485,7 @@ func BuildUnexposeAppFn(spec *Spec, apps *agenttools.AppsStore) func(name string
 		if rec.Visibility != agenttools.VisibilityLAN {
 			if provider, env, err := spec.dnsCredFromStore("relay"); err == nil {
 				if mgr, merr := dnsman.For(provider, env); merr == nil {
-					_ = mgr.DeleteA(rec.FQDN) // best-effort
+					_ = mgr.DeleteA(spec.appRecordFQDN(rec)) // best-effort
 				}
 			}
 		}

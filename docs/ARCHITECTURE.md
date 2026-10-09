@@ -615,7 +615,9 @@ resident-runner mode, the retired-name guard — is in `docs/AI.md` ("Runners an
     operator auth it serves the **member identity tier** — the appliance's
     users: NIP-07 login backed by the relay's NIP-43 membership list plus
     single-use device-link invites (`members.json`, 0600, beside
-    `sessions.json`), issued as a `fh_member` cookie scoped `.cp.domain` and
+    `sessions.json`), issued as a `fh_member` cookie scoped to the appliance's
+    own zone (`.world-domain` — apps are siblings of the cp host and must
+    present it) and
     validated on `/auth/verify` (the gate exposed apps point Caddy
     `forward_auth` at — `docs/NETWORK.md`, the launch surface). It also
     carries the box-side CP CLI verbs (`provision`/`grant`/`adopt`/`add-secret`/`identity`),

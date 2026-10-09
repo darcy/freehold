@@ -40,7 +40,10 @@ func purgeChallengeRecords(host, providerName string, env map[string]string) (in
 		base = "https://api.cloudflare.com/client/v4"
 	}
 
-	name := "_acme-challenge." + strings.TrimSuffix(host, ".") + "."
+	// A wildcard host's challenge lives at the BASE's name (lego strips the
+	// "*.": the TXT for *.cp.x is _acme-challenge.cp.x) — strip it so the
+	// purge targets the record that exists.
+	name := "_acme-challenge." + strings.TrimSuffix(strings.TrimPrefix(host, "*."), ".") + "."
 	client := &http.Client{Timeout: 20 * time.Second}
 
 	// Find the covering zone (longest zone whose name the record is under).
@@ -110,8 +113,8 @@ func findCoveringZone(client *http.Client, base, token, apiKey, email, name stri
 			return "", fmt.Errorf("cloudflare purge list zones: HTTP %d: %s", resp.StatusCode, trunc(body))
 		}
 		var out struct {
-			Success  bool `json:"success"`
-			Result   []struct {
+			Success bool `json:"success"`
+			Result  []struct {
 				ID   string `json:"id"`
 				Name string `json:"name"`
 			} `json:"result"`

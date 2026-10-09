@@ -144,6 +144,15 @@ var snapshotSkill string
 //go:embed data/skills/backblaze.md
 var backblazeSkill string
 
+// litellmUiUserSkill is ai's runbook for minting a LiteLLM UI user for the
+// operator (skills/litellm-ui-user.md): the /user/new call through the
+// litellm-api-admin door (the credential injected, never pasted) and the
+// verify. Composed onto ai's prompt (the identity that executes it); the
+// file stays the canonical text.
+//
+//go:embed ai/skills/litellm-ui-user.md
+var litellmUiUserSkill string
+
 // departmentPrompts maps a reserved department identity name to its embedded
 // system prompt. The names are reserved: a create_agent naming one of them
 // selects that department's prompt rather than the custom template.
@@ -151,7 +160,7 @@ var departmentPrompts = map[string]string{
 	"network": networkPrompt,
 	"data":    dataPrompt + "\n\n" + strings.TrimRight(snapshotSkill, "\n") + "\n\n" + strings.TrimRight(backblazeSkill, "\n"),
 	"compute": computePrompt + "\n\n" + strings.TrimRight(createLxcSkill, "\n"),
-	"ai":      aiPrompt,
+	"ai":      aiPrompt + "\n\n" + strings.TrimRight(litellmUiUserSkill, "\n"),
 }
 
 // DepartmentNames returns the reserved department identity names, sorted.

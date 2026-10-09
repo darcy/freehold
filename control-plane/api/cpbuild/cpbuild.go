@@ -1216,7 +1216,11 @@ func (s *Spec) consoleEncSecretAt(dir string) ([]byte, error) {
 // first, so the usually-slow DNS-01 propagation of all hosts progresses in
 // parallel, then waits + resolves them all.
 func (s *Spec) openCertOrder(slot, host, provider string, env map[string]string) (*cert.Resume, *cert.PendingOrder, string, error) {
-	secret, err := s.consoleEncSecret()
+	// The seal key roots at the CONSOLE state root — the same root the DNS
+	// cred store reads (dnsCredFromStore): on the agent-tools server the
+	// Spec's StateDir is the TOOLSET's dir and holds no console identity —
+	// the sibling control-plane dir does, in both processes.
+	secret, err := s.consoleEncSecretAt(s.consoleStateRoot())
 	if err != nil {
 		return nil, nil, "", err
 	}
@@ -1231,6 +1235,7 @@ func (s *Spec) openCertOrder(slot, host, provider string, env map[string]string)
 	statePath := filepath.Join(s.StateDir, "world-secrets", "cert-pending-"+slot+".json")
 	resume := &cert.Resume{
 		Domain:   host,
+		Wildcard: strings.HasPrefix(host, "*."),
 		Provider: dp,
 		Seal:     func(pub, aad, plain []byte) ([]byte, error) { return crypto.Seal(pub, aad, plain) },
 		Open:     func(secret, aad, blob []byte) ([]byte, error) { return crypto.Open(secret, aad, blob) },

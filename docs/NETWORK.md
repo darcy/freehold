@@ -59,8 +59,8 @@ The gateway has TWO shapes, one per substrate:
     service up (a homelab agent deploying a family calendar), reaching it is a Network
     capability: the **exposure verbs** (`expose_app` / `unexpose_app` on the agent toolset)
     turn {name, target, group} into a public TLS vhost on the edge — DNS pointed
-    (`<name>.<cp host>` — an app sits under the CP host, the domain the member cookie is scoped to — → the proxy), a per-app cert issued through the same
-    in-process lego chain, the Caddy config rendered + applied live — and the record lands
+    (`<name>.<world domain>` — a SIBLING of the cp host: yuvomi.librem.freehold.technology; the member cookie scopes to the zone — → the proxy), a cert — ONE SHARED wildcard for the cp host's domain, issued once through the same
+    in-process lego chain (an expose after that is DNS + config only — no per-app LE order), the Caddy config rendered + applied live — and the record lands
     in the **apps registry** (`apps.json`, the toolset's durable dir), which the build tail
     re-ensures so teardown/rebuild restores the apps. Two invariants: **cert before
     config** (a vhost whose cert is missing crash-loops the whole edge — an app's block
@@ -73,13 +73,17 @@ The gateway has TWO shapes, one per substrate:
     department's identity or the operator may call the verbs; a custom agent that asks
     directly is refused (`-32003`) and routes through Network in conversation — and
     widening (`visibility: public`, `auth: none`) is refused from agents outright.
-*   **Groups are relay channels.** Every exposed app rides a relay channel as its intended
-    ACL — the record stores the channel ID (names change; the display layer resolves the
-    current name), `#general` is the everyone-channel and the default, and the expose
-    validates the requester is IN the named channel before recording it. The family's
-    group chat in Buzz IS the family's app group: one place to manage people. The GATE
-    does not read the channel yet (it admits every relay member) — per-channel
-    enforcement is the 2.1 item below.
+*   **Groups are relay channels.** Every exposed app rides a relay channel as its ACL —
+    the record stores the channel ID (names change; the display layer resolves the current
+    name), `#general` is the everyone-channel and the default, and the expose validates
+    the requester is IN the named channel before recording it. The family's group chat in
+    Buzz IS the family's app group: one place to manage people. The gate ENFORCES the
+    channel per request (`IsMemberAuth` — the same channel-scoped read the runner grants
+    use): removing someone from the channel revokes them within the gate's cache TTL.
+    Device-link invites bind their APPS at mint (a link opens exactly the named apps —
+    there is no all-apps link). By convention every member belongs to `#general`, so
+    "available to everyone" = the app rides `#general`; adding that convention to the
+    member-onboarding flow is its own item below.
 *   **DNS:** certs via DNS-01 with an automated provider (Cloudflare today) or MANUAL
     mode — the build stops and prints the exact TXT record to create, then the re-run
     resumes that same order when it exists; public A records are managed via the
@@ -117,11 +121,10 @@ The gateway has TWO shapes, one per substrate:
 
 ## Future
 
-*   **The gate reads the app's group (2.1).** The registry already carries the channel ID;
-    the gate still checks the whole community — next it checks the app's channel
-    (`IsMemberAuth`, the runner-grant read) per request with the membership cache, the
-    Access card's invite picker binds the invite's group at mint, and the display resolves
-    id → name. Revocation lands within the cache TTL; drop-sessions is the instant lever.
+*   **The onboarding convention:** every new relay member is added to `#general` when
+    they're onboarded (the add-member flow) — the one-time default that makes
+    "the app rides #general" mean "available to everyone". Separate concern from the
+    exposure verbs.
 *   **The portal.** `cp.domain` becomes the landing page: launcher tiles from the apps
     registry (the apps the agents built and manage) + "talk to your agents" (the relay) +
     login; the operator console stays behind its own operator login.

@@ -236,3 +236,18 @@ func TestOrientationOperatorTZ(t *testing.T) {
 		t.Errorf("custom agents carry no orientation block, timezone note included")
 	}
 }
+
+// TestAIPromptComposesLitellmUiUserSkill pins ai's composed prompt: the
+// litellm-ui-user runbook (the /user/new call through the
+// litellm-api-admin door) rides ai's identity — no other department's.
+func TestAIPromptComposesLitellmUiUserSkill(t *testing.T) {
+	got := SystemPrompt("ai", "the AI domain", "", "")
+	for _, want := range []string{"litellm", "user/new", "app_owner", "LITELLM_API_ADMIN_URL"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("ai's composed prompt lacks %q", want)
+		}
+	}
+	if other, _ := DepartmentPrompt("network"); strings.Contains(other, "user/new") {
+		t.Errorf("network's prompt must not carry ai's litellm skill")
+	}
+}

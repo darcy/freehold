@@ -37,12 +37,15 @@
   tr.door-focus td { background: #10243a; }
   tr.door-focus td:first-child { border-left: 2px solid #58a6ff; }
   #fill-fields input { margin-bottom: 8px; }
+  body.member #admin-ui { display: none; }
 </style>
 </head>
 <body>
 <h1>freehold <span>·</span> control plane <span class="muted" id="cp-version"></span></h1>
 <div class="muted" id="console-line">console agent: loading…</div>
+<div id="member-badge" class="chip green" style="display:none;margin-top:6px">member view <button class="forget" id="member-signout">sign out</button></div>
 
+<div id="admin-ui">
 <div class="card">
   <form id="provision-form" class="form-grid">
     <input name="name" placeholder="runner/service name" required>
@@ -64,17 +67,6 @@
 <tbody id="rows"></tbody>
 </table>
 
-<div id="err" class="muted"></div>
-
-<div class="card">
-  <b>scheduled jobs</b>
-  <div class="small" style="margin-top:4px">Agent-created schedules, fired by the control plane as mentions. Prompts are visible only to their owner — every other row (the operator's included) is metadata: owner, agent, channel, schedule, run status. Create, pause or delete jobs by asking an agent.</div>
-  <table style="margin-top:8px">
-    <thead><tr><th>owner</th><th>agent</th><th>channel</th><th>schedule</th><th>last run</th><th>created</th></tr></thead>
-    <tbody id="job-rows"></tbody>
-  </table>
-</div>
-
 <div class="card">
   <b>settings</b>
   <div class="row" style="margin-top:8px">
@@ -88,14 +80,31 @@
   <b>access — members &amp; device links</b>
   <div class="row" style="margin-top:8px">
     <input id="invite-name" placeholder="who is this device link for (e.g. grandma)">
+  </div>
+  <div id="invite-apps" style="margin-top:8px" class="small">apps: loading…</div>
+  <div class="row" style="margin-top:8px">
     <button id="invite-mint">mint device link</button>
+    <button id="member-portal">open my member session here</button>
+    <span class="small">signs THIS browser in with your own pubkey — no Nostr extension needed</span>
   </div>
   <div class="small" id="invite-out"></div>
   <table>
-    <thead><tr><th>member</th><th>kind</th><th>expires</th><th></th></tr></thead>
+    <thead><tr><th>member</th><th>kind</th><th>opens</th><th>expires</th><th></th></tr></thead>
     <tbody id="member-rows"></tbody>
   </table>
-  <div class="small">Members sign in with Nostr (relay membership decides); everyone else uses a one-time device link. Gated apps check this session via /auth/verify.</div>
+  <div class="small">Members sign in with Nostr (the app's channel roster decides); everyone else uses a one-time device link that opens exactly the apps picked above.</div>
+</div>
+</div>
+
+<div id="err" class="muted"></div>
+
+<div class="card">
+  <b>scheduled jobs</b>
+  <div class="small" style="margin-top:4px">Agent-created schedules, fired by the control plane as mentions. Prompts are visible only to their owner — every other row (the operator's included) is metadata: owner, agent, channel, schedule, run status. Create, pause or delete jobs by asking an agent.</div>
+  <table style="margin-top:8px">
+    <thead><tr><th>owner</th><th>agent</th><th>channel</th><th>schedule</th><th>last run</th><th>created</th></tr></thead>
+    <tbody id="job-rows"></tbody>
+  </table>
 </div>
 
 <div id="fill-overlay" style="display:none;position:fixed;inset:0;z-index:8;background:rgba(10,10,12,.92);align-items:center;justify-content:center">
@@ -290,6 +299,16 @@ $("#provision-form").onsubmit = async (ev) => {
   } catch (e) { $("#err").textContent = "error: " + e.message; }
 };
 
+// The member portal: a single-use link that opens a FULL member session
+// for the operator's own pubkey in THIS browser (the key never leaves the
+// box — the link carries a token, not a key).
+$("#member-portal").onclick = async () => {
+  try {
+    const res = await api("/api/members/portal", {});
+    location.href = res.link;
+  } catch (e) { $("#err").textContent = "error: " + e.message; }
+};
+
 // Settings: prefill from the CP (best-effort — before login this 401s and
 // the fields stay empty), save on click.
 async function loadSettings() {
@@ -400,18 +419,28 @@ $("#fill-submit").onclick = async () => {
 // Fails quiet until operator login (the card stays empty on the 401 path).
 async function loadMembers() {
   const j = await api("/api/members");
+  // The app picker: checkboxes over the exposed apps (a link opens exactly
+  // the picked apps — there is no all-apps link).
+  try {
+    const a = await api("/api/apps");
+    $("#invite-apps").innerHTML = (a.apps || []).map((app) =>
+      '<label class="small" style="margin-right:12px"><input type="checkbox" class="invite-app" value="' + esc(app.name) + '"> ' + esc(app.name) + " — " + esc(app.fqdn) + "</label>"
+    ).join("") || "no exposed apps yet — expose one first";
+  } catch (e) { /* not logged in — the mint button surfaces it */ }
   const rows = [];
   for (const i of j.invites || []) {
     rows.push(`<tr><td>${esc(i.name)}</td><td><span class="chip gray">invite</span></td>` +
+      `<td class="muted">${esc((i.apps || []).join(", "))}</td>` +
       `<td class="muted">${new Date(i.expires * 1000).toLocaleDateString()} · by ${esc(i.created_by)}</td>` +
       `<td><button data-act="revoke-invite" data-hash="${esc(i.hash)}">revoke</button></td></tr>`);
   }
   for (const s of j.sessions || []) {
     rows.push(`<tr><td>${esc(s.name)}</td><td><span class="chip ${s.device ? "gray" : "green"}">${s.device ? "device" : "nostr"}</span></td>` +
+      `<td class="muted">${s.device ? esc((s.apps || []).join(", ") || "(none — re-mint the link)") : "the channels decide"}</td>` +
       `<td class="muted">${new Date(s.expires * 1000).toLocaleString()}</td>` +
       `<td><button class="danger" data-act="drop-member" data-name="${esc(s.name)}">drop</button></td></tr>`);
   }
-  $("#member-rows").innerHTML = rows.join("") || '<tr><td colspan="4" class="muted">no members yet — mint a device link above</td></tr>';
+  $("#member-rows").innerHTML = rows.join("") || '<tr><td colspan="5" class="muted">no members yet — mint a device link above</td></tr>';
   $("#member-rows").querySelectorAll("button").forEach((b) => {
     b.onclick = async () => {
       try {
@@ -429,10 +458,12 @@ async function loadMembers() {
 $("#invite-mint").onclick = async () => {
   const name = $("#invite-name").value.trim();
   if (!name) { $("#err").textContent = "error: an invite needs a name"; return; }
+  const apps = Array.from(document.querySelectorAll(".invite-app:checked")).map((c) => c.value);
+  if (!apps.length) { $("#err").textContent = "error: pick at least one app the link opens"; return; }
   try {
-    const res = await api("/api/members/invites", { name });
+    const res = await api("/api/members/invites", { name, apps });
     $("#invite-out").innerHTML = "one-time link for " + esc(res.name) +
-      ' (shown once): <input readonly value="' + esc(location.origin + res.link) + '" onclick="this.select()">';
+      ' (opens: ' + esc((res.apps || []).join(", ")) + ') <input readonly value="' + esc(location.origin + res.link) + '" onclick="this.select()">';
     $("#invite-name").value = "";
     await loadMembers();
   } catch (e) { $("#err").textContent = "error: " + e.message; }
@@ -442,40 +473,29 @@ refresh().catch((e) => { $("#err").textContent = "error: " + e.message; });
 loadSettings();
 loadJobs();
 </script>
-<div id="login-overlay" style="display:none;position:fixed;inset:0;z-index:9;background:rgba(10,10,12,.92);align-items:center;justify-content:center">
-  <div style="max-width:36rem;padding:2rem">
-    <h2>console login required</h2>
-    <p class="muted">This console is authenticated (NIP-98). Log in with your own key — the nsec never touches this box. Operators (the admin whitelist) get the full surface; any relay member gets the scheduled-jobs view of their own jobs:</p>
-    <pre id="login-cmd"></pre>
-    <p class="muted">…then paste the full printed cookie line below:</p>
-    <input id="login-cookie" placeholder="fh_session=…; Path=/; HttpOnly; SameSite=Strict" style="width:100%;box-sizing:border-box">
-    <button id="login-submit" style="margin-top:.6rem">log in</button>
-    <div id="login-err" class="muted"></div>
-  </div>
-</div>
 <script>
+// The auth bootstrap: ONE login page (/auth) serves everyone; the role
+// falls out of the key. Operator session → the full dashboard. Member
+// session (the fh_member cookie the /auth login issues) → the member view
+// (the jobs card). Neither → the login page itself.
 (async function () {
   try {
     await api("/api/overview");
-  } catch (e) {
-    const msg = String(e.message || e);
-    if (msg.includes("401") || msg.includes("unauthenticated")) {
-      document.getElementById("login-overlay").style.display = "flex";
-      document.getElementById("login-overlay").style["align-items"] = "center";
-      document.getElementById("login-overlay").style["justify-content"] = "center";
-      document.getElementById("login-cmd").textContent =
-        "freehold console-login --url " + location.origin + " --nsec <nsec1… or 64-hex>";
-      document.getElementById("login-submit").onclick = () => {
-        const v = document.getElementById("login-cookie").value.trim();
-        const token = v.startsWith("fh_session=")
-          ? v.slice("fh_session=".length).split(";")[0].trim()
-          : v;
-        if (!token) { document.getElementById("login-err").textContent = "paste the cookie first"; return; }
-        document.cookie = "fh_session=" + token + "; Path=/; SameSite=Strict; Secure; Max-Age=604800";
-        location.reload();
+    return; // the operator dashboard renders as-is
+  } catch (e) { /* not an operator session */ }
+  try {
+    const j = await api("/api/jobs");
+    if (j && j.jobs) {
+      document.body.classList.add("member");
+      $("#member-badge").style.display = "inline-block";
+      $("#member-signout").onclick = async () => {
+        try { await api("/api/auth/member/logout", {}); } catch (e) {}
+        location.href = "/auth";
       };
+      return; // the member view: the jobs card (the admin surface stays hidden)
     }
-  }
+  } catch (e) { /* not a member either */ }
+  location.href = "/auth?next=" + encodeURIComponent(location.pathname + location.search);
 })();
 </script>
 </body>

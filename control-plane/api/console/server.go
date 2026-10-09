@@ -202,6 +202,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.settingsSet(w, r)
 	case path == "/api/apps" && method == http.MethodGet:
 		s.appsList(w, r)
+	case path == "/api/members/portal" && method == http.MethodPost:
+		s.memberPortalMint(w, r)
+	case strings.HasPrefix(path, "/auth/portal/") && method == http.MethodGet:
+		s.memberPortalLand(w, r, strings.TrimPrefix(path, "/auth/portal/"))
 	default:
 		writeErr(w, http.StatusNotFound, "no such route: "+method+" "+path)
 	}
@@ -1922,6 +1926,17 @@ func isProfileMessage(e map[string]interface{}) bool {
 // ONLY their own rows; the operator (and the loopback posture) sees all.
 func (s *Server) jobsList(w http.ResponseWriter, r *http.Request) {
 	pk, role, err := s.sessionFor(r)
+	if err != nil && s.Members != nil {
+		// The member tier's OWN cookie is a member identity: a Nostr login's
+		// session carries the pubkey — the SAME member a console member-role
+		// session would hold, same redaction. Device sessions carry no
+		// pubkey (their trust is a static app list): they stay out — no
+		// owned rows exist for them and jobs metadata stays off a
+		// shared-device cookie.
+		if info, ok := s.Members.MemberIdentity(cookieValue(r, memberCookie)); ok && info.Pubkey != "" {
+			pk, role, err = info.Pubkey, RoleMember, nil
+		}
+	}
 	if err != nil {
 		writeErr(w, statusFor(err), err.Error())
 		return

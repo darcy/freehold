@@ -76,7 +76,12 @@ func RenderAppVhosts(apps []AppVhost) string {
 		b.WriteString("\n" + a.FQDN + " {\n")
 		b.WriteString("  tls /data/tls/" + a.Slot + "/fullchain.pem /data/tls/" + a.Slot + "/key.pem\n")
 		if a.Gate != "" {
-			b.WriteString("  forward_auth " + a.Gate + " {\n    uri /auth/verify\n  }\n")
+			// X-Original-Host/Uri: the gate reads WHICH app the request hit
+			// (and where to return the member after login) — explicit header_up
+			// beats betting on Caddy's default forwarded headers.
+			b.WriteString("  forward_auth " + a.Gate + " {\n    uri /auth/verify\n")
+			b.WriteString("    header_up X-Original-Host {host}\n")
+			b.WriteString("    header_up X-Original-Uri {uri}\n  }\n")
 		}
 		b.WriteString("  reverse_proxy " + a.Upstream + "\n")
 		b.WriteString("}\n")

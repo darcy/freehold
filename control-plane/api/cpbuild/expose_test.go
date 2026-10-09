@@ -29,11 +29,26 @@ import (
 // ---- pure pieces ----
 
 // TestAppFQDNPinsDerivation pins the hostname composition: the app is a
-// SUBDOMAIN OF THE CP HOST — the member cookie is scoped to the cp host's
-// domain, so the gate's cookie and the app's hostname must agree or the
-// gate loops (deny → login → the cookie never reaches the app).
+// SIBLING of the relay/cp hosts — the member cookie scopes to the
+// appliance's own ZONE (the world domain), so the cookie reaches every
+// sibling app, and the shared wildcard's challenge name is unique in the
+// zone (no collision with the cp cert's challenge).
 func TestAppFQDNPinsDerivation(t *testing.T) {
-	if got := appFQDN("cp.librem.freehold.technology", "yuvomi"); got != "yuvomi.cp.librem.freehold.technology" {
+	if got := appDomainBase("cp.librem.freehold.technology"); got != "librem.freehold.technology" {
+		t.Fatalf("appDomainBase: %q", got)
+	}
+	// The rule is the FIRST LABEL, not a "cp." prefix.
+	if got := appDomainBase("control.example.com"); got != "example.com" {
+		t.Fatalf("appDomainBase (non-cp prefix): %q", got)
+	}
+	// A two-label cp host IS the zone: no world domain below it.
+	if got := appDomainBase("example.com"); got != "example.com" {
+		t.Fatalf("appDomainBase (degenerate): %q", got)
+	}
+	if got := appWildcardHost("cp.librem.freehold.technology"); got != "*.librem.freehold.technology" {
+		t.Fatalf("appWildcardHost: %q", got)
+	}
+	if got := appFQDN("cp.librem.freehold.technology", "yuvomi"); got != "yuvomi.librem.freehold.technology" {
 		t.Fatalf("appFQDN: %q", got)
 	}
 	if !looksLikeChannelID("3fa85f64-5717-4562-b3fc-2c963f66afa6") {
@@ -89,12 +104,13 @@ func (re *relayEvents) server(t *testing.T) *httptest.Server {
 // the console root), a fake relay, and an exec hook that records commands
 // and answers the durable-fullchain reads with a real self-signed cert.
 type testExposer struct {
-	spec     *Spec
-	apps     *agenttools.AppsStore
-	cmds     []string
-	uploads  []string // remote paths
-	bodies   map[string]string
-	relaySrv *httptest.Server
+	spec      *Spec
+	apps      *agenttools.AppsStore
+	cmds      []string
+	uploads   []string // remote paths
+	bodies    map[string]string
+	relaySrv  *httptest.Server
+	cfWrites  *int // the fake CF's record-write counter
 }
 
 func newTestExposer(t *testing.T, channels []relayChannel, members []memberEvent) *testExposer {
@@ -126,7 +142,7 @@ func newTestExposer(t *testing.T, channels []relayChannel, members []memberEvent
 
 	// A self-signed cert for the durable-mirror reads (the render's
 	// cert-existence filter parses it).
-	fc := selfSigned(t, "yuvomi.cp.librem.example")
+	fc := selfSigned(t, "*.librem.example")
 
 	spec := &Spec{
 		StateDir: toolsetState, AgentRegistry: testRegistryForExpose(t),
@@ -138,11 +154,11 @@ func newTestExposer(t *testing.T, channels []relayChannel, members []memberEvent
 	}
 	// A fake Cloudflare API (the zone cred's CLOUDFLARE_BASE_URL points here —
 	// a test must never touch the real API): /zones resolves one zone, record
-	// writes succeed.
+	// writes succeed (and COUNT — the lan mode's no-public-DNS skip pins
+	// against the counter).
+	var cfWrites int
 	cf := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		// Reads (zone list, record lookup) return ARRAY results; writes return
-		// an object — matching the API's shapes.
 		if r.URL.Path == "/zones" || (r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/dns_records")) {
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{
 				"success":     true,
@@ -150,6 +166,9 @@ func newTestExposer(t *testing.T, channels []relayChannel, members []memberEvent
 				"result_info": map[string]interface{}{"total_pages": 1},
 			})
 			return
+		}
+		if r.Method == http.MethodPost || r.Method == http.MethodPut {
+			cfWrites++
 		}
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "result": map[string]interface{}{}})
 	}))
@@ -170,7 +189,7 @@ func newTestExposer(t *testing.T, channels []relayChannel, members []memberEvent
 	if err != nil {
 		t.Fatal(err)
 	}
-	te := &testExposer{spec: spec, apps: apps, bodies: map[string]string{}}
+	te := &testExposer{spec: spec, apps: apps, bodies: map[string]string{}, cfWrites: &cfWrites}
 	spec.Apps = apps
 	spec.execHook = func(cmd string, _ uint64, _ ...string) (string, error) {
 		te.cmds = append(te.cmds, cmd)
@@ -265,10 +284,10 @@ func TestExposePinsRequesterInGroup(t *testing.T) {
 		t.Fatalf("a requester in the group must pass, got %v", err)
 	}
 	rec, ok := te.apps.Get("yuvomi")
-	if !ok || rec.Group != family || rec.FQDN != "yuvomi.cp.librem.example" {
+	if !ok || rec.Group != family || rec.FQDN != "yuvomi.librem.example" {
 		t.Fatalf("record: %+v ok=%v", rec, ok)
 	}
-	if !strings.Contains(report, "https://yuvomi.cp.librem.example") {
+	if !strings.Contains(report, "https://yuvomi.librem.example") {
 		t.Fatalf("report must carry the URL: %s", report)
 	}
 }
@@ -302,9 +321,9 @@ func TestExposeRecordFirstAndEdgeSafe(t *testing.T) {
 	// The rendered config the apply CARRIES (file-transit): the app vhost
 	// with its gate — forward_auth to the console on the CP guest.
 	cfg := te.bodies["/tmp/fh-caddyfile"]
-	if !strings.Contains(cfg, "yuvomi.cp.librem.example {") ||
+	if !strings.Contains(cfg, "yuvomi.librem.example {") ||
 		!strings.Contains(cfg, "forward_auth 10.78.0.12:8080") ||
-		!strings.Contains(cfg, "tls /data/tls/app-yuvomi/fullchain.pem") {
+		!strings.Contains(cfg, "tls /data/tls/apps/fullchain.pem") {
 		t.Fatalf("the rendered edge config must carry the gated app vhost: %s", cfg)
 	}
 }
@@ -401,13 +420,22 @@ func TestExposeRefusesTheEdgeHosts(t *testing.T) {
 	consoleSec[0] = 0x42
 	te := newTestExposer(t, []relayChannel{{family, "family"}},
 		[]memberEvent{{channelID: family, pubkey: strings.Repeat("b", 64), kind: wire.PutUser, ts: 100}})
-	// The relay lives under the cp host's domain: the app name "relay"
-	// would compose exactly the relay's own site block.
-	te.spec.RelayHost = "relay.cp.librem.example"
+	// The app name "relay" composes EXACTLY the relay's own site block
+	// (siblings): two site blocks for one address is a config that cannot
+	// load — the whole edge crash-loops, and kubectl apply exits 0.
 	if _, err := te.exposeFn(consoleSec)(agent.ExposeArgs{
 		Name: "relay", Target: "10.78.0.13:3000", Group: family, Requester: strings.Repeat("b", 64),
 	}); err == nil || !strings.Contains(err.Error(), "the edge's own host") {
 		t.Fatalf("expose must refuse the edge's own host, got %v", err)
+	}
+
+	// The degenerate shape (the cp host IS the zone): refused loud — the
+	// shared wildcard's challenge would collide with the cp cert's.
+	te.spec.CpHost = "librem.example"
+	if _, err := te.exposeFn(consoleSec)(agent.ExposeArgs{
+		Name: "yuvomi", Target: "10.78.0.13:3000", Group: family, Requester: strings.Repeat("b", 64),
+	}); err == nil || !strings.Contains(err.Error(), "no world domain below it") {
+		t.Fatalf("a zone-shaped cp host must refuse, got %v", err)
 	}
 	if _, ok := te.apps.Get("relay"); ok {
 		t.Fatal("the refused expose must not record")
@@ -449,5 +477,61 @@ func TestWorldAppsReadsTheRegistryFresh(t *testing.T) {
 	}
 	if rep, err := te.spec.worldApps(); err != nil || rep != "" {
 		t.Fatalf("the unexposed app must be gone from the tail's render: %q %v", rep, err)
+	}
+}
+
+// TestLanVisibilitySkipsPublicDNS pins the lan mode: a lan app exposes
+// WITHOUT any public DNS (zero record writes hit the zone), while a family
+// app on the same coords does write its record.
+func TestLanVisibilitySkipsPublicDNS(t *testing.T) {
+	family := "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+	consoleSec := make([]byte, 32)
+	consoleSec[0] = 0x42
+
+	te := newTestExposer(t, []relayChannel{{family, "family"}},
+		[]memberEvent{{channelID: family, pubkey: strings.Repeat("b", 64), kind: wire.PutUser, ts: 100}})
+	report, err := te.exposeFn(consoleSec)(agent.ExposeArgs{
+		Name: "internal-dash", Target: "10.78.0.13:3000", Group: family,
+		Visibility: agenttools.VisibilityLAN, Requester: strings.Repeat("b", 64),
+	})
+	if err != nil {
+		t.Fatalf("a lan app must expose without public DNS: %v", err)
+	}
+	if !strings.Contains(report, "live") {
+		t.Fatalf("the lan app reports live: %s", report)
+	}
+	rec, _ := te.apps.Get("internal-dash")
+	if rec.Visibility != agenttools.VisibilityLAN {
+		t.Fatalf("the lan visibility must record: %+v", rec)
+	}
+	if *te.cfWrites != 0 {
+		t.Fatalf("a lan app must not write public DNS records, saw %d", *te.cfWrites)
+	}
+	// The control: a family app on the same coords DOES write the record.
+	if _, err := te.exposeFn(consoleSec)(agent.ExposeArgs{
+		Name: "family-app", Target: "10.78.0.13:3000", Group: family, Requester: strings.Repeat("b", 64),
+	}); err != nil {
+		t.Fatalf("the family app exposes: %v", err)
+	}
+	if *te.cfWrites < 1 {
+		t.Fatal("a family app must point its public DNS record")
+	}
+}
+
+// TestAppsCertReuseCoversTheHost pins the reuse gate's domain check: a
+// mirror cert for the OLD shape (*.cp.librem…) must not seed as the apps'
+// wildcard after the covered domain moved to the world domain — a stale
+// shape's cert would TLS-mismatch every app behind an "apps reconciled"
+// report; the mirror miss falls through to a fresh issue.
+func TestAppsCertReuseCoversTheHost(t *testing.T) {
+	oldShape := selfSigned(t, "*.cp.librem.example")
+	if certCovers(oldShape, "*.librem.example") {
+		t.Fatal("the old shape's cert must not cover the moved wildcard")
+	}
+	if !certCovers(selfSigned(t, "*.librem.example"), "*.librem.example") {
+		t.Fatal("the matching wildcard must cover")
+	}
+	if certCovers([]byte("not a pem"), "*.librem.example") {
+		t.Fatal("garbage must not cover")
 	}
 }

@@ -24,10 +24,14 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
 	"time"
+
+	"freehold/contract/relay"
+	"freehold/control-plane/api/agenttools"
 )
 
 const (
@@ -40,13 +44,16 @@ const (
 	memberCacheCap   = 4096
 )
 
-// MemberSession is one authenticated member: a Nostr login (pubkey set) or a
-// device-link session (Device, named for the person the link was minted for).
+// MemberSession is one authenticated member: a Nostr login (pubkey set —
+// the app gate checks their CHANNEL membership per app) or a device-link
+// session (Device — the gate checks the app against the link's static app
+// list; there is no all-apps path).
 type MemberSession struct {
 	expires time.Time
 	pubkey  string
 	name    string
 	device  bool
+	apps    []string // device sessions: the app NAMES the link opens
 }
 
 // memberInvite is an unconsumed device link. The raw token is shown ONCE at
@@ -55,6 +62,19 @@ type memberInvite struct {
 	expires   time.Time
 	createdBy string
 	name      string
+	apps      []string
+}
+
+// memberPortal is a single-use token binding a PUBKEY to a member session —
+// the bridge for a key-holder whose browser has no NIP-07 extension: the
+// operator mints it (their own session's pubkey), the link lands a FULL
+// member session (dynamic channel checks), the key never touches a browser.
+// memberPortal's fields are EXPORTED — the struct's JSON IS its
+// persistence (a{} row would lose the pubkey/expiry and die on restart).
+type memberPortal struct {
+	Expires time.Time `json:"expires"`
+	Pubkey  string    `json:"pubkey"`
+	Name    string    `json:"name"`
 }
 
 // Members is the member session + invite store, persisted to members.json.
@@ -63,26 +83,30 @@ type Members struct {
 	mu       sync.Mutex
 	sessions map[string]MemberSession // token -> session
 	invites  map[string]memberInvite  // sha256(token) -> invite
+	portals  map[string]memberPortal  // token -> portal (single-use)
 }
 
 // memberSessionRow / memberInviteRow are the on-disk shapes (expires as unix
 // seconds).
 type memberSessionRow struct {
-	Pubkey  string `json:"pubkey,omitempty"`
-	Name    string `json:"name"`
-	Device  bool   `json:"device"`
-	Expires int64  `json:"expires"`
+	Pubkey  string   `json:"pubkey,omitempty"`
+	Name    string   `json:"name"`
+	Device  bool     `json:"device"`
+	Apps    []string `json:"apps,omitempty"`
+	Expires int64    `json:"expires"`
 }
 
 type memberInviteRow struct {
-	Name      string `json:"name"`
-	CreatedBy string `json:"created_by"`
-	Expires   int64  `json:"expires"`
+	Name      string   `json:"name"`
+	CreatedBy string   `json:"created_by"`
+	Apps      []string `json:"apps"`
+	Expires   int64    `json:"expires"`
 }
 
 type memberFile struct {
 	Sessions map[string]memberSessionRow `json:"sessions"`
 	Invites  map[string]memberInviteRow  `json:"invites"`
+	Portals  map[string]memberPortal     `json:"portals"`
 }
 
 // NewMembers loads the member store ("" = memory-only, for tests). A missing
@@ -92,6 +116,7 @@ func NewMembers(file string) *Members {
 		file:     file,
 		sessions: map[string]MemberSession{},
 		invites:  map[string]memberInvite{},
+		portals:  map[string]memberPortal{},
 	}
 	m.load()
 	return m
@@ -114,14 +139,20 @@ func (m *Members) load() {
 		if exp.Before(now()) {
 			continue
 		}
-		m.sessions[tok] = MemberSession{expires: exp, pubkey: r.Pubkey, name: r.Name, device: r.Device}
+		m.sessions[tok] = MemberSession{expires: exp, pubkey: r.Pubkey, name: r.Name, device: r.Device, apps: r.Apps}
 	}
 	for h, r := range f.Invites {
 		exp := time.Unix(r.Expires, 0)
 		if exp.Before(now()) {
 			continue
 		}
-		m.invites[h] = memberInvite{expires: exp, createdBy: r.CreatedBy, name: r.Name}
+		m.invites[h] = memberInvite{expires: exp, createdBy: r.CreatedBy, name: r.Name, apps: r.Apps}
+	}
+	for tok, r := range f.Portals {
+		if r.Expires.Before(now()) {
+			continue
+		}
+		m.portals[tok] = r
 	}
 }
 
@@ -136,12 +167,16 @@ func (m *Members) save() error {
 	f := memberFile{
 		Sessions: make(map[string]memberSessionRow, len(m.sessions)),
 		Invites:  make(map[string]memberInviteRow, len(m.invites)),
+		Portals:  make(map[string]memberPortal, len(m.portals)),
 	}
 	for tok, s := range m.sessions {
-		f.Sessions[tok] = memberSessionRow{Pubkey: s.pubkey, Name: s.name, Device: s.device, Expires: s.expires.Unix()}
+		f.Sessions[tok] = memberSessionRow{Pubkey: s.pubkey, Name: s.name, Device: s.device, Apps: s.apps, Expires: s.expires.Unix()}
 	}
 	for h, i := range m.invites {
-		f.Invites[h] = memberInviteRow{Name: i.name, CreatedBy: i.createdBy, Expires: i.expires.Unix()}
+		f.Invites[h] = memberInviteRow{Name: i.name, CreatedBy: i.createdBy, Apps: i.apps, Expires: i.expires.Unix()}
+	}
+	for tok, p := range m.portals {
+		f.Portals[tok] = p
 	}
 	raw, err := json.Marshal(f)
 	if err != nil {
@@ -154,9 +189,11 @@ func (m *Members) save() error {
 	return os.Rename(tmp, m.file)
 }
 
-// IssueInvite mints a single-use device link for `name`; the returned token
+// IssueInvite mints a single-use device link for `name`, opening exactly
+// the named apps (>= 1 — there is no all-apps link: access comes from
+// channels and named apps, never from a blank check). The returned token
 // rides /auth/link/<token> and is never persisted (only its sha256 is).
-func (m *Members) IssueInvite(name, createdBy string) (string, error) {
+func (m *Members) IssueInvite(name, createdBy string, apps []string) (string, error) {
 	token, err := randomHex(16)
 	if err != nil {
 		return "", err
@@ -164,7 +201,7 @@ func (m *Members) IssueInvite(name, createdBy string) (string, error) {
 	sum := sha256.Sum256([]byte(token))
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.invites[hex.EncodeToString(sum[:])] = memberInvite{expires: now().Add(inviteTTL), createdBy: createdBy, name: name}
+	m.invites[hex.EncodeToString(sum[:])] = memberInvite{expires: now().Add(inviteTTL), createdBy: createdBy, name: name, apps: apps}
 	if err := m.save(); err != nil {
 		return "", err
 	}
@@ -172,26 +209,26 @@ func (m *Members) IssueInvite(name, createdBy string) (string, error) {
 }
 
 // ConsumeInvite single-use consumes an invite if fresh; returns the name it
-// was minted for. A persistence failure propagates — swallowing it here
-// would resurrect the consumed invite on the next restart (single-use is
-// the invite's whole security).
-func (m *Members) ConsumeInvite(token string) (string, bool, error) {
+// was minted for + the apps the link opens. A persistence failure
+// propagates — swallowing it here would resurrect the consumed invite on
+// the next restart (single-use is the invite's whole security).
+func (m *Members) ConsumeInvite(token string) (string, []string, bool, error) {
 	sum := sha256.Sum256([]byte(token))
 	h := hex.EncodeToString(sum[:])
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	inv, ok := m.invites[h]
 	if !ok {
-		return "", false, nil
+		return "", nil, false, nil
 	}
 	delete(m.invites, h)
 	if err := m.save(); err != nil {
-		return "", false, err
+		return "", nil, false, err
 	}
 	if inv.expires.Before(now()) {
-		return "", false, nil
+		return "", nil, false, nil
 	}
-	return inv.name, true, nil
+	return inv.name, inv.apps, true, nil
 }
 
 // RevokeInvite drops an unconsumed invite (by its listed hash). notFound
@@ -206,15 +243,55 @@ func (m *Members) RevokeInvite(hash string) (notFound bool, err error) {
 	return false, m.save()
 }
 
-// IssueMemberSession mints a member session token.
-func (m *Members) IssueMemberSession(pubkey, name string, device bool) (string, error) {
+// IssueMemberPortal mints a single-use token binding pubkey to a member
+// session (the operator opening their own member login in a browser without
+// a NIP-07 extension). Short-lived like the operator portal tokens.
+func (m *Members) IssueMemberPortal(pubkey, name string) (string, error) {
+	token, err := randomHex(16)
+	if err != nil {
+		return "", err
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.portals[token] = memberPortal{Expires: now().Add(portalTTL), Pubkey: pubkey, Name: name}
+	if err := m.save(); err != nil {
+		return "", err
+	}
+	return token, nil
+}
+
+// ConsumeMemberPortal single-use consumes a portal token if fresh. A
+// persistence failure propagates — swallowing it here would resurrect the
+// consumed token on the next restart, and a consumed portal token lands a
+// FULL member session bound to the operator's pubkey.
+func (m *Members) ConsumeMemberPortal(token string) (pubkey, name string, ok bool, err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	p, found := m.portals[token]
+	if !found {
+		return "", "", false, nil
+	}
+	delete(m.portals, token)
+	if err := m.save(); err != nil {
+		m.portals[token] = p // the disk kept it — the memory must match
+		return "", "", false, err
+	}
+	if p.Expires.Before(now()) {
+		return "", "", false, nil
+	}
+	return p.Pubkey, p.Name, true, nil
+}
+
+// IssueMemberSession mints a member session token (apps ride device
+// sessions; nostr sessions check channels dynamically and pass nil).
+func (m *Members) IssueMemberSession(pubkey, name string, device bool, apps []string) (string, error) {
 	token, err := randomHex(32)
 	if err != nil {
 		return "", err
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.sessions[token] = MemberSession{expires: now().Add(memberTTL), pubkey: pubkey, name: name, device: device}
+	m.sessions[token] = MemberSession{expires: now().Add(memberTTL), pubkey: pubkey, name: name, device: device, apps: apps}
 	if err := m.save(); err != nil {
 		delete(m.sessions, token)
 		return "", err
@@ -222,22 +299,31 @@ func (m *Members) IssueMemberSession(pubkey, name string, device bool) (string, 
 	return token, nil
 }
 
-// MemberIdentity validates a member session (sliding refresh) and returns
-// its pubkey ("" for a device session), name, and device flag.
-func (m *Members) MemberIdentity(token string) (pubkey, name string, device bool, ok bool) {
+// MemberInfo is one session's resolved identity: the pubkey ("" for a
+// device session), the person's name, the device flag, and the device
+// session's app list (nil for nostr sessions).
+type MemberInfo struct {
+	Pubkey string
+	Name   string
+	Device bool
+	Apps   []string
+}
+
+// MemberIdentity validates a member session (sliding refresh) and resolves it.
+func (m *Members) MemberIdentity(token string) (MemberInfo, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	s, found := m.sessions[token]
 	if !found {
-		return "", "", false, false
+		return MemberInfo{}, false
 	}
 	if s.expires.Before(now()) {
 		delete(m.sessions, token)
-		return "", "", false, false
+		return MemberInfo{}, false
 	}
 	s.expires = now().Add(memberTTL)
 	m.sessions[token] = s
-	return s.pubkey, s.name, s.device, true
+	return MemberInfo{Pubkey: s.pubkey, Name: s.name, Device: s.device, Apps: s.apps}, true
 }
 
 // KillSession ends one member session (logout). A persistence failure
@@ -273,18 +359,20 @@ func (m *Members) DropMemberSessions(name string) (int, error) {
 
 // MemberInviteJSON is one listed invite (the hash, never the token).
 type MemberInviteJSON struct {
-	Name      string `json:"name"`
-	Hash      string `json:"hash"`
-	CreatedBy string `json:"created_by"`
-	Expires   int64  `json:"expires"`
+	Name      string   `json:"name"`
+	Apps      []string `json:"apps"`
+	Hash      string   `json:"hash"`
+	CreatedBy string   `json:"created_by"`
+	Expires   int64    `json:"expires"`
 }
 
 // MemberSessionJSON is one listed live session.
 type MemberSessionJSON struct {
-	Name    string `json:"name"`
-	Pubkey  string `json:"pubkey,omitempty"`
-	Device  bool   `json:"device"`
-	Expires int64  `json:"expires"`
+	Name    string   `json:"name"`
+	Pubkey  string   `json:"pubkey,omitempty"`
+	Device  bool     `json:"device"`
+	Apps    []string `json:"apps,omitempty"`
+	Expires int64    `json:"expires"`
 }
 
 // List returns the current invites + sessions for the operator's access card.
@@ -294,11 +382,11 @@ func (m *Members) List() (invites []MemberInviteJSON, sessions []MemberSessionJS
 	invites = []MemberInviteJSON{}
 	sessions = []MemberSessionJSON{}
 	for h, i := range m.invites {
-		invites = append(invites, MemberInviteJSON{Name: i.name, Hash: h, CreatedBy: i.createdBy, Expires: i.expires.Unix()})
+		invites = append(invites, MemberInviteJSON{Name: i.name, Apps: i.apps, Hash: h, CreatedBy: i.createdBy, Expires: i.expires.Unix()})
 	}
 	sort.Slice(invites, func(i, j int) bool { return invites[i].Name < invites[j].Name })
 	for _, s := range m.sessions {
-		sessions = append(sessions, MemberSessionJSON{Name: s.name, Pubkey: s.pubkey, Device: s.device, Expires: s.expires.Unix()})
+		sessions = append(sessions, MemberSessionJSON{Name: s.name, Pubkey: s.pubkey, Device: s.device, Apps: s.apps, Expires: s.expires.Unix()})
 	}
 	sort.Slice(sessions, func(i, j int) bool { return sessions[i].Name < sessions[j].Name })
 	return invites, sessions
@@ -322,14 +410,34 @@ func hostOf(origin string) string {
 	return rest
 }
 
-// memberCookieDomain scopes the member cookie to the appliance's whole
-// registrable domain — every gated app subdomain must present it. Host-only
-// when no public origin is configured (loopback/dev).
-func (s *Server) memberCookieDomain() string {
+// memberDomain is the appliance's own ZONE: the console host's world domain
+// (cp.librem.freehold.technology → librem.freehold.technology). Apps are
+// SIBLINGS of the cp host (yuvomi.librem…), so the member cookie and the
+// post-login targets scope to the zone — the appliance's own DNS zone, the
+// trust boundary the operator already controls.
+func (s *Server) memberDomain() string {
 	if s.PublicOrigin == nil || *s.PublicOrigin == "" {
 		return ""
 	}
-	return "." + hostOf(*s.PublicOrigin)
+	// The FIRST-label rule, matching cpbuild's appDomainBase: the console
+	// host's world domain (cp.librem… → librem…; control.example.com →
+	// example.com). A two-label host IS the zone — returned unchanged.
+	host := hostOf(*s.PublicOrigin)
+	labels := strings.Split(host, ".")
+	if len(labels) >= 3 {
+		return strings.Join(labels[1:], ".")
+	}
+	return host
+}
+
+// memberCookieDomain scopes the member cookie to the appliance's zone —
+// every gated app (a sibling of the cp host) must present it. Host-only
+// when no public origin is configured (loopback/dev).
+func (s *Server) memberCookieDomain() string {
+	if d := s.memberDomain(); d != "" {
+		return "." + d
+	}
+	return ""
 }
 
 // safeNext validates a post-login redirect target: a relative path on this
@@ -353,7 +461,10 @@ func (s *Server) safeNext(next string) string {
 	if err != nil || (u.Scheme != "https" && u.Scheme != "http") {
 		return ""
 	}
-	pub := hostOf(*s.PublicOrigin)
+	pub := s.memberDomain()
+	if pub == "" {
+		return ""
+	}
 	host := u.Hostname()
 	if host == pub || strings.HasSuffix(host, "."+pub) {
 		return next
@@ -405,52 +516,56 @@ type memberCheck struct {
 	checked time.Time
 }
 
-// memberRelayAllowed consults the relay's NIP-43 membership list with a
-// short-TTL cache: re-check every memberCheckTTL, and on a relay outage keep
-// serving the last answer for memberCheckGrace — chat being down must not
-// lock the family out of their apps mid-outage, and a blip must not fall the
-// gate open either. No relay coords at all is a hard error: the gate never
-// fails open on a misconfigured world.
-func (s *Server) memberRelayAllowed(pubkey string) (bool, error) {
+// cachedMembership is the outage-aware cache ALL relay-membership checks
+// share (the community read at login, the channel reads at the gate): the
+// answer re-checks every memberCheckTTL; a relay outage keeps serving the
+// last answer for memberCheckGrace — chat being down must not lock the
+// family out of their apps mid-outage, and a blip must not fall the gate
+// open either. An uncached key on a dead relay fails CLOSED. Bounded: a
+// fresh signed key reaches a check on every forged login attempt through
+// the public edge, so an uncapped map is a memory DoS — clear-when-full is
+// the whole policy (the cost is one extra relay read per admitted member).
+func (s *Server) cachedMembership(key string, check func() (bool, error)) (bool, error) {
 	s.memberMu.Lock()
 	if s.memberCache == nil {
 		s.memberCache = map[string]memberCheck{}
 	}
-	if c, ok := s.memberCache[pubkey]; ok && now().Sub(c.checked) < memberCheckTTL {
+	if c, ok := s.memberCache[key]; ok && now().Sub(c.checked) < memberCheckTTL {
 		s.memberMu.Unlock()
 		return c.ok, nil
 	}
 	s.memberMu.Unlock()
 
-	// The ONE membership read (console login's member role uses it too):
-	// dial/auth resolution + the not-configured guard live there.
-	_ = s.Store.Reload()
-	ok, err := s.isRelayMember(s.Store.Snapshot(), pubkey)
+	ok, err := check()
 
 	s.memberMu.Lock()
 	if err != nil {
-		// The relay is unreachable: the last known answer survives the grace
-		// window, then the check fails closed.
-		if c, ok := s.memberCache[pubkey]; ok && now().Sub(c.checked) < memberCheckGrace {
+		if c, ok := s.memberCache[key]; ok && now().Sub(c.checked) < memberCheckGrace {
 			cached := c.ok
 			s.memberMu.Unlock()
 			return cached, nil
 		}
 	} else {
-		// Bounded: a fresh signed key reaches this check on every forged
-		// login attempt through the public edge, so an uncapped map is a
-		// memory DoS on the console. Clear-when-full is the whole policy —
-		// the cost is one extra relay read per admitted member.
 		if len(s.memberCache) >= memberCacheCap {
 			s.memberCache = map[string]memberCheck{}
 		}
-		s.memberCache[pubkey] = memberCheck{ok: ok, checked: now()}
+		s.memberCache[key] = memberCheck{ok: ok, checked: now()}
 	}
 	s.memberMu.Unlock()
-	if err != nil {
-		return false, err
-	}
-	return ok, nil
+	return ok, err
+}
+
+// memberRelayAllowed consults the relay's NIP-43 membership list — the
+// member LOGIN's gate (the app gate checks channels; this checks the
+// community). No relay coords at all is a hard error: the gate never fails
+// open on a misconfigured world.
+func (s *Server) memberRelayAllowed(pubkey string) (bool, error) {
+	return s.cachedMembership("community|"+pubkey, func() (bool, error) {
+		// The ONE membership read (console login's member role uses it too):
+		// dial/auth resolution + the not-configured guard live there.
+		_ = s.Store.Reload()
+		return s.isRelayMember(s.Store.Snapshot(), pubkey)
+	})
 }
 
 // memberLoginPage serves the self-contained NIP-07 login page.
@@ -518,13 +633,25 @@ func (s *Server) memberLogin(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusForbidden, "not a member of this relay")
 		return
 	}
-	token, err := s.Members.IssueMemberSession(req.Pubkey, req.Pubkey, false)
+	// THE ROLE FALLS OUT OF THE KEY: a whitelisted pubkey logging in HERE is
+	// the operator — the same login lands BOTH sessions (the host-only
+	// operator cookie for the console's admin surface, the zone-scoped member
+	// cookie for the app gates). Everyone else gets the member session. One
+	// door, the role derived from the key.
+	role := "member"
+	if s.Auth != nil && s.Auth.isAdmin(req.Pubkey) {
+		if opTok, oerr := s.Auth.IssueSessionRole(req.Pubkey, RoleOperator); oerr == nil {
+			setSessionCookie(w, opTok)
+			role = "operator"
+		}
+	}
+	token, err := s.Members.IssueMemberSession(req.Pubkey, req.Pubkey, false, nil)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	setMemberCookie(w, token, s.memberCookieDomain())
-	writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "next": s.safeNext(req.Next)})
+	writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "next": s.safeNext(req.Next), "role": role})
 }
 
 // memberLinkLand consumes a single-use device link and binds a session to
@@ -534,7 +661,7 @@ func (s *Server) memberLinkLand(w http.ResponseWriter, r *http.Request, token st
 		writeErr(w, http.StatusNotFound, "member login is not enabled on this console")
 		return
 	}
-	name, ok, err := s.Members.ConsumeInvite(token)
+	name, apps, ok, err := s.Members.ConsumeInvite(token)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -545,7 +672,7 @@ func (s *Server) memberLinkLand(w http.ResponseWriter, r *http.Request, token st
 		_, _ = w.Write([]byte("<!doctype html><meta charset='utf-8'><body style='background:#0d1117;color:#8b949e;font-family:monospace;display:flex;align-items:center;justify-content:center;min-height:100vh'><p>This link is unknown, expired, or already used. Ask for a fresh one.</p></body>"))
 		return
 	}
-	mtok, err := s.Members.IssueMemberSession("", name, true)
+	mtok, err := s.Members.IssueMemberSession("", name, true, apps)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -557,6 +684,65 @@ func (s *Server) memberLinkLand(w http.ResponseWriter, r *http.Request, token st
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	_, _ = w.Write([]byte("<!doctype html><meta charset='utf-8'><body style='background:#0d1117;color:#c9d1d9;font-family:monospace;display:flex;align-items:center;justify-content:center;min-height:100vh;text-align:center'><div><h1 style='font-size:16px;letter-spacing:2px'>signed in</h1><p style='color:#8b949e'>Welcome, " + htmlEsc(name) + " — you can close this tab and open your app.</p></div></body>"))
+}
+
+// memberPortalMint is the key-holder's bridge: the operator mints a
+// single-use link that opens a FULL member session for THEIR OWN pubkey —
+// the identity their Nostr login would carry, no NIP-07 extension needed.
+// It is not a widening lever: the pubkey is the MINTER's (the session's
+// admission is still whatever channels that pubkey belongs to).
+func (s *Server) memberPortalMint(w http.ResponseWriter, r *http.Request) {
+	operator, err := s.requireAdmin(r)
+	if err != nil {
+		writeErr(w, statusFor(err), err.Error())
+		return
+	}
+	if err := checkOrigin(r, s.PublicOrigin); err != nil {
+		writeErr(w, http.StatusForbidden, err.Error())
+		return
+	}
+	if s.Members == nil {
+		writeErr(w, http.StatusNotFound, "member login is not enabled on this console")
+		return
+	}
+	token, err := s.Members.IssueMemberPortal(operator, "member session")
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]interface{}{"link": "/auth/portal/" + token})
+}
+
+// memberPortalLand consumes the token and lands the member session (the
+// pubkey rides the token, so the app gate checks the channels that pubkey
+// belongs to — the same as a Nostr login's session).
+func (s *Server) memberPortalLand(w http.ResponseWriter, r *http.Request, token string) {
+	if s.Members == nil {
+		writeErr(w, http.StatusNotFound, "member login is not enabled on this console")
+		return
+	}
+	pubkey, name, ok, cerr := s.Members.ConsumeMemberPortal(token)
+	if cerr != nil {
+		writeErr(w, http.StatusInternalServerError, cerr.Error())
+		return
+	}
+	if !ok {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte("<!doctype html><meta charset='utf-8'><body style='background:#0d1117;color:#8b949e;font-family:monospace;display:flex;align-items:center;justify-content:center;min-height:100vh'><p>This link is unknown, expired, or already used. Mint a fresh one.</p></body>"))
+		return
+	}
+	mtok, err := s.Members.IssueMemberSession(pubkey, name, false, nil)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	setMemberCookie(w, mtok, s.memberCookieDomain())
+	next := s.safeNext(r.URL.Query().Get("next"))
+	if next == "" {
+		next = strings.TrimSuffix(ofStr(s.PublicOrigin), "/")
+	}
+	http.Redirect(w, r, next, http.StatusFound)
 }
 
 // forwardAuthVerify is the gate endpoint Caddy's forward_auth calls for every
@@ -571,19 +757,41 @@ func (s *Server) forwardAuthVerify(w http.ResponseWriter, r *http.Request) {
 	}
 	if s.Auth != nil {
 		if tok := cookieValue(r, sessionCookie); tok != "" {
-			// Any console session role passes the gate — operator or member:
-			// both are admitted identities (the member role was verified
-			// against the relay's list at ITS login).
-			if _, _, ok := s.Auth.SessionIdentity(tok); ok {
-				w.WriteHeader(http.StatusNoContent)
-				return
+			if pk, role, ok := s.Auth.SessionIdentity(tok); ok {
+				// The OPERATOR passes outright. A member-role console session
+				// does NOT: it holds a live pubkey, so it goes through the
+				// SAME app-aware check a nostr session does — otherwise the
+				// cookie replays past the channel check and channel removal
+				// never revokes anything.
+				if role == RoleOperator {
+					w.WriteHeader(http.StatusNoContent)
+					return
+				}
+				admitted, err := s.memberAdmits(MemberInfo{Pubkey: pk, Name: pk}, r)
+				if err != nil {
+					writeErr(w, http.StatusServiceUnavailable, "membership unavailable: "+err.Error())
+					return
+				}
+				if admitted {
+					w.WriteHeader(http.StatusNoContent)
+					return
+				}
 			}
 		}
 	}
 	if tok := cookieValue(r, memberCookie); tok != "" {
-		if _, _, _, ok := s.Members.MemberIdentity(tok); ok {
-			w.WriteHeader(http.StatusNoContent)
-			return
+		if info, ok := s.Members.MemberIdentity(tok); ok {
+			admitted, err := s.memberAdmits(info, r)
+			if err != nil {
+				// The membership source is unreachable AND the cache's grace
+				// window passed: fail closed, say why.
+				writeErr(w, http.StatusServiceUnavailable, "membership unavailable: "+err.Error())
+				return
+			}
+			if admitted {
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
 		}
 	}
 	// A denied BROWSER gets the login page: the redirect must be ABSOLUTE —
@@ -613,6 +821,91 @@ func ofStr(s *string) string {
 	return *s
 }
 
+// memberAdmits is the app-aware gate: WHICH app did this request hit, and
+// does the session's identity reach it?
+//   - a device session: the app is on the link's static list (the invite
+//     bound the apps at mint; there is no all-apps link),
+//   - a Nostr session: the pubkey is IN the app's channel (IsMemberAuth —
+//     the channel roster IS the ACL; revocation is a roster change landing
+//     within the cache TTL),
+//   - a host with no app record: fail closed (the vhost template gates apps
+//     only; a hand-added gate on a non-app host admits nobody).
+func (s *Server) memberAdmits(info MemberInfo, r *http.Request) (bool, error) {
+	host := r.Header.Get("X-Original-Host")
+	if host == "" {
+		host = r.Header.Get("X-Forwarded-Host")
+	}
+	if host == "" {
+		return false, nil
+	}
+	rec, ok := s.appByHost(host)
+	if !ok {
+		return false, nil
+	}
+	if info.Device {
+		for _, name := range info.Apps {
+			if name == rec.Name {
+				return true, nil
+			}
+		}
+		return false, nil
+	}
+	if info.Pubkey == "" {
+		return false, nil
+	}
+	return s.memberChannelAllowed(info.Pubkey, rec.Group)
+}
+
+// appByHost resolves the forwarded host to an app record. The registry is
+// read FRESH per verify — expose writes land in the separate agent-tools
+// process, and one small JSON read per gated request is the price of never
+// serving from a stale ACL.
+func (s *Server) appByHost(host string) (agenttools.AppRecord, bool) {
+	if s.AgentToolsDir == "" {
+		return agenttools.AppRecord{}, false
+	}
+	apps, err := agenttools.OpenApps(filepath.Join(s.AgentToolsDir, "apps.json"))
+	if err != nil {
+		return agenttools.AppRecord{}, false
+	}
+	for _, rec := range apps.List() {
+		// The DERIVED hostname (name + the world domain) is authoritative —
+		// rows written by the released per-app shape carry a stale stored
+		// FQDN; the edge renders the derived one, so the gate must match it.
+		if rec.Name+"."+s.memberDomain() == host {
+			return rec, true
+		}
+	}
+	return agenttools.AppRecord{}, false
+}
+
+// memberChannelAllowed is the app gate's channel read: is the pubkey in the
+// app's relay channel — the SAME channel-scoped read the runner grants use,
+// cached with the same outage discipline as the community check (re-check
+// every memberCheckTTL; a relay outage keeps the last answer for
+// memberCheckGrace; an uncached pubkey on a dead relay fails CLOSED).
+func (s *Server) memberChannelAllowed(pubkey, groupID string) (bool, error) {
+	return s.cachedMembership("channel|"+groupID+"|"+pubkey, func() (bool, error) {
+		_ = s.Store.Reload()
+		snap := s.Store.Snapshot()
+		dial, auth := s.relayDialAuth(snap)
+		if dial == "" {
+			return false, errRelayUnknown
+		}
+		rpk := ""
+		if snap.RelayPubkey != nil {
+			rpk = *snap.RelayPubkey
+		}
+		if rpk == "" && s.Builder != nil {
+			rpk = s.Builder.RelayPK
+		}
+		if rpk == "" {
+			return false, errRelayUnknown
+		}
+		return relay.IsMemberAuth(dial, auth, s.ConsoleSecret, groupID, pubkey)
+	})
+}
+
 // gateNext composes the app URL a denied browser should return to after
 // login: the forwarded proto/host/uri headers (Caddy's forward_auth passes
 // the original request's headers; the auth subrequest's own URI is /auth/verify
@@ -620,15 +913,22 @@ func ofStr(s *string) string {
 // browser falls back to the login page alone. Same-site validated by
 // safeNext before use.
 func (s *Server) gateNext(r *http.Request) string {
-	host := r.Header.Get("X-Forwarded-Host")
+	// The ORIGINALS the vhost template forwards explicitly (the gate controls
+	// both ends), falling back to Caddy's X-Forwarded-* when present. The
+	// scheme is https — the edge is TLS-terminated; there is no plain-HTTP
+	// path to the gate.
+	host := r.Header.Get("X-Original-Host")
+	if host == "" {
+		host = r.Header.Get("X-Forwarded-Host")
+	}
 	if host == "" {
 		return ""
 	}
-	proto := r.Header.Get("X-Forwarded-Proto")
-	if proto == "" {
-		proto = "https"
+	uri := r.Header.Get("X-Original-Uri")
+	if uri == "" {
+		uri = r.Header.Get("X-Forwarded-Uri")
 	}
-	return s.safeNext(proto + "://" + host + r.Header.Get("X-Forwarded-Uri"))
+	return s.safeNext("https://" + host + uri)
 }
 
 func (s *Server) memberLogout(w http.ResponseWriter, r *http.Request) {
@@ -666,7 +966,8 @@ func (s *Server) membersList(w http.ResponseWriter, r *http.Request) {
 }
 
 type memberInviteReq struct {
-	Name string `json:"name"`
+	Name string   `json:"name"`
+	Apps []string `json:"apps"`
 }
 
 func (s *Server) memberInviteMint(w http.ResponseWriter, r *http.Request) {
@@ -688,8 +989,27 @@ func (s *Server) memberInviteMint(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "an invite needs a name (who the link is for)")
 		return
 	}
+	// The link opens NAMED apps, at least one — there is no all-apps link
+	// (access comes from channels and named apps, never a blank check). Each
+	// name must be a REGISTERED app: a typo would be a dead link, not a
+	// narrower one.
+	if len(req.Apps) == 0 {
+		writeErr(w, http.StatusBadRequest, "an invite opens at least one app (pick from /api/apps)")
+		return
+	}
+	regApps, err := agenttools.OpenApps(filepath.Join(s.AgentToolsDir, "apps.json"))
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	for _, name := range req.Apps {
+		if _, ok := regApps.Get(name); !ok {
+			writeErr(w, http.StatusBadRequest, "unknown app "+name+" — pick from /api/apps")
+			return
+		}
+	}
 	name := strings.TrimSpace(req.Name)
-	token, err := s.Members.IssueInvite(name, operator)
+	token, err := s.Members.IssueInvite(name, operator, req.Apps)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -697,6 +1017,7 @@ func (s *Server) memberInviteMint(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"link":    "/auth/link/" + token,
 		"name":    name,
+		"apps":    req.Apps,
 		"expires": now().Add(inviteTTL).Unix(),
 	})
 }
