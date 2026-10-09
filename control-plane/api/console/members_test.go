@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"testing"
@@ -121,7 +122,56 @@ func pkOf(t *testing.T, sec []byte) string {
 func fakeRelayQuery(t *testing.T, events []map[string]interface{}) *httptest.Server {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode(events)
+		// Serve BY FILTER: a real relay matches kinds + the #h/#p tag sets;
+		// dumping everything would make any channel query answer "member"
+		// and the negative half of every channel test meaningless.
+		var filters []map[string]interface{}
+		_ = json.NewDecoder(r.Body).Decode(&filters)
+		matched := []map[string]interface{}{}
+		for _, e := range events {
+			ok := len(filters) == 0
+			for _, f := range filters {
+				ok = true
+				if kinds, okk := f["kinds"].([]interface{}); okk {
+					want := false
+					for _, k := range kinds {
+						if fk, _ := k.(float64); fk == float64(e["kind"].(uint32)) {
+							want = true
+						}
+					}
+					if !want {
+						ok = false
+					}
+				}
+				for tag, vals := range map[string]bool{"#h": true, "#p": true} {
+					wantVals, hasTag := f[tag].([]interface{})
+					if !hasTag {
+						continue
+					}
+					evTags, _ := e["tags"].([][]string)
+					hit := false
+					for _, vt := range wantVals {
+						v, _ := vt.(string)
+						for _, t2 := range evTags {
+							if t2[0] == tag[1:] && t2[1] == v {
+								hit = true
+							}
+						}
+					}
+					if !hit {
+						ok = false
+					}
+					_ = vals
+				}
+				if !ok {
+					break
+				}
+			}
+			if ok {
+				matched = append(matched, e)
+			}
+		}
+		_ = json.NewEncoder(w).Encode(matched)
 	}))
 	t.Cleanup(srv.Close)
 	return srv
@@ -903,11 +953,11 @@ func TestJobsServesTheMemberCookieSession(t *testing.T) {
 // names + FQDNs only — no targets, no owners.
 func TestMyAppsPerSessionKind(t *testing.T) {
 	f := newMemberFixture(t)
+	// yuvomi is already exposed by the fixture (testChannelID, the sibling
+	// shape) — the member's channel admits it. One more app on a channel
+	// they're NOT in completes the matrix.
 	apps, err := agenttools.OpenApps(filepath.Join(f.s.AgentToolsDir, "apps.json"))
 	if err != nil {
-		t.Fatal(err)
-	}
-	if err := apps.Expose(agenttools.AppRecord{Name: "yuvomi", FQDN: "yuvomi.example.com", Target: "10.0.0.9:80", Group: testChannelID, Owner: "somebody", Visibility: "family"}); err != nil {
 		t.Fatal(err)
 	}
 	if err := apps.Expose(agenttools.AppRecord{Name: "other", FQDN: "other.example.com", Target: "10.0.0.10:80", Group: "another-channel", Owner: "somebody", Visibility: "family"}); err != nil {
@@ -950,7 +1000,9 @@ func TestMyAppsPerSessionKind(t *testing.T) {
 	if rec.Code != 200 {
 		t.Fatalf("the operator portal: %d %s", rec.Code, rec.Body.String())
 	}
-	if got := names(rec); len(got) != 2 || got[0] != "other" || got[1] == "other" && got[1] != "yuvomi" {
+	got := names(rec)
+	sort.Strings(got)
+	if len(got) != 2 || got[0] != "other" || got[1] != "yuvomi" {
 		t.Fatalf("the operator sees both: %v", got)
 	}
 	if body := rec.Body.String(); strings.Contains(body, "10.0.0.9") || strings.Contains(body, "somebody") {

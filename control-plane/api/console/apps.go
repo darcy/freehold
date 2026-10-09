@@ -77,11 +77,11 @@ func (s *Server) myApps(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, statusFor(err), err.Error())
 		return
 	}
-	if role != RoleOperator && s.Members == nil {
-		// A member-role console session on a tier-less console: nothing to
-		// admit against — the empty launcher is the honest answer.
-		writeJSON(w, http.StatusOK, map[string]interface{}{"apps": []map[string]interface{}{}})
-		return
+	if role == "" {
+		// The no-auth posture (the loopback bind, auth off): sessionFor
+		// hands back the empty session — it sees everything, same as every
+		// other surface here.
+		role = RoleOperator
 	}
 	apps, err := agenttools.OpenApps(filepath.Join(s.AgentToolsDir, "apps.json"))
 	if err != nil {
