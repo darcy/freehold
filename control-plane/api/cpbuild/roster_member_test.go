@@ -136,7 +136,18 @@ func TestMemberAgentToolsRoster(t *testing.T) {
 
 	spec := &Spec{StateDir: filepath.Join(root, "control-plane"), RelayURL: f.srv.URL}
 
-	pubA, pubB := strings.Repeat("a", 64), strings.Repeat("b", 64)
+	// The created agents' identity dirs — create members the minted pubkey,
+	// remove reads it back from here.
+	dirA := filepath.Join(spec.agentIdentityDir(), "agents", "freehold")
+	dirB := filepath.Join(spec.agentIdentityDir(), "agents", "network")
+	pubA, err := agent.EnsureIdentity(dirA)
+	if err != nil {
+		t.Fatalf("ensure freehold identity: %v", err)
+	}
+	pubB, err := agent.EnsureIdentity(dirB)
+	if err != nil {
+		t.Fatalf("ensure network identity: %v", err)
+	}
 	for _, m := range []struct{ name, pub string }{
 		{"freehold", pubA}, // the CPA
 		{"network", pubB},  // a department — the membering is not CPA-only
@@ -169,8 +180,35 @@ func TestMemberAgentToolsRoster(t *testing.T) {
 		t.Fatalf("re-member: %v", err)
 	}
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	if len(f.events) != 2 {
 		t.Errorf("re-member re-put: %d events, want 2 (already a member)", len(f.events))
+	}
+	f.mu.Unlock()
+
+	// The revoke leg: a removed agent's seat is published as a remove-user,
+	// signed by the agent-tools identity, and the roster read flips.
+	seat, err := spec.removeAgentToolsRoster("network")
+	if err != nil {
+		t.Fatalf("remove roster seat: %v", err)
+	}
+	f.mu.Lock()
+	removes := 0
+	for _, ev := range f.events {
+		if uint32(ev["kind"].(float64)) == wire.RemoveUser {
+			removes++
+			if ev["pubkey"] != atPub {
+				t.Errorf("remove-user signed by %v, want the agent-tools identity", ev["pubkey"])
+			}
+			if evTag(ev, "p") != pubB {
+				t.Errorf("remove-user p tag = %v, want the removed agent", evTag(ev, "p"))
+			}
+		}
+	}
+	f.mu.Unlock()
+	if removes != 1 {
+		t.Fatalf("got %d remove-user events, want 1", removes)
+	}
+	if !strings.Contains(seat, "verified") {
+		t.Errorf("seat report %q — the read-back should verify the removal", seat)
 	}
 }
