@@ -886,8 +886,10 @@ func (s *Spec) deployAgentTools() error {
 		return err
 	}
 	relayDial := config.RelayLanDial(s.RelayHost)
-	// Seed the server's channel. The roster is the AGENT surface: the CPA is
-	// membered by this server's own identity (BuildCreateAgentFn). The
+	// Seed the server's channel. The roster is the AGENT surface: every
+	// created agent is membered by this server's own identity
+	// (BuildCreateAgentFn — memberAgentToolsRoster), and a removed agent's
+	// seat is revoked before its row drops. The
 	// console's driving identity (s.Audience) was deliberately never seeded —
 	// the console never calls this MCP (it reads the registry/facts files
 	// directly, and its world_migrate trigger is a signed local peer). The
