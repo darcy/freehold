@@ -30,10 +30,12 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
+	"freehold/contract/crypto"
 	"freehold/contract/relay"
 	"freehold/control-plane/api/agent"
 	"freehold/control-plane/api/agenttools"
@@ -293,16 +295,51 @@ func (s *Spec) appDNSEnsure(rec agenttools.AppRecord) (bool, error) {
 	return true, nil
 }
 
+// pangolinCreds opens the world's Pangolin credential — the instance's
+// integration address + the root key, sealed to the console identity at
+// world-secrets/pangolin.json (the DNS-cred record shape; the coords carry
+// no credential). Written by the box hand-off (or the operator, via the
+// console's enc pubkey).
+func (s *Spec) pangolinCreds() (base, key string, err error) {
+	root := s.consoleStateRoot()
+	path := filepath.Join(root, "world-secrets", "pangolin.json")
+	if !cert.CredExists(path) {
+		return "", "", fmt.Errorf("no pangolin credential on the CP at %s — seal PANGOLIN_BASE + PANGOLIN_KEY to the console identity (the DNS-cred record shape)", path)
+	}
+	secret, err := s.consoleEncSecretAt(root)
+	if err != nil {
+		return "", "", err
+	}
+	open := func(sec, aad, blob []byte) ([]byte, error) { return crypto.Open(sec, aad, blob) }
+	_, env, err := cert.LoadCreds(path, open, secret)
+	if err != nil {
+		return "", "", fmt.Errorf("pangolin credential: %w", err)
+	}
+	return env["PANGOLIN_BASE"], env["PANGOLIN_KEY"], nil
+}
+
 // pangolinEnsure puts one app behind the world's Pangolin public path
 // (docs/NETWORK.md): the gateway's Newt site ensured, the resource found or
 // created (subdomain on the base domain, mode http — the per-host cert is
 // Pangolin's Traefik's business, HTTP-01), and the target pointed at the
 // app's freehold-subnet address, reachable from the gateway where Newt
-// dials out. Idempotent — the expose verb and the build tail both call it.
+// dials out. LAN-visibility records are skipped — their point is that the
+// name resolves only inside the world; a public Pangolin resource would
+// contradict it. A freshly created site's one-time Newt secret is sealed to
+// the console identity immediately (world-secrets/pangolin-newt.json — the
+// gateway stage opens it; losing it burns the identity). Idempotent — the
+// expose verb and the build tail both call it.
 func (s *Spec) pangolinEnsure(rec agenttools.AppRecord) error {
 	p := s.Pangolin
-	if p == nil || p.Base == "" || p.Key == "" || p.Org == "" || p.Site == "" || p.Domain == "" {
-		return fmt.Errorf("pangolin: the world coords lack the pangolin public path (base/key/org/site/domain)")
+	if p == nil || p.Org == "" || p.Site == "" || p.Domain == "" {
+		return fmt.Errorf("pangolin: the world coords lack the pangolin public path (org/site/domain)")
+	}
+	if rec.Visibility == agenttools.VisibilityLAN {
+		return nil
+	}
+	base, key, err := s.pangolinCreds()
+	if err != nil {
+		return err
 	}
 	host, portStr, err := net.SplitHostPort(rec.Target)
 	if err != nil {
@@ -312,10 +349,15 @@ func (s *Spec) pangolinEnsure(rec agenttools.AppRecord) error {
 	if err != nil {
 		return fmt.Errorf("pangolin: target %q port: %w", rec.Target, err)
 	}
-	cl := &pangolin.Client{Base: p.Base, Key: p.Key}
-	site, _, err := cl.EnsureSite(context.Background(), p.Org, p.Site)
+	cl := &pangolin.Client{Base: base, Key: key}
+	site, created, err := cl.EnsureSite(context.Background(), p.Org, p.Site)
 	if err != nil {
 		return fmt.Errorf("pangolin: site %q: %w", p.Site, err)
+	}
+	if created {
+		if err := s.sealNewtIdentity(site); err != nil {
+			return fmt.Errorf("pangolin: site %q was CREATED and its one-time Newt secret could not be sealed — the identity is unusable until it is (remove the site on the instance and re-run): %w", p.Site, err)
+		}
 	}
 	domainID, err := cl.EnsureDomain(context.Background(), p.Org, p.Domain)
 	if err != nil {
@@ -332,6 +374,28 @@ func (s *Spec) pangolinEnsure(rec agenttools.AppRecord) error {
 		fmt.Fprintf(os.Stderr, "pangolin: resource %s created (%s)\n", rec.Name, res.FullDomain)
 	}
 	return nil
+}
+
+// sealNewtIdentity writes a created site's one-time Newt identity sealed to
+// the console identity — the SAME audience the DNS creds use, so the build
+// tail (console-side, in either process) can open it for the gateway stage.
+func (s *Spec) sealNewtIdentity(site pangolin.Site) error {
+	root := s.consoleStateRoot()
+	secret, err := s.consoleEncSecretAt(root)
+	if err != nil {
+		return err
+	}
+	pub, err := crypto.X25519PublicKey(secret)
+	if err != nil {
+		return err
+	}
+	return cert.SaveCreds(
+		filepath.Join(root, "world-secrets", "pangolin-newt.json"),
+		"pangolin-newt",
+		map[string]string{"NEWT_ID": site.NewtID, "NEWT_SECRET": site.NewtSecret},
+		func(recipientPub, aad, plain []byte) ([]byte, error) { return crypto.Seal(recipientPub, aad, plain) },
+		pub, "pangolin-newt",
+	)
 }
 
 // renderCaddyfile renders the CURRENT edge config from the world coords +
