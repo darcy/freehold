@@ -2535,6 +2535,12 @@ func mergeWorldConfig(prior, next string) string {
 	if n.RelayGW == "" {
 		n.RelayGW = p.RelayGW
 	}
+	if n.Pangolin == nil {
+		// The public path survives updates: the next render never silently
+		// re-points the apps' A records at the proxy (the coords carry no
+		// credential — the sealed pangolin.json is untouched by this).
+		n.Pangolin = p.Pangolin
+	}
 	b, err := json.Marshal(n)
 	if err != nil {
 		return next
@@ -2703,6 +2709,7 @@ func (e *Engine) worldConfigJSON(cfg *config.Config) string {
 		CpaName:        cpaNameOrDefault(e.F.AgentName),
 		OwnerPub:       e.F.OperatorPubkey,
 		OperatorName:   firstNonBlank(e.F.OperatorName, cfg.OperatorName),
+		Pangolin:       cfg.Pangolin,
 		LitellmBaseURL: cfg.Litellm.URL,
 		// The agent-tools server's reachable URL, NOT the console's: this is the
 		// `--self-url` the server reports AND the URL the CPA pod curls its
