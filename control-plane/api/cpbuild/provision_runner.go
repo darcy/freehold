@@ -160,7 +160,11 @@ func BuildProvisionRunner(spec *Spec, reg *agenttools.Registry) agent.ProvisionR
 		// from the stored zones — today's AND any future one).
 		for _, static := range capabilityRunners() {
 			if static.name == name {
-				return "", fmt.Errorf("provision_runner %s: a build-time capability runner is operator-owned — provision a NEW runner instead (never widen one)", name)
+				steer := ""
+				if static.kind == "kubernetes" {
+					steer = " — for kube access, provision a SLOT (kube-api-<slot>, kind=kubernetes): Compute carves the namespace through kube-api-root, and this flow seals the slot's ServiceAccount to the new door"
+				}
+				return "", fmt.Errorf("provision_runner %s: a build-time capability runner is operator-owned — provision a NEW runner instead (never widen one)%s", name, steer)
 			}
 		}
 		if strings.HasPrefix(name, "cloudflare-api-") {

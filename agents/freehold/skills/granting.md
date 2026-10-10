@@ -158,6 +158,11 @@ Role — never cluster scope. The shape:
   their identity Secrets). One slot per
   namespace — a second agent needing the same namespace shares the door via
   `grant_to`, it does not re-slice it.
+- **`grant_to` is the agent whose workloads live in the namespace** — the
+  service's owner (the agent that asked to host it), never the department
+  that carved the slot: Compute's part ENDS at the carve. The department that
+  owns the cluster does not own what runs on it — deploying the service is
+  the granting skill's service-lifecycle rule, not Compute's lane.
 - **The carve is Compute's audited leg — in conversation, before you call the
   tool.** Ask Compute to apply the slot manifest through `kube-api-root`
   (`kubectl apply -f -`): a Namespace, a ServiceAccount `<ns>-door`, a Role of
