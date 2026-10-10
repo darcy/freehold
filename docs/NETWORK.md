@@ -149,9 +149,9 @@ The gateway has TWO shapes, one per substrate:
     verbs drive the REST integration server instead (`server.integration_port`, default
     3003, enabled by `flags.enable_integration_api`): a Bearer root key
     (`apiKeyId.secret`, minted from a server-admin dashboard session, actions granted
-    per key) calling `PUT /org`, `PUT /org/:id/site` (the world's Newt site — the
-    secret shows once and lands in the CP's secrets), `PUT /org/:id/site/:siteId/resource`
-    (subdomain + base domain + mode http) and `PUT /resource/:id/target`
+    per key) calling `PUT /v1/org`, `PUT /v1/org/:id/site` (the world's Newt site — the
+    secret shows once and lands in the CP's secrets), `PUT /v1/org/:id/site/:siteId/resource`
+    (subdomain + base domain + mode http) and `PUT /v1/resource/:id/target`
     (siteId + the app's freehold-subnet ip:port, reachable from the gateway where Newt
     dials out). The client lives at `platform/services/pangolin`. The member gate on this
     path is Pangolin's own resource auth (its badger middleware) — the freehold verify
