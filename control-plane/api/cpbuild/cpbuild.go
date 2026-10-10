@@ -2879,32 +2879,13 @@ func BuildCreateAgentFn(spec *Spec) agent.CreateAgentFn {
 		if err := spec.run(manifest, 420); err != nil {
 			return "", fmt.Errorf("%s pod apply: %w", name, err)
 		}
-		// The CPA is the server's first-class caller: member it into this
-		// server's own roster (the channel owner is this server, signing the
-		// put-user with its secret) so its harness (via the mcp stdio bridge)
-		// is authorized to call create/grant/manage — the same audited path the
-		// build dogfoods. Idempotent on re-deploy.
-		if name == spec.CpaName {
-			authURL := spec.RelayAuthURL
-			if authURL == "" {
-				authURL = spec.RelayURL
-			}
-			// The agent-tools roster channel is OWNED by the agent-tools server,
-			// so its put-user must be signed by THAT identity, not the console's
-			// (the relay rejects a non-owner with "not a channel member"). The
-			// identity lives on the same CP plane, so the console executor reads
-			// it and signs; inside the agent-tools process it is the same key.
-			sec, self := spec.Sec, spec.Audience
-			if id, err := identity.Load(spec.agentToolsRoot()); err == nil {
-				if s2, derr := hex.DecodeString(id.NostrSecretHex); derr == nil {
-					if pk, perr := id.NostrPubkeyHex(); perr == nil {
-						sec, self = s2, pk
-					}
-				}
-			}
-			if err := relay.PutUserAuth(spec.relayDial(), authURL, sec, self, pub); err != nil {
-				return "", fmt.Errorf("member CPA into the agent-tools roster: %w", err)
-			}
+		// EVERY created agent is an agent-tools caller — the roster is the
+		// AGENT surface, and every pod's stdio bridge (audience = this
+		// server's pubkey) speaks for the departments' own capability verbs
+		// (Network's expose_app) and every agent's job toolset just as it does
+		// for the CPA's create/grant/manage.
+		if err := spec.memberAgentToolsRoster(name, pub); err != nil {
+			return "", err
 		}
 		// The one-time #freehold welcome — the operator's first-run surface now
 		// that the desktop app's own onboarding is skipped (stageOperatorProfile).
@@ -2916,6 +2897,40 @@ func BuildCreateAgentFn(spec *Spec) agent.CreateAgentFn {
 		}
 		return pub, nil
 	}
+}
+
+// memberAgentToolsRoster members a created agent into the agent-tools
+// server's own roster channel — the AGENT surface. Every created agent is a
+// caller: the CPA's create/grant/manage, the departments' capability verbs
+// (Network's expose_app), and every pod's job toolset ride the same stdio
+// bridge whose audience is this server's pubkey, and a non-member's calls are
+// refused. The roster channel is OWNED by the agent-tools server, so the
+// put-user must be signed by THAT identity, not the console's (the relay
+// rejects a non-owner with "not a channel member"); the identity lives on the
+// same CP plane, so the console executor reads it and signs — inside the
+// agent-tools process it is the serve's own key. Guarded by IsMemberAuth:
+// membership writes are state-idempotent but NOT event-idempotent, and the
+// reconcile re-runs this create on every build.
+func (s *Spec) memberAgentToolsRoster(name, pub string) error {
+	authURL := s.RelayAuthURL
+	if authURL == "" {
+		authURL = s.RelayURL
+	}
+	sec, self := s.Sec, s.Audience
+	if id, err := identity.Load(s.agentToolsRoot()); err == nil {
+		if s2, derr := hex.DecodeString(id.NostrSecretHex); derr == nil {
+			if pk, perr := id.NostrPubkeyHex(); perr == nil {
+				sec, self = s2, pk
+			}
+		}
+	}
+	if member, merr := relay.IsMemberAuth(s.relayDial(), authURL, sec, relay.RunnerChannelID(self), pub); merr == nil && member {
+		return nil
+	}
+	if err := relay.PutUserAuth(s.relayDial(), authURL, sec, self, pub); err != nil {
+		return fmt.Errorf("member %s into the agent-tools roster: %w", name, err)
+	}
+	return nil
 }
 
 // channelNames normalizes a requested channel list: blank entries dropped,

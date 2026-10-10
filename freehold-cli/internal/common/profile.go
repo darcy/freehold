@@ -54,22 +54,28 @@ func FreeholdHome() string { return config.StateDir() }
 
 // ResolveExecProfile pins the tenant context for exec: an explicit --config
 // wins; otherwise the single registered profile is used implicitly; multiple
-// profiles without --config is ambiguous and fails closed.
+// profiles without --config is ambiguous and fails closed. The pinned
+// profile's own [runner] addr becomes the default --addr: the flag's static
+// default is a single-world guess, and on a multi-profile box it dials
+// ANOTHER world's runner (its grants deny the caller — or worse, if they
+// don't, it runs the command against the wrong world).
 func ResolveExecProfile(cmd *cobra.Command) error {
 	if cmd.Flags().Changed("config") {
 		p, _ := cmd.Flags().GetString("config")
 		config.SetCurrent(config.ProfileForConfigPath(p))
-		return nil
-	}
-	if l := config.List(); len(l) == 1 {
+	} else if l := config.List(); len(l) == 1 {
 		config.SetCurrent(l[0])
-		return nil
 	} else if len(l) > 1 {
 		names := make([]string, 0, len(l))
 		for _, p := range l {
 			names = append(names, p.Name)
 		}
 		return fmt.Errorf("multiple tenant profiles (%s) — pass --config <profile config> to pick one", strings.Join(names, ", "))
+	}
+	if !cmd.Flags().Changed("addr") {
+		if cfg, err := config.Load(config.ConfigPath()); err == nil && cfg != nil && cfg.Runner.Addr != "" {
+			_ = cmd.Flags().Set("addr", cfg.Runner.Addr)
+		}
 	}
 	return nil
 }
