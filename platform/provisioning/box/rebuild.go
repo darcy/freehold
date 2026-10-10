@@ -54,32 +54,32 @@ type Flags struct {
 	Name       string
 	// LocalPort is the box-side runner MCP loopback port (--local-port); Addr
 	// is derived 127.0.0.1:<LocalPort> at the composition roots.
-	LocalPort          uint32
-	Addr               string
-	Target             string
-	Host               string
-	Domain             string
-	RelayDomain        string
-	CpDomain           string
-	ProxyIP            string
-	RelayIP            string
-	CpIP               string
-	OperatorPubkey     string
-	OperatorIdentity   string
-	AgentName          string
-	SizeGB             uint64
-	PoolSizeGB         uint64
-	ThinPool           string
-	PlanePool          string // select a detected backend by name (VG or zpool)
-	ConfirmSharedPool  bool   // headless consent to share a pool with live guests
-	EraseFreehold      bool   // headless consent to erase a detected freehold plane
-	NoK3s              bool
-	NoLitellm          bool
-	RootfsGB           uint32
-	MemoryMB           uint32
-	RelayGw            string
-	StorageName        string
-	Bridge             string
+	LocalPort         uint32
+	Addr              string
+	Target            string
+	Host              string
+	Domain            string
+	RelayDomain       string
+	CpDomain          string
+	ProxyIP           string
+	RelayIP           string
+	CpIP              string
+	OperatorPubkey    string
+	OperatorIdentity  string
+	AgentName         string
+	SizeGB            uint64
+	PoolSizeGB        uint64
+	ThinPool          string
+	PlanePool         string // select a detected backend by name (VG or zpool)
+	ConfirmSharedPool bool   // headless consent to share a pool with live guests
+	EraseFreehold     bool   // headless consent to erase a detected freehold plane
+	NoK3s             bool
+	NoLitellm         bool
+	RootfsGB          uint32
+	MemoryMB          uint32
+	RelayGw           string
+	StorageName       string
+	Bridge            string
 	// The freehold-subnet gateway (docs/NETWORK.md): GatewayCIDR is
 	// the internal subnet ("" = no gateway — the flat-LAN world), GatewayVlan
 	// the in-host bridge tag. When set, relay/cp/k3s are born static on the
