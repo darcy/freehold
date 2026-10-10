@@ -168,10 +168,16 @@ func (c *Client) CreateResource(ctx context.Context, orgID string, siteID int, n
 	}, &r); err != nil {
 		return Resource{}, err
 	}
-	if err := c.do(ctx, http.MethodPost, fmt.Sprintf("/v1/resource/%d", r.ResourceID), map[string]interface{}{"sso": true}, nil); err != nil {
-		return Resource{}, fmt.Errorf("sso gate on resource %d: %w", r.ResourceID, err)
+	if err := c.requireSSO(ctx, r.ResourceID); err != nil {
+		return Resource{}, err
 	}
 	return r, nil
+}
+
+// requireSSO sets the resource's sso flag — the gate that keeps nothing it
+// fronts publicly open by default.
+func (c *Client) requireSSO(ctx context.Context, resourceID int) error {
+	return c.do(ctx, http.MethodPost, fmt.Sprintf("/v1/resource/%d", resourceID), map[string]interface{}{"sso": true}, nil)
 }
 
 // MintAccessToken mints a resource access token — the credential badger
@@ -277,7 +283,9 @@ func (c *Client) EnsureResource(ctx context.Context, orgID string, siteID int, s
 	want := subdomain + "." + baseDomain
 	for _, r := range resources {
 		if r.FullDomain == want {
-			return r, false, nil
+			// Re-assert the SSO gate idempotently: a create whose gate
+			// POST failed must not stay publicly open on later ensures.
+			return r, false, c.requireSSO(ctx, r.ResourceID)
 		}
 	}
 	r, err := c.CreateResource(ctx, orgID, siteID, subdomain, subdomain, domainID)
