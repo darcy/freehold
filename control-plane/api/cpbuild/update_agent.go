@@ -263,7 +263,14 @@ func BuildRemoveAgentFn(spec *Spec) agent.RemoveAgentFn {
 		if err := spec.run(agent.AgentRetireScript(spec.K3sVmid, name), 120); err != nil {
 			return "", fmt.Errorf("%s %s: retiring the pod FAILED (%v) — the registry row is untouched; its gateway key is already revoked, and a later reconcile mints fresh and heals the pod's Secret; fix the k3s guest and retry, or drop the row from the console if the pod is already gone", verb, name, err)
 		}
-		return fmt.Sprintf("%s %s: pod %q retired (pod, service, prompt configmap, identity secret); the durable workspace dir %s is kept — it is data", verb, name, agent.PodName(name), agent.AgentWorkspaceDir(agent.PodName(name))), nil
+		// The roster seat is revoked BEFORE the row drops (the row drop happens
+		// Console-side in ManageAgent): a seat without a row reads as an
+		// operator-class caller — the escalation this closes.
+		seat, err := spec.removeAgentToolsRoster(name)
+		if err != nil {
+			return "", fmt.Errorf("%s %s: %w", verb, name, err)
+		}
+		return fmt.Sprintf("%s %s: pod %q retired (pod, service, prompt configmap, identity secret); %s; the durable workspace dir %s is kept — it is data", verb, name, agent.PodName(name), seat, agent.AgentWorkspaceDir(agent.PodName(name))), nil
 	}
 }
 

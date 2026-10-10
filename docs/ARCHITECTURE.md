@@ -216,8 +216,9 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     `/api/world` (consumed by the TUI and `freehold status`), and the
     `/mcp world_status` tool shares that same assembly for direct MCP callers —
     so the two surfaces can never diverge. The toolset's callers are the
-    relay-roster members (the AGENT surface — the CPA, membered at create)
-    plus two signature-verified LOCAL PEERS that are never roster members:
+    relay-roster members (the AGENT surface — every created agent, membered
+    at create and unmembered when its row drops) plus two signature-verified
+    LOCAL PEERS that are never roster members:
     the console (`/api/world-migrate` proxies into the serve — the registry
     lock lives there — so the console peer may call `world_migrate` only) and
     the operator (`--owner-pubkey`, full operator scope as break-glass, which

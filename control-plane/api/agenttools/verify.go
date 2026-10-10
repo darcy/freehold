@@ -9,9 +9,10 @@
 // `audience|ts|raw_body`, BIP-340, granted-pubkey check, 60s window. The
 // audience is this server's own pubkey (the CP's agent-tools identity). The
 // grants list is the relay roster of its private channel — the AGENT surface
-// (the CPA, membered at create). The CP's own identities are NOT members:
-// the console (world_migrate proxy) and the operator (break-glass) are local
-// peers verified by signature alone.
+// (every created agent, membered at create; a removed agent's seat is
+// revoked before its registry row drops). The CP's own identities are NOT
+// members: the console (world_migrate proxy) and the operator (break-glass)
+// are local peers verified by signature alone.
 package agenttools
 
 import (

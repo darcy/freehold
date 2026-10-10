@@ -886,8 +886,10 @@ func (s *Spec) deployAgentTools() error {
 		return err
 	}
 	relayDial := config.RelayLanDial(s.RelayHost)
-	// Seed the server's channel. The roster is the AGENT surface: the CPA is
-	// membered by this server's own identity (BuildCreateAgentFn). The
+	// Seed the server's channel. The roster is the AGENT surface: every
+	// created agent is membered by this server's own identity
+	// (BuildCreateAgentFn — memberAgentToolsRoster), and a removed agent's
+	// seat is revoked before its row drops. The
 	// console's driving identity (s.Audience) was deliberately never seeded —
 	// the console never calls this MCP (it reads the registry/facts files
 	// directly, and its world_migrate trigger is a signed local peer). The
@@ -2879,32 +2881,13 @@ func BuildCreateAgentFn(spec *Spec) agent.CreateAgentFn {
 		if err := spec.run(manifest, 420); err != nil {
 			return "", fmt.Errorf("%s pod apply: %w", name, err)
 		}
-		// The CPA is the server's first-class caller: member it into this
-		// server's own roster (the channel owner is this server, signing the
-		// put-user with its secret) so its harness (via the mcp stdio bridge)
-		// is authorized to call create/grant/manage — the same audited path the
-		// build dogfoods. Idempotent on re-deploy.
-		if name == spec.CpaName {
-			authURL := spec.RelayAuthURL
-			if authURL == "" {
-				authURL = spec.RelayURL
-			}
-			// The agent-tools roster channel is OWNED by the agent-tools server,
-			// so its put-user must be signed by THAT identity, not the console's
-			// (the relay rejects a non-owner with "not a channel member"). The
-			// identity lives on the same CP plane, so the console executor reads
-			// it and signs; inside the agent-tools process it is the same key.
-			sec, self := spec.Sec, spec.Audience
-			if id, err := identity.Load(spec.agentToolsRoot()); err == nil {
-				if s2, derr := hex.DecodeString(id.NostrSecretHex); derr == nil {
-					if pk, perr := id.NostrPubkeyHex(); perr == nil {
-						sec, self = s2, pk
-					}
-				}
-			}
-			if err := relay.PutUserAuth(spec.relayDial(), authURL, sec, self, pub); err != nil {
-				return "", fmt.Errorf("member CPA into the agent-tools roster: %w", err)
-			}
+		// EVERY created agent is an agent-tools caller — the roster is the
+		// AGENT surface, and every pod's stdio bridge (audience = this
+		// server's pubkey) speaks for the departments' own capability verbs
+		// (Network's expose_app) and every agent's job toolset just as it does
+		// for the CPA's create/grant/manage.
+		if err := spec.memberAgentToolsRoster(name, pub); err != nil {
+			return "", err
 		}
 		// The one-time #freehold welcome — the operator's first-run surface now
 		// that the desktop app's own onboarding is skipped (stageOperatorProfile).
@@ -2916,6 +2899,79 @@ func BuildCreateAgentFn(spec *Spec) agent.CreateAgentFn {
 		}
 		return pub, nil
 	}
+}
+
+// agentToolsSigner resolves the agent-tools server's own identity — the
+// roster channel's OWNER, so roster writes must be signed by it (the relay
+// rejects a non-owner's put/remove with "not a channel member"). The identity
+// lives on the same CP plane, so the console executor reads it and signs;
+// inside the agent-tools process it is the serve's own key. Falls back to the
+// console identity when the durable identity is unreadable.
+func (s *Spec) agentToolsSigner() (secret []byte, self string) {
+	sec, self := s.Sec, s.Audience
+	if id, err := identity.Load(s.agentToolsRoot()); err == nil {
+		if s2, derr := hex.DecodeString(id.NostrSecretHex); derr == nil {
+			if pk, perr := id.NostrPubkeyHex(); perr == nil {
+				sec, self = s2, pk
+			}
+		}
+	}
+	return sec, self
+}
+
+// memberAgentToolsRoster members a created agent into the agent-tools
+// server's own roster channel — the AGENT surface. Every created agent is a
+// caller: the CPA's create/grant/manage, the departments' capability verbs
+// (Network's expose_app), and every pod's job toolset ride the same stdio
+// bridge whose audience is this server's pubkey, and a non-member's calls are
+// refused. Guarded by IsMemberAuth: membership writes are state-idempotent
+// but NOT event-idempotent, and the reconcile re-runs this create on every
+// build.
+func (s *Spec) memberAgentToolsRoster(name, pub string) error {
+	authURL := s.RelayAuthURL
+	if authURL == "" {
+		authURL = s.RelayURL
+	}
+	sec, self := s.agentToolsSigner()
+	if member, merr := relay.IsMemberAuth(s.relayDial(), authURL, sec, relay.RunnerChannelID(self), pub); merr == nil && member {
+		return nil
+	}
+	if err := relay.PutUserAuth(s.relayDial(), authURL, sec, self, pub); err != nil {
+		return fmt.Errorf("member %s into the agent-tools roster: %w", name, err)
+	}
+	return nil
+}
+
+// removeAgentToolsRoster is the member leg's counterpart: a REMOVED agent
+// must lose its roster seat in the same breath its registry row drops. The
+// server scopes by registry row — a roster member with NO row reads as an
+// OPERATOR (the full toolset: world_exec, world_teardown, grant_agent) — so a
+// seat that outlives the row is a permanent escalation. Fails LOUD (the
+// caller keeps the row) when the remove cannot be published; a successful
+// publish reports its verified/unverified read-back like revoke_runner's
+// legs.
+func (s *Spec) removeAgentToolsRoster(name string) (string, error) {
+	dir := filepath.Join(s.agentIdentityDir(), "agents", sanitizeDir(name))
+	id, err := identity.Load(dir)
+	if err != nil {
+		return "", fmt.Errorf("read the removed agent's identity: %w", err)
+	}
+	pub, err := id.NostrPubkeyHex()
+	if err != nil {
+		return "", fmt.Errorf("read the removed agent's pubkey: %w", err)
+	}
+	authURL := s.RelayAuthURL
+	if authURL == "" {
+		authURL = s.RelayURL
+	}
+	sec, self := s.agentToolsSigner()
+	if err := relay.RemoveUserAuth(s.relayDial(), authURL, sec, self, pub); err != nil {
+		return "", fmt.Errorf("remove %s from the agent-tools roster FAILED (%v) — the registry row is untouched; retry once the relay answers (the key stays operator-class while it holds the seat)", name, err)
+	}
+	if member, merr := relay.IsMemberAuth(s.relayDial(), authURL, sec, relay.RunnerChannelID(self), pub); merr == nil && !member {
+		return fmt.Sprintf("%s's agent-tools roster seat removed (verified)", name), nil
+	}
+	return fmt.Sprintf("%s's agent-tools roster removal published (UNVERIFIED — the roster read failed; re-check before trusting the seat is gone)", name), nil
 }
 
 // channelNames normalizes a requested channel list: blank entries dropped,
