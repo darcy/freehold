@@ -299,8 +299,8 @@ shells (tmux/herdr panes included) via the `freehold` CLI / SSH / doors — the 
 Open limitations in the shipped code are current-state, not history, and each lives in the
 domain doc that owns it — update it there as gaps close or new ones surface:
 
-- **AI** (`docs/AI.md`): a wiped gateway Postgres invalidates the minted
-  agent keys; the sprig image is a moving
+- **AI** (`docs/AI.md`): a wiped gateway Postgres heals keys only on the next
+  reconcile; the sprig image is a moving
   tag; the memory attestation is unbounded in time; the respond-to allowlist is fixed at
   deploy; agents read the repo but cannot write it; AI hardware has no tooling.
 - **Network** (`docs/NETWORK.md`): the gateway host route is not persisted; no per-guest
@@ -308,7 +308,8 @@ domain doc that owns it — update it there as gaps close or new ones surface:
 - **Data** (`docs/DATA.md`): snapshot is Proxmox-only; backup has no restore
   verb; backups can outlive rotation.
 - **Compute** (`docs/COMPUTE.md`): no VPS provider; core guests carry no runner-client;
-  world-config degradation on update; terraform destroy can reach other worlds.
+  a k3s rebuild orphans the PVC data bindings (DB content lost until a re-bind
+  design lands); world-config degradation on update; terraform destroy can reach other worlds.
 - **Core** (`docs/FREEHOLD.md`): runners/grants/secrets (no remote revocation, rotate
   doesn't reach a running runner, replay window), migrations/update (no reverse migrations,
   the console-executor window), the relay (post-redeploy 403s), the console/CLI/TUI, and CI.

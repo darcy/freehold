@@ -29,6 +29,8 @@ type keyGateway struct {
 	genAuths  []string
 	genBodies []string
 	delBodies []string
+	infoLive  bool   // /key/info answers 200 for liveKey
+	liveKey   string // the key the gateway's DB knows
 }
 
 func fakeKeyGateway(t *testing.T, genStatus int) (*httptest.Server, *keyGateway) {
@@ -51,6 +53,8 @@ func fakeKeyGateway(t *testing.T, genStatus int) (*httptest.Server, *keyGateway)
 			st.mu.Lock()
 			st.keys++
 			n := st.keys
+			st.liveKey = fmt.Sprintf("sk-%d", n)
+			st.infoLive = true
 			st.mu.Unlock()
 			fmt.Fprintf(w, `{"key":"sk-%d"}`, n)
 		case r.Method == http.MethodPost && r.URL.Path == "/key/delete":
@@ -59,6 +63,17 @@ func fakeKeyGateway(t *testing.T, genStatus int) (*httptest.Server, *keyGateway)
 			st.delBodies = append(st.delBodies, string(raw))
 			st.mu.Unlock()
 			w.Write([]byte(`{"deleted_keys":[]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/key/info":
+			// The gateway knows exactly the keys it minted THIS generation
+			// (a wiped DB forgets them) — sk-1 is live only after the first
+			// mint, and the wipe simulation resets the set.
+			st.mu.Lock()
+			defer st.mu.Unlock()
+			if st.infoLive && r.URL.Query().Get("key") == st.liveKey {
+				w.Write([]byte(`{"key":"ok"}`))
+				return
+			}
+			w.WriteHeader(http.StatusNotFound)
 		default:
 			w.WriteHeader(http.StatusNotFound)
 		}
@@ -147,6 +162,40 @@ func TestEnsureAgentLitellmKey(t *testing.T) {
 	}
 	if len(st.genBodies) != 1 {
 		t.Errorf("second call re-minted: %v", st.genBodies)
+	}
+}
+
+// TestEnsureAgentLitellmKeyHealsWipedGateway: a wiped gateway DB forgets the
+// minted key; the NEXT reconcile must re-mint (not hand the pod the dead
+// store key forever) and the store record must move to the new key.
+func TestEnsureAgentLitellmKeyHealsWipedGateway(t *testing.T) {
+	srv, st := fakeKeyGateway(t, http.StatusOK)
+	root := t.TempDir()
+	stateDir := filepath.Join(root, "agent-tools")
+	litellmFixture(t, stateDir, "master-key", "provider-key", "openai", "gpt-4o")
+	spec := &Spec{StateDir: stateDir, LitellmBaseURL: srv.URL + "/v1"}
+
+	if key, err := spec.ensureAgentLitellmKey("Waldo"); err != nil || key != "sk-1" {
+		t.Fatalf("mint: %q, %v", key, err)
+	}
+	// The wipe: the gateway's DB is gone — /key/info no longer knows sk-1.
+	st.mu.Lock()
+	st.infoLive = false
+	st.mu.Unlock()
+
+	key, err := spec.ensureAgentLitellmKey("Waldo")
+	if err != nil {
+		t.Fatalf("post-wipe ensure: %v", err)
+	}
+	if key != "sk-2" {
+		t.Fatalf("the wiped gateway's key was not re-minted: got %q", key)
+	}
+	if env := storeEnvForTest(t, stateDir); env[litellmAgentKeyEnvKey("waldo")] != "sk-2" {
+		t.Errorf("store record not moved to the re-minted key: %v", env)
+	}
+	// The healed key is LIVE: a third ensure reuses it (no churn).
+	if key, err := spec.ensureAgentLitellmKey("Waldo"); err != nil || key != "sk-2" {
+		t.Fatalf("post-heal ensure: %q, %v", key, err)
 	}
 }
 

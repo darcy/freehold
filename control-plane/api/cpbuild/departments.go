@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -977,13 +978,20 @@ func (s *Spec) ensureAgentLitellmKey(name string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	envKey := litellmAgentKeyEnvKey(pod)
-	if k := env[envKey]; k != "" {
-		return k, nil
-	}
 	master := env["master"]
 	if master == "" {
 		return "", fmt.Errorf("CP litellm store is missing the master key")
+	}
+	origin := strings.TrimSuffix(s.LitellmBaseURL, "/v1")
+	envKey := litellmAgentKeyEnvKey(pod)
+	if k := env[envKey]; k != "" {
+		// The store's key is trusted only when the GATEWAY still knows it: a
+		// wiped gateway DB (a k3s rebuild) invalidates minted keys, and a
+		// store-trusted dead key would lock the pod out FOREVER — the re-mint
+		// below is the heal, so the verification must actually run.
+		if s.litellmKeyLive(origin, master, k) {
+			return k, nil
+		}
 	}
 	body, err := json.Marshal(map[string]interface{}{
 		"key_alias": pod,
@@ -993,7 +1001,6 @@ func (s *Spec) ensureAgentLitellmKey(name string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	origin := strings.TrimSuffix(s.LitellmBaseURL, "/v1")
 	req, err := http.NewRequest(http.MethodPost, origin+"/key/generate", bytes.NewReader(body))
 	if err != nil {
 		return "", err
@@ -1092,6 +1099,26 @@ func (s *Spec) moveLitellmKeyRecord(oldPod, newPod string) error {
 	delete(env, oldKey)
 	env[newKey] = v
 	return s.saveLitellmStoreEnv(path, secret, env)
+}
+
+// litellmKeyLive reports whether the GATEWAY still accepts a stored virtual
+// key (GET /key/info with the master bearer): 200 = live, anything else
+// (404/401 on a wiped or swapped DB) = dead — the caller re-mints. A network
+// error is ALSO read dead (the mint path re-runs harmlessly; the store's
+// record is only replaced after a successful mint), never trusted.
+func (s *Spec) litellmKeyLive(origin, master, key string) bool {
+	req, err := http.NewRequest(http.MethodGet, origin+"/key/info?key="+url.QueryEscape(key), nil)
+	if err != nil {
+		return false
+	}
+	req.Header.Set("Authorization", "Bearer "+master)
+	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
+	return resp.StatusCode == http.StatusOK
 }
 
 // parseLitellmKey decodes /key/generate's body: {"key": "sk-…"} on all
