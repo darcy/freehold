@@ -659,6 +659,8 @@ func TestExposePangolinEmptyDNSKeepsTheProxyIP(t *testing.T) {
 			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"domains":[{"domainId":"domain1","baseDomain":"librem.example","verified":true}]}}`))
 		case "/v1/org/freehold/resources":
 			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"resources":[{"resourceId":9,"name":"yuvomi","subdomain":"yuvomi","fullDomain":"yuvomi.librem.example","domainId":"domain1"}]}}`))
+		case "/v1/resource/9":
+			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":null}`)) // the sso re-assert
 		case "/v1/resource/9/targets":
 			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"targets":[]}}`))
 		case "/v1/resource/9/target":
