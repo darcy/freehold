@@ -116,6 +116,14 @@ regardless of it.
 
 ## Known gaps
 
+*   A k3s guest rebuild re-creates the cluster's etcd, and every PVC with it:
+    the claims re-bind under NEW uuids, so the surviving data dirs on the
+    durable plane (`/srv/data/k8s-volumes/pvc-<old-uuid>…`) are orphaned and
+    the workloads boot on empty volumes — LiteLLM's Postgres loses its DB
+    (agent keys re-mint on the next reconcile, `docs/AI.md`) and the data is
+    gone. The storage ROOT is durable; the per-claim binding is not — a
+    re-bind design (stable claims across a cluster rebuild) is the fix.
+    `freehold snapshot`/`backup` are the operator's guard until then.
 *   Hetzner is unwired (the third substrate); the created-host seam has one
     implementation so far. The VPS world's storage is the dir backend (no
     ZFS/VG to detect), so the formal guest `Provider` interface still carries
