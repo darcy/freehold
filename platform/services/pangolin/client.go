@@ -155,6 +155,12 @@ func (c *Client) CreateSite(ctx context.Context, orgID, name string) (Site, erro
 
 // CreateResource exposes one app: subdomain + the base domain form the
 // fqdn Pangolin routes and certifies (per-host HTTP-01 through its Traefik).
+// The resource is created SSO-GATED (its `sso` flag set right after create):
+// nothing it fronts is publicly open by default — reaching the app means
+// logging into the instance, until the freehold member gate's exact shape
+// on this path lands (docs/NETWORK.md). The tunnel itself is proven with a
+// resource access token (MintAccessToken), which badger accepts in place
+// of a login.
 func (c *Client) CreateResource(ctx context.Context, orgID string, siteID int, name, subdomain, domainID string) (Resource, error) {
 	var r Resource
 	if err := c.do(ctx, http.MethodPut, fmt.Sprintf("/v1/org/%s/site/%d/resource", orgID, siteID), map[string]interface{}{
@@ -162,7 +168,28 @@ func (c *Client) CreateResource(ctx context.Context, orgID string, siteID int, n
 	}, &r); err != nil {
 		return Resource{}, err
 	}
+	if err := c.do(ctx, http.MethodPost, fmt.Sprintf("/v1/resource/%d", r.ResourceID), map[string]interface{}{"sso": true}, nil); err != nil {
+		return Resource{}, fmt.Errorf("sso gate on resource %d: %w", r.ResourceID, err)
+	}
 	return r, nil
+}
+
+// MintAccessToken mints a resource access token — the credential badger
+// accepts in place of a Pangolin login (the `p_token` query param by
+// default). The tunnel-verification path.
+func (c *Client) MintAccessToken(ctx context.Context, resourceID int, title string, validForSeconds int) (string, error) {
+	var out struct {
+		Token string `json:"token"`
+	}
+	if err := c.do(ctx, http.MethodPost, fmt.Sprintf("/v1/resource/%d/access-token", resourceID), map[string]interface{}{
+		"title": title, "validForSeconds": validForSeconds,
+	}, &out); err != nil {
+		return "", err
+	}
+	if out.Token == "" {
+		return "", fmt.Errorf("pangolin: the access token came back empty")
+	}
+	return out.Token, nil
 }
 
 // SetTarget points the resource at the app's internal address, reachable

@@ -80,6 +80,23 @@ The gateway has TWO shapes, one per substrate:
     (names + FQDNs only, no targets or owners) above the member's own scheduled jobs.
     One login (`/auth`) serves everyone: a whitelisted key lands the operator session,
     any other relay member key lands the member session — the role falls out of the key.
+*   **The optional Pangolin public path.** A world whose coords carry a `pangolin` block
+    routes exposed apps through a Pangolin VPS's tunnel instead of pointing public DNS at
+    home: the app A records point at the VPS (`dns_ip`) — the home IP appears in no public
+    DNS and nothing at home accepts unsolicited traffic (Newt dials OUT from the gateway);
+    relay/cp keep the direct Caddy edge, and the apps' LAN surface rides it unchanged.
+    The verbs drive Pangolin's REST integration server (verified against 1.24.0 — Pangolin
+    generates its Traefik config from its own DB, so a file-provider door would fight it):
+    a Bearer root key sealed to the console identity (`world-secrets/pangolin.json`)
+    calls org/site/resource/target — the resource is created **SSO-gated** (nothing it
+    fronts is publicly open by default; the tunnel is proven with a resource access
+    token via the `p_token` param) and the target points at the app's freehold-subnet
+    address, reachable from the gateway where Newt dials out. A created site's one-time
+    Newt secret seals to the console identity immediately (`pangolin-newt.json`).
+    `unexpose` removes the resource; a failed removal names the recovery (re-expose then
+    unexpose). The coords carry no credential. Still open on this path: the freehold
+    member gate's exact shape (today Pangolin's own SSO gates it), the Newt stage on the
+    gateway, and the pangolin-compose VPS payload through the created-host lifecycle.
 *   **Groups are relay channels.** Every exposed app rides a relay channel as its ACL —
     the record stores the channel ID (names change; the display layer resolves the current
     name), `#general` is the everyone-channel and the default, and the expose validates
@@ -132,30 +149,6 @@ The gateway has TWO shapes, one per substrate:
     they're onboarded (the add-member flow) — the one-time default that makes
     "the app rides #general" mean "available to everyone". Separate concern from the
     exposure verbs.
-*   **Pangolin as the default public path.** The public DNS story flips: a wildcard
-    `*.cp.domain` points at the Pangolin VPS and per-app names ride the tunnel, so the
-    home IP appears nowhere in public DNS and nothing at home accepts unsolicited traffic
-    (Newt dials out from the gateway — asserted at boot and re-asserted by every build,
-    like the nftables ruleset). Apps go behind it first; relay/cp keep the direct Caddy
-    edge. A cloud world uses the same chain (Newt on its gateway dials out) — one shape on
-    every substrate. The Pangolin VPS itself is provisioned through the created-host
-    lifecycle (the Vultr provider path with a pangolin-compose payload instead of
-    PVE-on-Debian) and destroyed by `uninstall` — it is a bill, and the profile records it.
-    Per-host certs issue at expose time (HTTP-01 through the tunnel); the VPS never holds
-    the DNS provider's credentials.
-*   **The write path is the integration API (verified against Pangolin 1.24.0).** Pangolin
-    generates its Traefik config from its own database (an HTTP provider), so a
-    file-provider door would fight the generated config and lose the resource model — the
-    verbs drive the REST integration server instead (`server.integration_port`, default
-    3003, enabled by `flags.enable_integration_api`): a Bearer root key
-    (`apiKeyId.secret`, minted from a server-admin dashboard session, actions granted
-    per key) calling `PUT /v1/org`, `PUT /v1/org/:id/site` (the world's Newt site — the
-    secret shows once and lands in the CP's secrets), `PUT /v1/org/:id/site/:siteId/resource`
-    (subdomain + base domain + mode http) and `PUT /v1/resource/:id/target`
-    (siteId + the app's freehold-subnet ip:port, reachable from the gateway where Newt
-    dials out). The client lives at `platform/services/pangolin`. The member gate on this
-    path is Pangolin's own resource auth (its badger middleware) — the freehold verify
-    gate's exact shape there is its own item below.
 *   **More DNS providers:** a provider registry (`dnsman`, hoisted out of the cloudflare
     package) with per-provider A-record managers — Route53, Google Cloud DNS,
     DigitalOcean — hand-rolled REST like the Cloudflare one (no SDKs; Route53's SigV4

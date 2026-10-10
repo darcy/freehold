@@ -535,8 +535,14 @@ func (s *Spec) worldApps() (string, error) {
 		recordFailed := false
 		if s.Pangolin != nil {
 			if err := s.pangolinEnsure(rec); err != nil {
+				// The DNS leg SKIPS: pointing the A record at the VPS
+				// while no resource exists there is exactly the public
+				// name aimed at an edge with no route. The record keeps
+				// riding the direct path (or its last good state) until
+				// the next build re-ensures.
 				failed = append(failed, rec.Name+" pangolin: "+err.Error())
-				recordFailed = true
+				failedNames[rec.Name] = true
+				continue
 			}
 		}
 		if _, err := s.appDNSEnsure(rec); err != nil {

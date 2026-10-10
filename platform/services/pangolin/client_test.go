@@ -33,7 +33,11 @@ func fakePangolin(t *testing.T) (*Client, *[]string) {
 		case "/v1/resource/1/target":
 			body += `{"targetId":1,"siteId":1,"ip":"10.78.0.13","port":31400,"method":"http"}`
 		case "/v1/resource/1":
-			body += `null`
+			if r.Method == http.MethodPost {
+				body += `null` // the sso gate update
+			} else {
+				body += `null` // the delete
+			}
 		default:
 			w.WriteHeader(404)
 			_, _ = w.Write([]byte(`{"success":false,"error":true,"message":"The requests url is not found"}"`))
@@ -82,6 +86,7 @@ func TestClientDrivesTheVerifiedShapes(t *testing.T) {
 		"PUT /v1/org/freehold/site",
 		"GET /v1/org/freehold/domains",
 		"PUT /v1/org/freehold/site/1/resource",
+		"POST /v1/resource/1", // the sso gate — created resources are never open
 		"PUT /v1/resource/1/target",
 		"DELETE /v1/resource/1",
 	}
