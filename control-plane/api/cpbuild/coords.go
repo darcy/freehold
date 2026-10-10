@@ -98,5 +98,6 @@ func (s *Spec) Coords() Coords {
 		GatewayCIDR: s.GatewayCIDR, GatewayVlan: s.GatewayVlan, GatewayLxc: s.GatewayLxc,
 		HostedGateway: s.HostedGateway,
 		K3sIP:         s.K3sIP,
+		Pangolin:      s.Pangolin,
 	}
 }
