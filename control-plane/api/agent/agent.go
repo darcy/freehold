@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 
 	"freehold/contract/identity"
@@ -323,6 +324,14 @@ func tzPodBits(tz, image string) (envLine, initBlock, mountLine, volume string) 
 // (BUZZ_AUTH_TAG) — see authTagEnvLine. Empty omits the env: the agent then has
 // the harness but no writable long-term memory, which is the pre-fix shape.
 func AgentPodManifest(agentName, relayURL, systemPrompt, litellmBaseURL, litellmModel, litellmKeySecret, agentToolsURL, agentToolsPubkey, respondTo, respondAllowlist, authTag, operatorTZ string, runner ...RunnerCoords) string {
+	return agentPodManifest(agentName, relayURL, systemPrompt, litellmBaseURL, litellmModel, litellmKeySecret, agentToolsURL, agentToolsPubkey, respondTo, respondAllowlist, authTag, operatorTZ, 0, runner...)
+}
+
+// agentPodManifest is AgentPodManifest with the provider's per-request output
+// ceiling (maxOutputTokens > 0 renders BUZZ_AGENT_MAX_OUTPUT_TOKENS — the
+// harness's 65536 default 400s on providers with a lower hard cap, e.g.
+// Anthropic's 64000, refusing every agent's first LLM call).
+func agentPodManifest(agentName, relayURL, systemPrompt, litellmBaseURL, litellmModel, litellmKeySecret, agentToolsURL, agentToolsPubkey, respondTo, respondAllowlist, authTag, operatorTZ string, maxOutputTokens int, runner ...RunnerCoords) string {
 	pod := sanitizePodName(agentName)
 	secret := pod + "-identity"
 	promptCm := pod + "-prompt"
@@ -330,6 +339,10 @@ func AgentPodManifest(agentName, relayURL, systemPrompt, litellmBaseURL, litellm
 	respondAllowlistEnv := ""
 	if respondAllowlist != "" {
 		respondAllowlistEnv = fmt.Sprintf("    - {name: BUZZ_ACP_RESPOND_TO_ALLOWLIST, value: %q}\n", respondAllowlist)
+	}
+	maxTokensEnv := ""
+	if maxOutputTokens > 0 {
+		maxTokensEnv = fmt.Sprintf("    - {name: BUZZ_AGENT_MAX_OUTPUT_TOKENS, value: %q}\n", strconv.Itoa(maxOutputTokens))
 	}
 	authTagEnv := authTagEnvLine(authTag)
 	tzEnv, tzInit, tzMount, tzVolume := tzPodBits(operatorTZ, SprigImage)
@@ -382,6 +395,7 @@ spec:
     - {name: BUZZ_ACP_RESPOND_TO, value: %q}
     - {name: BUZZ_AGENT_PROVIDER, value: "openai-compat"}
     - {name: BUZZ_AGENT_REQUIRE_REPLY, value: "1"}
+%s
     - {name: RUST_LOG, value: "debug"}
     - {name: BUZZ_ACP_MCP_COMMAND, value: "/usr/local/bin/buzz-dev-mcp"}
     - {name: FREEHOLD_AGENT_TOOLS_URL, value: %q}
@@ -424,7 +438,7 @@ spec:
 `,
 		promptCm, SystemPromptFile, indentSystemPrompt(systemPrompt),
 		pod, pod, agentName, tzInit, pod, SprigImage, podCmd, relayURL, SystemPromptPath,
-		respondTo, agentToolsURL, agentToolsPubkey, respondAllowlistEnv, authTagEnv, runnerEnv, tzEnv,
+		respondTo, maxTokensEnv, agentToolsURL, agentToolsPubkey, respondAllowlistEnv, authTagEnv, runnerEnv, tzEnv,
 		litellmBaseURL, litellmModel,
 		litellmKeySecret, AgentLiteLLMKeySecretKey,
 		secret, secret, AgentHomePath, SystemPromptPath, SystemPromptFile, tzMount,
@@ -457,7 +471,10 @@ func indentSystemPrompt(prompt string) string {
 // operatorTZ sets the pod's TZ, the node's zoneinfo mount, and the
 // /etc/localtime init-container mount — see tzPodBits. Empty = the pod runs
 // UTC.
-func AgentManifestScript(k3sVmid uint32, relayURL, systemPrompt, litellmBaseURL, litellmModel, agentName, litellmKeySecret, agentToolsURL, agentToolsPubkey, respondTo, respondAllowlist, authTag, operatorTZ string, runner ...RunnerCoords) string {
+// AgentManifestScript renders the pod-apply script. maxOutputTokens is the
+// provider's per-request output ceiling (0 = the harness default) — see
+// agentPodManifest.
+func AgentManifestScript(k3sVmid uint32, relayURL, systemPrompt, litellmBaseURL, litellmModel, agentName, litellmKeySecret, agentToolsURL, agentToolsPubkey, respondTo, respondAllowlist, authTag, operatorTZ string, maxOutputTokens int, runner ...RunnerCoords) string {
 	pod := sanitizePodName(agentName)
 	wsDir := AgentWorkspaceDir(pod)
 	return fmt.Sprintf(`set -euo pipefail
@@ -484,7 +501,7 @@ $EX "$K delete pod %s -n agents --ignore-not-found=true >/dev/null 2>&1 || true"
 $EX "$K apply -f /tmp/agent-manifests/%s.yaml"
 $EX "$K wait --for=condition=Ready pod/%s -n agents --timeout=300s"
 echo AGENT_LEG1_OK`,
-		k3sVmid, wsDir, wsDir, pod, AgentPodManifest(agentName, relayURL, systemPrompt, litellmBaseURL, litellmModel, litellmKeySecret, agentToolsURL, agentToolsPubkey, respondTo, respondAllowlist, authTag, operatorTZ, runner...),
+		k3sVmid, wsDir, wsDir, pod, agentPodManifest(agentName, relayURL, systemPrompt, litellmBaseURL, litellmModel, litellmKeySecret, agentToolsURL, agentToolsPubkey, respondTo, respondAllowlist, authTag, operatorTZ, maxOutputTokens, runner...),
 		k3sVmid, pod, pod, pod, pod, pod)
 }
 
@@ -498,12 +515,12 @@ echo AGENT_LEG1_OK`,
 // CP toolset. The CPA's inbound author gate is "anyone" — relay membership is
 // the bound; the CPA is the system's main user touchpoint and every agent's
 // delegate.
-func CPAManifestScript(k3sVmid uint32, relayURL, systemPrompt, cpaName, litellmBaseURL, litellmKeySecret, agentToolsURL, agentToolsPubkey, authTag, operatorTZ string) string {
+func CPAManifestScript(k3sVmid uint32, relayURL, systemPrompt, cpaName, litellmBaseURL, litellmKeySecret, agentToolsURL, agentToolsPubkey, authTag, operatorTZ string, maxOutputTokens int) string {
 	keySec := litellmKeySecret
 	if keySec == "" {
 		keySec = sanitizePodName(cpaName) + "-litellm-key"
 	}
-	return AgentManifestScript(k3sVmid, relayURL, systemPrompt, litellmBaseURL, CoreLiteLLMModel, cpaName, keySec, agentToolsURL, agentToolsPubkey, "anyone", "", authTag, operatorTZ)
+	return AgentManifestScript(k3sVmid, relayURL, systemPrompt, litellmBaseURL, CoreLiteLLMModel, cpaName, keySec, agentToolsURL, agentToolsPubkey, "anyone", "", authTag, operatorTZ, maxOutputTokens)
 }
 
 // AgentIdentityScript creates the agent's identity Secret (nsec + owner) in

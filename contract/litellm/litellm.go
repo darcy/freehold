@@ -18,6 +18,12 @@ type Provider struct {
 	DefaultModel string `json:"default_model"`
 	// Desc is the one-line picker description.
 	Desc string `json:"desc"`
+	// MaxOutputTokens is the provider's per-request output ceiling the agent
+	// harness must stay under (BUZZ_AGENT_MAX_OUTPUT_TOKENS) — the harness
+	// default (65536) exceeds some providers' hard caps (Anthropic rejects
+	// >64000 with a 400 every agent's first LLM call). 0 = no override (the
+	// harness default rides).
+	MaxOutputTokens int `json:"max_output_tokens,omitempty"`
 }
 
 // providers is the curated table. Verify a DefaultModel (and the prefix's
@@ -37,10 +43,11 @@ var providers = []Provider{
 		Desc:         "OpenAI",
 	},
 	{
-		Name:         "anthropic",
-		Prefix:       "anthropic",
-		DefaultModel: "claude-sonnet-4-5",
-		Desc:         "Anthropic",
+		Name:            "anthropic",
+		Prefix:          "anthropic",
+		DefaultModel:    "claude-sonnet-4-5",
+		Desc:            "Anthropic",
+		MaxOutputTokens: 64000,
 	},
 	{
 		Name:         "gemini",
