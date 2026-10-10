@@ -143,11 +143,19 @@ The gateway has TWO shapes, one per substrate:
     PVE-on-Debian) and destroyed by `uninstall` — it is a bill, and the profile records it.
     Per-host certs issue at expose time (HTTP-01 through the tunnel); the VPS never holds
     the DNS provider's credentials.
-*   **The advanced tier.** A custom domain is the same machinery with a different hostname:
-    the registry takes a full fqdn, certs are per-host, and the user's DNS is theirs to
-    point. Verify-before-design: whether Network drives Pangolin's REST API (the
-    `pangolin-api` runner) or a Traefik file-provider door decides the expose verb's write
-    path.
+*   **The write path is the integration API (verified against Pangolin 1.24.0).** Pangolin
+    generates its Traefik config from its own database (an HTTP provider), so a
+    file-provider door would fight the generated config and lose the resource model — the
+    verbs drive the REST integration server instead (`server.integration_port`, default
+    3003, enabled by `flags.enable_integration_api`): a Bearer root key
+    (`apiKeyId.secret`, minted from a server-admin dashboard session, actions granted
+    per key) calling `PUT /v1/org`, `PUT /v1/org/:id/site` (the world's Newt site — the
+    secret shows once and lands in the CP's secrets), `PUT /v1/org/:id/site/:siteId/resource`
+    (subdomain + base domain + mode http) and `PUT /v1/resource/:id/target`
+    (siteId + the app's freehold-subnet ip:port, reachable from the gateway where Newt
+    dials out). The client lives at `platform/services/pangolin`. The member gate on this
+    path is Pangolin's own resource auth (its badger middleware) — the freehold verify
+    gate's exact shape there is its own item below.
 *   **More DNS providers:** a provider registry (`dnsman`, hoisted out of the cloudflare
     package) with per-provider A-record managers — Route53, Google Cloud DNS,
     DigitalOcean — hand-rolled REST like the Cloudflare one (no SDKs; Route53's SigV4
