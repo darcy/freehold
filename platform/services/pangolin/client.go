@@ -179,3 +179,102 @@ func (c *Client) SetTarget(ctx context.Context, resourceID, siteID int, ip strin
 func (c *Client) DeleteResource(ctx context.Context, resourceID int) error {
 	return c.do(ctx, http.MethodDelete, fmt.Sprintf("/v1/resource/%d", resourceID), nil, nil)
 }
+
+// ---- idempotent ensure helpers (the expose path runs on every re-apply) ----
+
+// ListSites returns the org's tunnel sites.
+func (c *Client) ListSites(ctx context.Context, orgID string) ([]Site, error) {
+	var out struct {
+		Sites []Site `json:"sites"`
+	}
+	if err := c.do(ctx, http.MethodGet, "/v1/org/"+orgID+"/sites", nil, &out); err != nil {
+		return nil, err
+	}
+	return out.Sites, nil
+}
+
+// EnsureSite finds the org's site by name, creating it (a Newt site — the
+// gateway's dial-out identity) when absent. The Newt secret is only ever
+// returned at creation; the caller must persist it then.
+func (c *Client) EnsureSite(ctx context.Context, orgID, name string) (Site, bool, error) {
+	sites, err := c.ListSites(ctx, orgID)
+	if err != nil {
+		return Site{}, false, err
+	}
+	for _, s := range sites {
+		if s.Name == name {
+			return s, false, nil
+		}
+	}
+	s, err := c.CreateSite(ctx, orgID, name)
+	return s, true, err
+}
+
+// ListResources returns the org's resources.
+func (c *Client) ListResources(ctx context.Context, orgID string) ([]Resource, error) {
+	var out struct {
+		Resources []Resource `json:"resources"`
+	}
+	if err := c.do(ctx, http.MethodGet, "/v1/org/"+orgID+"/resources", nil, &out); err != nil {
+		return nil, err
+	}
+	return out.Resources, nil
+}
+
+// EnsureDomain resolves the base domain's id (the config-declared namespace
+// Pangolin serves), refusing an unverified one — a vhost on it would 500.
+func (c *Client) EnsureDomain(ctx context.Context, orgID, baseDomain string) (string, error) {
+	domains, err := c.ListDomains(ctx, orgID)
+	if err != nil {
+		return "", err
+	}
+	for _, d := range domains {
+		if d.BaseDomain == baseDomain {
+			if !d.Verified {
+				return "", fmt.Errorf("pangolin: base domain %s is not verified on the instance", baseDomain)
+			}
+			return d.DomainID, nil
+		}
+	}
+	return "", fmt.Errorf("pangolin: base domain %s is not configured on the instance", baseDomain)
+}
+
+// EnsureResource finds the resource whose fullDomain is
+// subdomain.<the base domain>, creating it (mode http, on the site) when
+// absent. Returns the resource and whether it was created now.
+func (c *Client) EnsureResource(ctx context.Context, orgID string, siteID int, subdomain, domainID, baseDomain string) (Resource, bool, error) {
+	resources, err := c.ListResources(ctx, orgID)
+	if err != nil {
+		return Resource{}, false, err
+	}
+	want := subdomain + "." + baseDomain
+	for _, r := range resources {
+		if r.FullDomain == want {
+			return r, false, nil
+		}
+	}
+	r, err := c.CreateResource(ctx, orgID, siteID, subdomain, subdomain, domainID)
+	return r, true, err
+}
+
+// SetTargetIfDiffers points the resource at ip:port, skipping the write when
+// the target already matches (re-apply convergence, no churn).
+func (c *Client) SetTargetIfDiffers(ctx context.Context, resourceID, siteID int, ip string, port int) error {
+	var out struct {
+		Targets []struct {
+			SiteID int    `json:"siteId"`
+			IP     string `json:"ip"`
+			Port   int    `json:"port"`
+			Method string `json:"method"`
+		} `json:"targets"`
+	}
+	if err := c.do(ctx, http.MethodGet, fmt.Sprintf("/v1/resource/%d/targets", resourceID), nil, &out); err != nil {
+		return err
+	}
+	for _, t := range out.Targets {
+		if t.SiteID == siteID && t.IP == ip && t.Port == port && t.Method == "http" {
+			return nil
+		}
+	}
+	return c.SetTarget(ctx, resourceID, siteID, ip, port)
+}

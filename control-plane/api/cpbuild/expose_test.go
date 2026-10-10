@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
+	"io"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
@@ -19,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	"freehold/contract/config"
 	"freehold/contract/crypto"
 	"freehold/contract/wire"
 	"freehold/control-plane/api/agent"
@@ -104,13 +106,14 @@ func (re *relayEvents) server(t *testing.T) *httptest.Server {
 // the console root), a fake relay, and an exec hook that records commands
 // and answers the durable-fullchain reads with a real self-signed cert.
 type testExposer struct {
-	spec      *Spec
-	apps      *agenttools.AppsStore
-	cmds      []string
-	uploads   []string // remote paths
-	bodies    map[string]string
-	relaySrv  *httptest.Server
-	cfWrites  *int // the fake CF's record-write counter
+	spec     *Spec
+	apps     *agenttools.AppsStore
+	cmds     []string
+	uploads  []string // remote paths
+	bodies   map[string]string
+	relaySrv *httptest.Server
+	cfWrites *int      // the fake CF's record-write counter
+	cfBodies *[]string // the fake CF's write bodies (the A-record content)
 }
 
 func newTestExposer(t *testing.T, channels []relayChannel, members []memberEvent) *testExposer {
@@ -157,6 +160,8 @@ func newTestExposer(t *testing.T, channels []relayChannel, members []memberEvent
 	// writes succeed (and COUNT — the lan mode's no-public-DNS skip pins
 	// against the counter).
 	var cfWrites int
+	var cfBodies []string
+	cfBodiesPtr := &cfBodies
 	cf := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		if r.URL.Path == "/zones" || (r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/dns_records")) {
@@ -169,6 +174,9 @@ func newTestExposer(t *testing.T, channels []relayChannel, members []memberEvent
 		}
 		if r.Method == http.MethodPost || r.Method == http.MethodPut {
 			cfWrites++
+			if b, rerr := io.ReadAll(r.Body); rerr == nil {
+				*cfBodiesPtr = append(*cfBodiesPtr, string(b))
+			}
 		}
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "result": map[string]interface{}{}})
 	}))
@@ -189,7 +197,7 @@ func newTestExposer(t *testing.T, channels []relayChannel, members []memberEvent
 	if err != nil {
 		t.Fatal(err)
 	}
-	te := &testExposer{spec: spec, apps: apps, bodies: map[string]string{}, cfWrites: &cfWrites}
+	te := &testExposer{spec: spec, apps: apps, bodies: map[string]string{}, cfWrites: &cfWrites, cfBodies: cfBodiesPtr}
 	spec.Apps = apps
 	spec.execHook = func(cmd string, _ uint64, _ ...string) (string, error) {
 		te.cmds = append(te.cmds, cmd)
@@ -533,5 +541,122 @@ func TestAppsCertReuseCoversTheHost(t *testing.T) {
 	}
 	if certCovers([]byte("not a pem"), "*.librem.example") {
 		t.Fatal("garbage must not cover")
+	}
+}
+
+// TestExposeRidesThePangolinPath pins the pangolin public path: with the
+// coords' pangolin block set, the expose verb ensures the site, finds or
+// creates the resource on the base domain, and points the target at the
+// app's freehold-subnet address — while the local edge (cert + Caddyfile)
+// still converges for the LAN surface. The A record follows the DNSIP (the
+// VPS) when set, and stays on the proxy IP when it's empty (the dev/test
+// posture that exercises the tunnel without moving public DNS).
+func TestExposeRidesThePangolinPath(t *testing.T) {
+	consoleSec := make([]byte, 32)
+	consoleSec[0] = 0x42
+	family := "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+	homelab := strings.Repeat("b", 64)
+	var calls []string
+	pang := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls = append(calls, r.Method+" "+r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/v1/org/freehold/sites":
+			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"sites":[{"siteId":3,"name":"librem","type":"newt"}]}}`))
+		case "/v1/org/freehold/domains":
+			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"domains":[{"domainId":"domain1","baseDomain":"librem.example","verified":true}]}}`))
+		case "/v1/org/freehold/resources":
+			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"resources":[]}}`))
+		case "/v1/org/freehold/site/3/resource":
+			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"resourceId":7,"name":"yuvomi","subdomain":"yuvomi","fullDomain":"yuvomi.librem.example","domainId":"domain1","ssl":true,"enabled":true}}`))
+		case "/v1/resource/7/targets":
+			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"targets":[]}}`))
+		case "/v1/resource/7/target":
+			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"targetId":1}}`))
+		default:
+			w.WriteHeader(404)
+			_, _ = w.Write([]byte(`{"success":false,"error":true,"message":"no such route"}`))
+		}
+	}))
+	defer pang.Close()
+
+	te := newTestExposer(t, []relayChannel{{family, "family"}},
+		[]memberEvent{{channelID: family, pubkey: homelab, kind: wire.PutUser, ts: 100}})
+	te.spec.Pangolin = &config.PangolinCoords{
+		Base: pang.URL, Key: "yi5o.thesecret", Org: "freehold",
+		Site: "librem", Domain: "librem.example", DNSIP: "203.0.113.9",
+	}
+
+	report, err := te.exposeFn(consoleSec)(agent.ExposeArgs{
+		Name: "yuvomi", Target: "10.78.0.13:31400", Group: "family", Requester: homelab,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(report, "live") {
+		t.Fatalf("the expose must land live: %s", report)
+	}
+	want := []string{
+		"GET /v1/org/freehold/sites",
+		"GET /v1/org/freehold/domains",
+		"GET /v1/org/freehold/resources",
+		"PUT /v1/org/freehold/site/3/resource",
+		"GET /v1/resource/7/targets",
+		"PUT /v1/resource/7/target",
+	}
+	for i, w := range want {
+		if len(calls) <= i || calls[i] != w {
+			t.Fatalf("pangolin call %d: got %v want %s", i, calls, w)
+		}
+	}
+	// The app's A record points at the VPS, not the proxy.
+	if !strings.Contains(strings.Join(*te.cfBodies, "\n"), "203.0.113.9") {
+		t.Fatalf("the A record must ride the VPS: %v", *te.cfBodies)
+	}
+	// The local edge still converges (the LAN surface).
+	if len(te.cmds) == 0 || !strings.Contains(strings.Join(te.cmds, "\n"), "kubectl") {
+		t.Fatal("the local edge apply must still run for the LAN surface")
+	}
+}
+
+// TestExposePangolinEmptyDNSKeepsTheProxyIP pins the dev/test posture: a
+// pangolin block WITHOUT dns_ip exercises the tunnel while the public A
+// record stays on the proxy IP — nothing in public DNS moves.
+func TestExposePangolinEmptyDNSKeepsTheProxyIP(t *testing.T) {
+	consoleSec := make([]byte, 32)
+	consoleSec[0] = 0x42
+	family := "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+	homelab := strings.Repeat("b", 64)
+	pang := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/v1/org/freehold/sites":
+			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"sites":[{"siteId":3,"name":"librem","type":"newt"}]}}`))
+		case "/v1/org/freehold/domains":
+			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"domains":[{"domainId":"domain1","baseDomain":"librem.example","verified":true}]}}`))
+		case "/v1/org/freehold/resources":
+			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"resources":[{"resourceId":9,"name":"yuvomi","subdomain":"yuvomi","fullDomain":"yuvomi.librem.example","domainId":"domain1"}]}}`))
+		case "/v1/resource/9/targets":
+			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"targets":[]}}`))
+		case "/v1/resource/9/target":
+			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"targetId":2}}`))
+		default:
+			w.WriteHeader(404)
+			_, _ = w.Write([]byte(`{"success":false,"error":true,"message":"no such route"}`))
+		}
+	}))
+	defer pang.Close()
+
+	te := newTestExposer(t, []relayChannel{{family, "family"}},
+		[]memberEvent{{channelID: family, pubkey: homelab, kind: wire.PutUser, ts: 100}})
+	te.spec.Pangolin = &config.PangolinCoords{Base: pang.URL, Key: "k", Org: "freehold", Site: "librem", Domain: "librem.example"}
+
+	if _, err := te.exposeFn(consoleSec)(agent.ExposeArgs{
+		Name: "yuvomi", Target: "10.78.0.13:31400", Group: "family", Requester: homelab,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(strings.Join(*te.cfBodies, "\n"), "192.168.30.5") {
+		t.Fatalf("the A record must stay on the proxy IP: %v", *te.cfBodies)
 	}
 }

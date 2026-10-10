@@ -23,11 +23,14 @@
 package cpbuild
 
 import (
+	"context"
 	"crypto/x509"
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"net"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -36,6 +39,7 @@ import (
 	"freehold/control-plane/api/agenttools"
 	cert "freehold/platform/services/certificates/letsencrypt"
 	dnsman "freehold/platform/services/externaldns/cloudflare"
+	"freehold/platform/services/pangolin"
 	caddydeploy "freehold/platform/services/webproxy/caddy"
 )
 
@@ -265,7 +269,14 @@ func (s *Spec) appDNSEnsure(rec agenttools.AppRecord) (bool, error) {
 		return false, nil
 	}
 	fqdn := s.appRecordFQDN(rec)
-	if s.ProxyIP == "" {
+	// The pangolin public path: the app's A record points at the VPS (the
+	// home IP appears in no public DNS). Empty DNSIP keeps the proxy IP — a
+	// dev/test world exercises the tunnel without moving the public DNS.
+	ip := s.ProxyIP
+	if s.Pangolin != nil && s.Pangolin.DNSIP != "" {
+		ip = s.Pangolin.DNSIP
+	}
+	if ip == "" {
 		return false, fmt.Errorf("app dns %s: the proxy IP is not in the world coords", fqdn)
 	}
 	provider, env, err := s.dnsCredFromStore("relay")
@@ -276,10 +287,51 @@ func (s *Spec) appDNSEnsure(rec agenttools.AppRecord) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("app dns %s: %w", fqdn, err)
 	}
-	if err := mgr.UpsertA(fqdn, s.ProxyIP); err != nil {
+	if err := mgr.UpsertA(fqdn, ip); err != nil {
 		return false, fmt.Errorf("app dns %s: %w", fqdn, err)
 	}
 	return true, nil
+}
+
+// pangolinEnsure puts one app behind the world's Pangolin public path
+// (docs/NETWORK.md): the gateway's Newt site ensured, the resource found or
+// created (subdomain on the base domain, mode http — the per-host cert is
+// Pangolin's Traefik's business, HTTP-01), and the target pointed at the
+// app's freehold-subnet address, reachable from the gateway where Newt
+// dials out. Idempotent — the expose verb and the build tail both call it.
+func (s *Spec) pangolinEnsure(rec agenttools.AppRecord) error {
+	p := s.Pangolin
+	if p == nil || p.Base == "" || p.Key == "" || p.Org == "" || p.Site == "" || p.Domain == "" {
+		return fmt.Errorf("pangolin: the world coords lack the pangolin public path (base/key/org/site/domain)")
+	}
+	host, portStr, err := net.SplitHostPort(rec.Target)
+	if err != nil {
+		return fmt.Errorf("pangolin: target %q is not host:port", rec.Target)
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		return fmt.Errorf("pangolin: target %q port: %w", rec.Target, err)
+	}
+	cl := &pangolin.Client{Base: p.Base, Key: p.Key}
+	site, _, err := cl.EnsureSite(context.Background(), p.Org, p.Site)
+	if err != nil {
+		return fmt.Errorf("pangolin: site %q: %w", p.Site, err)
+	}
+	domainID, err := cl.EnsureDomain(context.Background(), p.Org, p.Domain)
+	if err != nil {
+		return err
+	}
+	res, created, err := cl.EnsureResource(context.Background(), p.Org, site.SiteID, rec.Name, domainID, p.Domain)
+	if err != nil {
+		return fmt.Errorf("pangolin: resource %s: %w", rec.Name, err)
+	}
+	if err := cl.SetTargetIfDiffers(context.Background(), res.ResourceID, site.SiteID, host, port); err != nil {
+		return fmt.Errorf("pangolin: target %s: %w", rec.Target, err)
+	}
+	if created {
+		fmt.Fprintf(os.Stderr, "pangolin: resource %s created (%s)\n", rec.Name, res.FullDomain)
+	}
+	return nil
 }
 
 // renderCaddyfile renders the CURRENT edge config from the world coords +
@@ -391,6 +443,11 @@ func (s *Spec) worldApps() (string, error) {
 		if _, err := s.appDNSEnsure(rec); err != nil {
 			failed = append(failed, rec.Name+" dns: "+err.Error())
 		}
+		if s.Pangolin != nil {
+			if err := s.pangolinEnsure(rec); err != nil {
+				failed = append(failed, rec.Name+" pangolin: "+err.Error())
+			}
+		}
 	}
 	if _, err := s.appsCertEnsure(); err != nil {
 		failed = append(failed, "shared wildcard cert: "+err.Error())
@@ -457,6 +514,11 @@ func BuildExposeAppFn(spec *Spec, apps *agenttools.AppsStore, consoleSecret []by
 			rec.Name, rec.FQDN, gid, rec.Visibility, rec.Auth)
 		if _, err := spec.appDNSEnsure(rec); err != nil {
 			return report + " — RECORDED; the DNS step failed and the next build re-ensures it: " + err.Error(), nil
+		}
+		if spec.Pangolin != nil {
+			if err := spec.pangolinEnsure(rec); err != nil {
+				return report + " — RECORDED and DNS pointed; the pangolin step failed and the next build re-ensures it: " + err.Error(), nil
+			}
 		}
 		if _, err := spec.appsCertEnsure(); err != nil {
 			return report + " — RECORDED and DNS pointed; the wildcard cert step failed and the next build re-ensures it: " + err.Error(), nil

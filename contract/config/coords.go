@@ -64,4 +64,24 @@ type Coords struct {
 	// operator's kind:0 profile at build (which is what makes the Buzz desktop
 	// app skip its first-run onboarding). Empty renders "Operator".
 	OperatorName string `json:"operator_name,omitempty"`
+	// Pangolin is the optional public path (docs/NETWORK.md): when set,
+	// exposed apps ride a Pangolin VPS's tunnel — the app A records point at
+	// the VPS and the app vhosts live on Pangolin's edge, so the home IP
+	// appears in no public DNS and nothing at home accepts unsolicited
+	// traffic. Nil = the direct Caddy edge (the default).
+	Pangolin *PangolinCoords `json:"pangolin,omitempty"`
+}
+
+// PangolinCoords carries the world's Pangolin public path. Key is the
+// instance's root integration key (a secret — the coords live in the CP's
+// state, never committed). DNSIP is the public IP the exposed apps' A
+// records point at (the VPS); empty keeps them on the proxy IP (a dev/test
+// world where the tunnel is exercised without moving the public DNS).
+type PangolinCoords struct {
+	Base   string `json:"base"`   // the integration API origin (http://vps:3003)
+	Key    string `json:"key"`    // the root API key (apiKeyId.secret)
+	Org    string `json:"org"`    // the world's organization id
+	Site   string `json:"site"`   // the newt site's name (the gateway's dial-out identity)
+	Domain string `json:"domain"` // the base domain Pangolin serves (the world domain)
+	DNSIP  string `json:"dns_ip,omitempty"`
 }
