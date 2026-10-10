@@ -530,14 +530,21 @@ func (s *Spec) worldApps() (string, error) {
 		return "", nil
 	}
 	var failed []string
+	failedNames := map[string]bool{}
 	for _, rec := range records {
+		recordFailed := false
 		if s.Pangolin != nil {
 			if err := s.pangolinEnsure(rec); err != nil {
 				failed = append(failed, rec.Name+" pangolin: "+err.Error())
+				recordFailed = true
 			}
 		}
 		if _, err := s.appDNSEnsure(rec); err != nil {
 			failed = append(failed, rec.Name+" dns: "+err.Error())
+			recordFailed = true
+		}
+		if recordFailed {
+			failedNames[rec.Name] = true
 		}
 	}
 	if _, err := s.appsCertEnsure(); err != nil {
@@ -547,7 +554,7 @@ func (s *Spec) worldApps() (string, error) {
 		return "", fmt.Errorf("edge config: %w", err)
 	}
 	if len(failed) > 0 {
-		return fmt.Sprintf("apps reconciled (%d of %d; FAILED: %s)", len(records)-len(failed), len(records), strings.Join(failed, "; ")), nil
+		return fmt.Sprintf("apps reconciled (%d of %d; FAILED: %s)", len(records)-len(failedNames), len(records), strings.Join(failed, "; ")), nil
 	}
 	return fmt.Sprintf("apps reconciled (%d)", len(records)), nil
 }
@@ -638,15 +645,26 @@ func BuildUnexposeAppFn(spec *Spec, apps *agenttools.AppsStore) func(name string
 		if err := spec.applyCaddyfile(); err != nil {
 			return report + " — RECORDED; the edge config apply failed (the vhost may still serve until the next build): " + err.Error(), nil
 		}
+		removal := ""
 		if err := spec.pangolinRemove(rec); err != nil {
-			return report + " — RECORDED; the pangolin resource could not be removed (it may still serve on the VPS until the next unexpose): " + err.Error(), nil
+			// The record is GONE (unexpose is record-first) — "the next
+			// unexpose" can never run. The real recovery: re-expose then
+			// unexpose again, which re-ensures the row and retries the
+			// removal.
+			removal = "; the pangolin resource could not be removed (it may still serve on the VPS) — re-expose " + rec.Name + " then unexpose it again to retry: " + err.Error()
 		}
+		dnsNote := ""
 		if rec.Visibility != agenttools.VisibilityLAN {
 			if provider, env, err := spec.dnsCredFromStore("relay"); err == nil {
 				if mgr, merr := dnsman.For(provider, env); merr == nil {
-					_ = mgr.DeleteA(spec.appRecordFQDN(rec)) // best-effort
+					if derr := mgr.DeleteA(spec.appRecordFQDN(rec)); derr != nil {
+						dnsNote = "; the A record delete failed: " + derr.Error()
+					}
 				}
 			}
+		}
+		if removal != "" || dnsNote != "" {
+			return report + " — RECORDED" + removal + dnsNote, nil
 		}
 		return report + " — live", nil
 	}
