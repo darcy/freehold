@@ -31,6 +31,7 @@ import (
 	"freehold/contract/crypto"
 	"freehold/contract/delegate"
 	"freehold/contract/identity"
+	"freehold/contract/litellm"
 	"freehold/contract/nipoa"
 	"freehold/contract/relay"
 	"freehold/contract/wire"
@@ -2865,7 +2866,7 @@ func BuildCreateAgentFn(spec *Spec) agent.CreateAgentFn {
 		}
 		var manifest string
 		if name == spec.CpaName {
-			manifest = agent.CPAManifestScript(spec.K3sVmid, spec.RelayWS, agents.CPASystemPrompt(spec.RepoURL, spec.operatorTZ()), name, spec.LitellmBaseURL, "", spec.SelfURL, audience, authTag, spec.operatorTZ())
+			manifest = agent.CPAManifestScript(spec.K3sVmid, spec.RelayWS, agents.CPASystemPrompt(spec.RepoURL, spec.operatorTZ()), name, spec.LitellmBaseURL, "", spec.SelfURL, audience, authTag, spec.operatorTZ(), spec.litellmProviderMaxTokens())
 		} else {
 			// A reserved department name selects that department's embedded
 			// prompt; any other name renders the custom template (agents.SystemPrompt).
@@ -2876,7 +2877,7 @@ func BuildCreateAgentFn(spec *Spec) agent.CreateAgentFn {
 			// asker (today the operator — the CP cannot see chat threads) +
 			// the CPA. The CPA itself runs "anyone" (CPAManifestScript).
 			runner := spec.DepartmentRunners[name]
-			manifest = agent.AgentManifestScript(spec.K3sVmid, spec.RelayWS, agents.SystemPrompt(name, purpose, spec.RepoURL, spec.operatorTZ()), spec.LitellmBaseURL, model, name, agent.KeySecretFor(name), spec.SelfURL, audience, "allowlist", spec.respondAllowlist(name), authTag, spec.operatorTZ(), runner...)
+			manifest = agent.AgentManifestScript(spec.K3sVmid, spec.RelayWS, agents.SystemPrompt(name, purpose, spec.RepoURL, spec.operatorTZ()), spec.LitellmBaseURL, model, name, agent.KeySecretFor(name), spec.SelfURL, audience, "allowlist", spec.respondAllowlist(name), authTag, spec.operatorTZ(), spec.litellmProviderMaxTokens(), runner...)
 		}
 		if err := spec.run(manifest, 420); err != nil {
 			return "", fmt.Errorf("%s pod apply: %w", name, err)
@@ -2972,6 +2973,27 @@ func (s *Spec) removeAgentToolsRoster(name string) (string, error) {
 		return fmt.Sprintf("%s's agent-tools roster seat removed (verified)", name), nil
 	}
 	return fmt.Sprintf("%s's agent-tools roster removal published (UNVERIFIED — the roster read failed; re-check before trusting the seat is gone)", name), nil
+}
+
+// litellmProviderMaxTokens returns the world's chosen provider's per-request
+// output ceiling (the curated table; 0 = the harness default) — the agent
+// pods' BUZZ_AGENT_MAX_OUTPUT_TOKENS. Read from the litellm store's recorded
+// provider prefix; 0 when the store is unreadable or the prefix predates the
+// curated table (the store is the SAME source the gateway registration used,
+// so the ceiling matches the served deployment).
+func (s *Spec) litellmProviderMaxTokens() int {
+	_, _, env, err := s.litellmStoreEnv()
+	if err != nil {
+		return 0
+	}
+	prefix := strings.TrimSpace(env["provider-prefix"])
+	if prefix == "" {
+		return 0
+	}
+	if p := litellm.Get(prefix); p != nil {
+		return p.MaxOutputTokens
+	}
+	return 0
 }
 
 // channelNames normalizes a requested channel list: blank entries dropped,

@@ -27,7 +27,7 @@ func systemPrompt() string {
 // exact silent-failure shape this package exists to prevent.
 func TestCPAPodManifestBasics(t *testing.T) {
 	sp := systemPrompt()
-	m := CPAManifestScript(105, "wss://relay.test", sp, "waldo", "http://192.168.30.8:31400/v1", "", "", "", "", "")
+	m := CPAManifestScript(105, "wss://relay.test", sp, "waldo", "http://192.168.30.8:31400/v1", "", "", "", "", "", 0)
 	for _, want := range []string{
 		"kind: Pod",
 		"kind: ConfigMap",
@@ -142,7 +142,7 @@ func TestCPAPodManifestBasics(t *testing.T) {
 // never apply over each other. Rendered through the production paths: the CPA
 // (CPAManifestScript) and a department (AgentPodManifest).
 func TestAgentPodManifestDistinctNames(t *testing.T) {
-	alice := CPAManifestScript(105, "wss://relay.test", systemPrompt(), "alice", "http://192.168.30.8:31400/v1", "", "", "", "", "")
+	alice := CPAManifestScript(105, "wss://relay.test", systemPrompt(), "alice", "http://192.168.30.8:31400/v1", "", "", "", "", "", 0)
 	bob := AgentPodManifest("bob", "wss://relay.test", "/p/x.md", "http://gw:31400/v1", "m", "k", "", "", "anyone", "", "", "")
 	for _, want := range []string{"name: alice", "alice-identity", "name: bob", "bob-identity"} {
 		if !strings.Contains(alice, want) && !strings.Contains(bob, want) {
@@ -202,7 +202,7 @@ func TestAgentPodRespondGate(t *testing.T) {
 	if !strings.Contains(custom, `name: BUZZ_ACP_RESPOND_TO_ALLOWLIST, value: "op,cpa"`) {
 		t.Errorf("custom-agent manifest must carry its asker + CPA allowlist")
 	}
-	cpa := CPAManifestScript(105, "wss://relay.test", systemPrompt(), "waldo", "http://192.168.30.8:31400/v1", "", "", "", "", "")
+	cpa := CPAManifestScript(105, "wss://relay.test", systemPrompt(), "waldo", "http://192.168.30.8:31400/v1", "", "", "", "", "", 0)
 	if !strings.Contains(cpa, `name: BUZZ_ACP_RESPOND_TO, value: "anyone"`) {
 		t.Errorf("CPA manifest must run the anyone gate")
 	}
@@ -215,7 +215,7 @@ func TestAgentPodRespondGate(t *testing.T) {
 }
 
 func TestCPAManifestScriptApplies(t *testing.T) {
-	s := CPAManifestScript(105, "wss://relay.test", systemPrompt(), "waldo", "http://192.168.30.8:31400/v1", "waldo-litellm-key", "", "", "", "")
+	s := CPAManifestScript(105, "wss://relay.test", systemPrompt(), "waldo", "http://192.168.30.8:31400/v1", "waldo-litellm-key", "", "", "", "", 0)
 	for _, want := range []string{
 		"pct exec 105",
 		`K="/usr/local/bin/kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml"`,
@@ -404,7 +404,7 @@ func TestCPAManifestCarriesAuthTag(t *testing.T) {
 	if err != nil {
 		t.Fatalf("mint: %v", err)
 	}
-	s := CPAManifestScript(105, "wss://relay.test", systemPrompt(), "waldo", "http://192.168.30.8:31400/v1", "", "http://at:8080", "atpk", tag.JSON(), "")
+	s := CPAManifestScript(105, "wss://relay.test", systemPrompt(), "waldo", "http://192.168.30.8:31400/v1", "", "http://at:8080", "atpk", tag.JSON(), "", 0)
 	for _, want := range []string{"BUZZ_AUTH_TAG", tag.Owner, nipoa.EngramConditions} {
 		if !strings.Contains(s, want) {
 			t.Errorf("CPA deploy script missing %q", want)
@@ -558,5 +558,22 @@ func TestAgentLiteLLMKeyScript(t *testing.T) {
 	// the audited command (the compare is against the store's key literal).
 	if strings.Contains(s, "$LITELLM") {
 		t.Errorf("script must not reference the runner-injected master env: %s", s)
+	}
+}
+
+// TestMaxOutputTokensEnv: the provider's output ceiling renders as
+// BUZZ_AGENT_MAX_OUTPUT_TOKENS (>0) and is absent when 0 (the harness
+// default) — the harness's 65536 default 400s on providers with a lower hard
+// cap (Anthropic's 64000), refusing every agent's first LLM call.
+func TestMaxOutputTokensEnv(t *testing.T) {
+	with := agentPodManifest("waldo", "wss://relay.test", "prompt", "http://lit:4000/v1",
+		"anthropic/claude-sonnet-4-5", "waldo-litellm-key", "", "", "anyone", "", "", "", 64000)
+	if !strings.Contains(with, `{name: BUZZ_AGENT_MAX_OUTPUT_TOKENS, value: "64000"}`) {
+		t.Error("the output ceiling did not render as BUZZ_AGENT_MAX_OUTPUT_TOKENS")
+	}
+	without := agentPodManifest("waldo", "wss://relay.test", "prompt", "http://lit:4000/v1",
+		"anthropic/claude-sonnet-4-5", "waldo-litellm-key", "", "", "anyone", "", "", "", 0)
+	if strings.Contains(without, "BUZZ_AGENT_MAX_OUTPUT_TOKENS") {
+		t.Error("a 0 ceiling must not render the env (the harness default rides)")
 	}
 }
