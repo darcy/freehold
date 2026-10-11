@@ -287,6 +287,18 @@ action it causes is signed, authorized, and audited by machinery that cannot rea
     default set; managing an agent's choice beyond the registry row is not built.
 *   AI's prompt says the provider key rides each exec; the bridge doesn't inject it.
 *   The sprig image is a moving tag (no digest pin).
+*   The `buzz` CLI (the sprig image's relay client) panics on a closed stdout pipe:
+    piping a large response into a reader that exits early
+    (`buzz messages get --channel <busy> --since <wide> | head -c 1000`) aborts it
+    mid-print with `failed printing to stdout: Broken pipe (os error 32)`, exit 134 —
+    deterministic, large payloads only. The workaround (redirect to a file, rerun
+    unpiped on 134) ships in the agents' orientation. The CLI is upstream
+    (`ghcr.io/block/buzz-sprig`, no fix path in this repo — report upstream when a
+    channel exists). Evidence preserved on casaq in the CPA's workspace `WORK_LOGS/`:
+    `core-buzz-20261011T175503Z.bin` (sha256
+    `9e597950694b8b71d324b0f2476526862e2baf8cfbbb4b49e3dc7d6b7a67b9ac`) and
+    `core-buzz-repro-20261011T1816Z.bin` (sha256
+    `898e3f4fa6d7d6c468456cff61b785bac608c24de058d2356ad20e77bd42d4ea`).
 *   Memory attestation has no expiry; upstream buzz doesn't verify engram authorship.
 *   Prompt edits in the CP's durable copy don't survive a rebuild (re-seeded from embedded bytes).
 *   The respond-to allowlist is fixed at deploy (re-applies deliver changes). The console

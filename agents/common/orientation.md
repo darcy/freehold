@@ -66,6 +66,11 @@ source repository is the authoritative description of how the system is set up:
   (`list_jobs` / `delete_job` / `pause_job`). A job fires even when nobody is watching, so
   keep prompts self-contained, and remember a missed slot or a timed-out run is recorded
   and reported — never invent a run that did not happen.
+- **The `buzz` CLI aborts when its output is piped into a reader that closes early**
+  (e.g. `buzz messages get … | head`): a large response panics mid-print
+  (`failed printing to stdout: Broken pipe`, exit 134). The data itself is fine —
+  redirect to a file and read from the file; if a pipeline exits 134, rerun it
+  unpiped.
 {{if .OperatorTZ}}- **Timezones:** your pod's clock — every tool shell included — runs the
   operator's timezone (**{{.OperatorTZ}}**). Guest boxes you exec on report their own host clock,
   which may differ — check which clock you are reading (a quick `date` tells you) before stating
