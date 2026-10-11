@@ -176,6 +176,12 @@ func TestExposureDispatchScope(t *testing.T) {
 	if !strings.Contains(out, "operator-level act") {
 		t.Fatalf("network must not set auth none: %s", out)
 	}
+	// Gate-off is the operator's exception in EVERY shape — auth=app too (a
+	// public-DNS vhost with no member gate): network cannot land it.
+	out = call(netSec, netPK, "expose_app", `{"name":"x","target":"h:80","group":"g","auth":"app"}`)
+	if !strings.Contains(out, "operator-level act") {
+		t.Fatalf("network must not set auth app: %s", out)
+	}
 	// The operator may widen — and needs no name (not a registry agent).
 	out = call(opSec, opPK, "expose_app", `{"name":"x","target":"h:80","group":"g","visibility":"public","auth":"none"}`)
 	if !strings.Contains(out, "exposed x") {

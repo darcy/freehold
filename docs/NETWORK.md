@@ -76,7 +76,10 @@ The gateway has TWO shapes, one per substrate:
     tier**: NIP-07 Nostr login admitted by the relay's NIP-43 membership list plus
     single-use device-link invites (the no-Nostr path); gated apps verify through
     `/auth/verify` (a browser gets the 302 to the login page, an API client the 401), and
-    the operator session passes the same gate. Scope is structural: only the **network**
+    the operator session passes the same gate. The **gate is the standing default
+    posture**: every exposed app is member-gated unless the OPERATOR says otherwise for
+    that specific app — gate-off (`auth: app`/`none`, `visibility: public`) is an
+    operator-only exception, never an agent's default. Scope is structural: only the **network**
     department's identity or the operator may call the verbs; a custom agent that asks
     directly is refused (`-32003`) and routes through Network in conversation — and
     widening (`visibility: public`, `auth: none`) is refused from agents outright.
