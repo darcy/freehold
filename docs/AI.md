@@ -54,14 +54,22 @@ AI owns the gateway directly; the runtime is what all agents share.
     workspace on the durable plane (`/srv/data/k8s-volumes/agent-home/<pod>`), a prompt
     mounted from a ConfigMap and re-read on every spawn, and a tool bridge fetched from the
     CP at boot.
-*   **Prompts.** A shared orientation block (repo, "be loud", memory) + the agent's own
-    prompt + its skills, composed in `agents/prompt.go`. Custom agents get a bare template.
+*   **Prompts.** A shared orientation block (repo, "be loud", memory, and the
+    conversation-flow rule: plumbing in #freehold, plain-language status in user
+    channels) + the agent's own prompt + its skills, composed in
+    `agents/prompt.go`. Custom agents get the same orientation + their template.
 *   **Who may talk to whom** is the inbound author gate fixed at deploy: the CPA answers
-    anyone in the relay; departments answer the operator and core agents; custom agents
-    answer their asker and the CPA.
+    anyone in the relay; departments answer the operator and core agents (a custom
+    agent's mention never wakes one); custom agents
+    answer their asker and the CPA. Every agent — custom agents included — is a
+    member of `#freehold` (`create_agent` joins it automatically): the shared
+    workroom where all agent-to-agent plumbing lives, while the channel the user
+    asked in gets plain-language status only.
 *   **Memory** is relay-persisted and encrypted; each pod carries an operator-signed NIP-OA
     attestation scoped to memory writes. It survives pod re-applies and full rebuilds.
-*   **Creation.** `create_agent` mints identity, joins the relay, applies the pod; the build
+*   **Creation.** `create_agent` mints identity, joins the relay, applies the pod, and
+    joins the new agent to `#freehold` (idempotent — re-asserted on every
+    reconcile); the build
     reconciles the whole registry (CPA, then departments, then custom agents) every time.
 *   **Editing.** `update_agent` rewrites a created agent's purpose (its system prompt re-renders
     from the registry row and lands on the next spawn), switches its litellm model, replaces its

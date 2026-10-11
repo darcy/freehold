@@ -261,11 +261,13 @@ shells (tmux/herdr panes included) via the `freehold` CLI / SSH / doors — the 
   it needs), and **AI** (models/providers/agents, plus AI hardware — local-AI
   accelerators like an RTX 3090 or DGX Spark are provisioned and tuned by AI, separate
   from Compute's general resources) are its direct reports, each a distinct identity scoped to
-  one domain. Talk is unrestricted — the operator and any agent may converse with any
-  department or agent directly; what is bounded is *capability execution*. On the wire the
+  one domain. The operator and any agent may converse with any department or agent directly;
+  core agents talk to each other (including the CPA) but not to custom agents — a custom
+  agent's only counterpart for work is the CPA, which routes to the departments; what is
+  bounded is *capability execution*. On the wire the
   talk surface is buzz-acp's inbound author gate: the CPA responds to **anyone** (relay
   membership is the bound), each core department to an explicit **allowlist** — the operator
-  plus the core agents — and a custom agent to its asker plus the CPA. A capability a
+  plus the core agents (a custom agent's mention never wakes a department) — and a custom agent to its asker plus the CPA. A capability a
   department owns (external proxy, backup, compute/LXC, model registration, AI hardware) is
   executed by that department's identity, and the raw grant for it attaches to department
   identities, never to a custom agent that would then self-serve a second, ungoverned path to
@@ -273,8 +275,12 @@ shells (tmux/herdr panes included) via the `freehold` CLI / SSH / doors — the 
   department: whichever agent created a service — a freehold-delegate or a custom agent — owns
   its install/config/operation, ad hoc and unvetted as before. The four departments are
   **installed as part of the core build** (each a pod on the same harness as the CPA): all in
-  the shared private `#freehold` channel — there are no per-department channels; conversations
-  happen where they already are, with #freehold the fallback every core agent belongs to. The
+  the shared private `#freehold` channel — there are no per-department channels. **Every
+  agent — custom agents included — is a member of `#freehold`** (`create_agent` joins it
+  automatically): it is the workroom where all agent-to-agent plumbing lives (hand-offs,
+  delegation, verification), while the channel the user asked in gets plain-language status
+  only ("on it" / "still working on it" / "it's running" or "there was a problem") — no ids,
+  manifests, or infrastructure narration. The
   **first-run surface** the operator meets is freehold's, not the Buzz desktop app's: the build
   publishes the operator's kind:0 profile (name asked at install, `--display-name`), which makes
   the desktop app SKIP its stock onboarding (no starter channels, no private Welcome, no

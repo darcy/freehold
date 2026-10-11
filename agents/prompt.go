@@ -50,9 +50,10 @@ var grantingSkill string
 var accessUnifiSkill string
 
 // orientationTmplSrc is the shared system-orientation block (repo knowledge,
-// read-on-boot + periodic re-check, the be-loud escalation discipline) prepended
-// to every non-custom prompt: the CPA and the four departments. Custom agents
-// (agents the CPA creates on the fly) do NOT get it.
+// read-on-boot + periodic re-check, the be-loud escalation discipline, and the
+// conversation-flow rules: plumbing in #freehold, plain-language status in user
+// channels) prepended to EVERY agent prompt — the CPA, the four departments,
+// and custom agents alike.
 //
 //go:embed common/orientation.md
 var orientationTmplSrc string
@@ -213,20 +214,20 @@ func DepartmentChannels(name string) []string {
 // SystemPrompt returns the system prompt to ship for a create: a reserved
 // department name selects that department's embedded prompt, prefixed with the
 // shared system orientation; any other name renders the custom template with the
-// purpose supplied at create time (and NO orientation — custom agents are exempt
-// from the repo/escalation block). This is the single selection point for which
-// definition a create uses. repoURL empty = the upstream default; operatorTZ
-// empty = no timezone note.
+// purpose supplied at create time — the orientation block is shared by every
+// agent (custom included), so the conversation-flow rules live in one place.
+// This is the single selection point for which definition a create uses.
+// repoURL empty = the upstream default; operatorTZ empty = no timezone note.
 func SystemPrompt(name, purpose, repoURL, operatorTZ string) string {
 	if p, ok := DepartmentPrompt(name); ok {
 		return renderOrientation(repoURL, operatorTZ) + "\n\n" + strings.TrimRight(p, "\n")
 	}
-	return AgentSystemPrompt(name, purpose)
+	return renderOrientation(repoURL, operatorTZ) + "\n\n" + AgentSystemPrompt(name, purpose)
 }
 
 // AgentSystemPrompt renders the created-agent prompt for a given name and
-// purpose — the custom template, with no system orientation. An empty purpose
-// omits the purpose paragraph entirely.
+// purpose — the custom template. An empty purpose omits the purpose paragraph
+// entirely.
 func AgentSystemPrompt(name, purpose string) string {
 	var b strings.Builder
 	// The template is fixed at build time and all referenced fields are

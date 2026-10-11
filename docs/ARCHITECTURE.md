@@ -444,7 +444,7 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
 *   **`agents/`** is its own Go module — `freehold/` (the freehold named agent:
     the CPA's purpose + skills), `custom/` (the template for agents the CPA
     creates on the fly), `common/orientation.md` (the shared system-orientation
-    block composed onto every non-custom prompt), the four **department
+    block composed onto every prompt — custom agents included), the four **department
      definitions** (`network/`, `data/`, `compute/`, `ai/` — each a
     distinct identity scoped to one domain), and named
     agents that grow over time. It is
@@ -491,7 +491,12 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     `create_agent` (`docs/AI.md`, the agent runtime). All join the private
     `#freehold` channel (there are no per-department channels; conversations
     happen where they already are, with #freehold the fallback every core agent
-    belongs to).
+    belongs to). Custom agents join `#freehold` too — `create_agent` adds it to
+    every create: #freehold is the shared workroom where all agent-to-agent
+    plumbing (hand-offs, delegation, verification) lives, and the channel the
+    user asked in gets plain-language status only ("on it" / "still working on
+    it" / "it's running" or "there was a problem"), never infrastructure
+    narration.
 
 *   **The first-run surface the operator meets is freehold's, not the Buzz
     desktop app's.** The build publishes the operator's kind:0 profile (the
@@ -534,14 +539,16 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     "reachable outside your network?"), and a "no" is final — the gap is a visible
     choice, not a silent one. The trigger is unbuilt (`docs/FREEHOLD.md`).
 
-*   **Every non-custom agent is oriented the same way.** The CPA and the four
-    departments are prefixed with a shared system-orientation block: the source repo
+*   **Every agent is oriented the same way.** The CPA, the four departments, and
+    custom agents alike are prefixed with a shared system-orientation block: the source repo
     URL (configurable; upstream default) with **real read access** (the repo is
     public — clone and read from `main`; write access is unwired, so agents consult
     but never push), read-it-on-boot + keep a memory + re-check periodically, the
-    VISION-is-the-why / ARCHITECTURE-is-the-how pairing, and the "be loud" rule —
+    VISION-is-the-why / ARCHITECTURE-is-the-how pairing, the "be loud" rule —
     surface problems and missing access to freehold and the operator, never
-    silently. Custom agents (those the CPA creates on the fly) are exempt.
+    silently — and the conversation-flow rule: agent-to-agent plumbing happens in
+    `#freehold` (every agent is a member), user channels get plain-language
+    status only.
 
 ### Grants on the fly (agent-initiated capability)
 
@@ -931,12 +938,17 @@ The department-owned architecture and the plans each domain carries:
     the same harness class, installed as part of the core build.
 *   **The agent org is two tiers: the CPA and four departments.** The CPA is the
     sole user touchpoint; Network / Data / Compute / AI are its direct reports, each
-    a distinct identity scoped to one domain. Communication is unrestricted;
-    capability execution is bounded — a department-owned capability is executed by
+    a distinct identity scoped to one domain. Core agents talk to each other
+    (including the CPA) but not to custom agents — a custom agent's only
+    counterpart for work is the CPA, which routes to the departments; capability
+    execution is bounded — a department-owned capability is executed by
     that department's identity and its raw grant attaches there, never to a custom
     agent. Service lifecycle is not a department — the agent that created a service
     owns it. The four are installed at build, all in the private `#freehold`
-    channel; only the identity/grant separation is locked.
+    channel — as is every custom agent (`create_agent` joins it automatically):
+    #freehold is the workroom where all agent-to-agent plumbing lives, and the
+    channel the user asked in gets plain-language status only. Only the
+    identity/grant separation is locked.
 *   **LiteLLM** as a k8s Deployment, config via env, state in Postgres.
 *   **Storage:** ZFS / LVM-thin now → Ceph on a second box. Layered reliability.
 *   **Buzz relay is headless;** the first-party **console** is the admin/ops
