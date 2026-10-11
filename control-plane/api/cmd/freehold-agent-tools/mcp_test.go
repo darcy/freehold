@@ -393,6 +393,58 @@ func TestRouteRunnerFailClosed(t *testing.T) {
 	if err != nil || rc.target != "pve-ssh-root" {
 		t.Fatalf("single-runner pod must pin its one target: %v (err %v)", rc, err)
 	}
+
+	// The fail-closed error is SELF-EXPLANATORY: it names what arrived (the
+	// argument KEYS — the agent corrects the omission in one turn instead of
+	// guessing).
+	_, err = b.routeRunner(&struct {
+		Name      string                 `json:"name"`
+		Arguments map[string]interface{} `json:"arguments"`
+	}{Arguments: map[string]interface{}{"cmd": "pct list"}})
+	if err == nil || !strings.Contains(err.Error(), "arrived with arguments [cmd]") || !strings.Contains(err.Error(), "target missing or empty") {
+		t.Fatalf("the fail-closed error must carry the arrived keys: %v", err)
+	}
+}
+
+// TestExecSchemaRequiresTargetOnMultiRunnerPods pins the honest contract: a
+// multi-runner pod has NO default route, so the exec schema's required list
+// carries target (the harness enforces it before the bridge is ever woken);
+// a single-runner pod pins and keeps target optional.
+func TestExecSchemaRequiresTargetOnMultiRunnerPods(t *testing.T) {
+	required := func(t *testing.T, defs []map[string]interface{}, name string) []string {
+		t.Helper()
+		for _, d := range defs {
+			if d["name"] != name {
+				continue
+			}
+			schema, _ := d["inputSchema"].(map[string]interface{})
+			switch req := schema["required"].(type) {
+			case []string:
+				return req
+			case []interface{}:
+				out := make([]string, 0, len(req))
+				for _, v := range req {
+					out = append(out, v.(string))
+				}
+				return out
+			}
+			t.Fatalf("no required list on %s", d["name"])
+			return nil
+		}
+		return nil // the tool absent = nil (the caller asserts)
+	}
+	multi := required(t, freeholdToolDefs(true, []string{"pve-ssh-root", "kube-api-caddysa"}), "exec")
+	if len(multi) != 2 || multi[0] != "cmd" || multi[1] != "target" {
+		t.Fatalf("a multi-runner pod's exec must require cmd+target: %v", multi)
+	}
+	single := required(t, freeholdToolDefs(true, []string{"pve-ssh-root"}), "exec")
+	if len(single) != 1 || single[0] != "cmd" {
+		t.Fatalf("a single-runner pod's exec keeps target optional: %v", single)
+	}
+	norunner := required(t, freeholdToolDefs(false, nil), "exec")
+	if norunner != nil {
+		t.Fatalf("no runner coords = no exec tool at all: %v", norunner)
+	}
 }
 
 // TestFreeholdToolSchemasMatchServer pins the bridge's mirrored tool schemas

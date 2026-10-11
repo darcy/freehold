@@ -21,6 +21,7 @@ import (
 	"os"
 	"os/exec"
 	"strconv"
+	"sort"
 	"strings"
 	"time"
 
@@ -113,8 +114,16 @@ func freeholdToolDefs(hasRunner bool, targets []string) []map[string]interface{}
 	}
 	if hasRunner {
 		execDesc := "Run a shell command VERBATIM on a capability runner's target through the runner-owned connection (the credential is fixed per target by this pod's config). Pass no secrets. Returns {stdout, stderr, exit_code, timed_out}."
+		// The schema tells the truth about routing: a multi-runner pod has NO
+		// default route, so target is REQUIRED there — an optional target
+		// invites an omitted field, and the bridge's fail-closed error is a
+		// wasted round trip. A single-runner pod pins; target stays optional.
+		required := []string{"cmd"}
 		if len(targets) > 1 {
-			execDesc += " target: which capability to use — one of [" + strings.Join(targets, ", ") + "]."
+			execDesc += " target is REQUIRED on this pod — there is no default route."
+			required = []string{"cmd", "target"}
+		} else if len(targets) == 1 {
+			execDesc += " target: this pod pins to " + targets[0] + "."
 		}
 		defs = append(defs,
 			map[string]interface{}{"name": "exec", "description": execDesc,
@@ -124,7 +133,7 @@ func freeholdToolDefs(hasRunner bool, targets []string) []map[string]interface{}
 					"stream":     map[string]interface{}{"type": "boolean"},
 					"session_id": map[string]interface{}{"type": "string"},
 					"timeout_s":  map[string]interface{}{"type": "integer"},
-				}, []string{"cmd"})},
+				}, required)},
 			map[string]interface{}{"name": "list", "description": "List the capability targets this pod can reach.",
 				"inputSchema": i(map[string]interface{}{}, []string{})},
 		)
@@ -247,7 +256,9 @@ func (b *mcpBridge) forwardRunner(raw []byte) ([]byte, error) {
 
 // routeRunner resolves which capability runner serves an exec call: an
 // explicit target must be one this pod holds; absent, a single-runner pod
-// pins to it and a multi-runner pod fails closed (naming the options).
+// pins to it and a multi-runner pod fails closed (naming the options — and
+// WHAT ARRIVED, so the agent's next attempt is a correction, not a guess:
+// the error rides back into the agent's own context).
 func (b *mcpBridge) routeRunner(call *struct {
 	Name      string                 `json:"name"`
 	Arguments map[string]interface{} `json:"arguments"`
@@ -263,7 +274,16 @@ func (b *mcpBridge) routeRunner(call *struct {
 	if len(b.runners) == 1 {
 		return &b.runners[0], nil
 	}
-	return nil, fmt.Errorf("target required — this pod can reach [%s]", strings.Join(b.targetNames(), ", "))
+	keys := make([]string, 0, len(call.Arguments))
+	for k := range call.Arguments {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	if len(keys) == 0 {
+		keys = append(keys, "none")
+	}
+	return nil, fmt.Errorf("target required (the call arrived with arguments [%s] — target missing or empty; pass target: one of [%s]) — this pod can reach [%s]",
+		strings.Join(keys, ", "), strings.Join(b.targetNames(), ", "), strings.Join(b.targetNames(), ", "))
 }
 
 // targetListText renders the list tool's answer from this pod's config.
@@ -485,6 +505,7 @@ func runBridge(in io.Reader, out io.Writer, b *mcpBridge) error {
 				resp, err := b.forwardRunner(raw)
 				if err != nil {
 					logBridge("runner-forward", call.Name, err.Error())
+					logBridge("runner-forward-raw", truncN(raw, 4096))
 					resp = rpcErrorWrapper(raw, err)
 				}
 				writeResp(w, resp)
@@ -795,10 +816,14 @@ func logBridge(v ...interface{}) {
 }
 
 // trunc keeps a short diagnostic prefix of a line.
-func trunc(b []byte) string {
+func trunc(b []byte) string { return truncN(b, 120) }
+
+// truncN is trunc with an explicit cap (the route-failure path logs the full
+// call shape so a dropped field is SEEN, not inferred).
+func truncN(b []byte, cap int) string {
 	s := strings.ReplaceAll(string(b), "\n", "\\n")
-	if len(s) > 120 {
-		s = s[:120] + "…"
+	if len(s) > cap {
+		s = s[:cap] + "…"
 	}
 	return s
 }
