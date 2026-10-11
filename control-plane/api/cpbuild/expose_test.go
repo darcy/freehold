@@ -1049,6 +1049,12 @@ func TestPangolinEnsureAssertsTheGatewayNewt(t *testing.T) {
 	if !strings.Contains(joined, "systemctl restart newt") {
 		t.Fatal("the unit must restart so a re-minted secret lands live")
 	}
+	if !strings.Contains(joined, "chmod 755 /usr/local/bin/newt") {
+		t.Fatal("the pushed binary must get its exec bit (pct push copies 0644)")
+	}
+	if !strings.Contains(joined, `--id \${NEWT_ID}`) {
+		t.Fatal("the unit heredoc must escape the dollars — the shell writing the unit must not expand them")
+	}
 }
 
 // TestPangolinHostedGatewayAssertsBareNewt pins the api-vultr shape: the

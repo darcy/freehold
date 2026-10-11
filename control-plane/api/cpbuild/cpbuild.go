@@ -152,6 +152,10 @@ type Spec struct {
 	// VPS, the vhosts live on Pangolin's edge). Nil = the direct Caddy edge.
 	Pangolin *config.PangolinCoords
 
+	// newtAsserted: the gateway's Newt stage ran once this build (the tail
+	// re-ensures per record — the stage is once-per-build, not per-app).
+	newtAsserted bool
+
 	// AgentRegistry/FactsStore are the running agent-tools server's in-process
 	// durable stores, set only when the build runs INSIDE that server (its own
 	// world_build tool). nil for the console executor, which opens its own copy

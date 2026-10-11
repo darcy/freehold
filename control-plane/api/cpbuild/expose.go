@@ -31,6 +31,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -439,6 +440,14 @@ const (
 	newtURL     = "https://github.com/fosrl/newt/releases/download/" + newtVersion + "/newt_linux_amd64"
 )
 
+// newtFieldRe bounds the identity fields (generateId's alphabet) and
+// newtEndpointRe the endpoint — the only shapes that may reach the gateway
+// script (see the interpolation guard in ensureNewtGateway).
+var (
+	newtFieldRe    = regexp.MustCompile(`^[a-zA-Z0-9-]{1,128}$`)
+	newtEndpointRe = regexp.MustCompile(`^https?://[A-Za-z0-9.:\-_/@]+$`)
+)
+
 // ensureNewtGateway asserts the gateway's Newt tunnel client — the public
 // path's dial-out leg, re-asserted by every build like the nftables
 // ruleset (docs/NETWORK.md). The binary downloads on the host (best-effort
@@ -449,12 +458,27 @@ const (
 // the host. endpoint is the Pangolin instance's external API origin (what
 // Newt dials).
 func (s *Spec) ensureNewtGateway(endpoint string) error {
+	if s.newtAsserted {
+		return nil // once per build — N apps re-ensure the stage N times otherwise
+	}
 	ident, err := s.newtIdentity()
 	if err != nil {
 		return err
 	}
 	if endpoint == "" {
 		return fmt.Errorf("the pangolin credential lacks PANGOLIN_ENDPOINT (the instance origin Newt dials, e.g. http://vps:3000)")
+	}
+	// The identity and endpoint interpolate into a ROOT shell script on the
+	// gateway — a strict allowlist FIRST, so the instance (or a fat-fingered
+	// paste) can never carry a shell metacharacter onto the box.
+	if !newtFieldRe.MatchString(ident.ID) {
+		return fmt.Errorf("the Newt id %q is not a plain token (^[a-zA-Z0-9-]{1,64}$) — refusing to interpolate it into the gateway script", ident.ID)
+	}
+	if !newtFieldRe.MatchString(ident.Secret) {
+		return fmt.Errorf("the Newt secret is not a plain token (^[a-zA-Z0-9-]{1,128}$) — refusing to interpolate it into the gateway script")
+	}
+	if !newtEndpointRe.MatchString(endpoint) {
+		return fmt.Errorf("the pangolin endpoint %q is not a plain http(s) origin — refusing to interpolate it into the gateway script", endpoint)
 	}
 	// The binary: present-or-download. The download rides the HOST (the
 	// runner's own box) — the guests' outbound varies; the host's is the
@@ -470,9 +494,10 @@ fi
 		binEnsure = fmt.Sprintf(`if ! pct exec %d -- test -x /usr/local/bin/newt; then
   curl -sL -o /tmp/fh-newt %s
   pct push %d /tmp/fh-newt /usr/local/bin/newt
+  pct exec %d -- chmod 755 /usr/local/bin/newt
 fi
 pct exec %d -- test -x /usr/local/bin/newt
-`, s.GatewayLxc, newtURL, s.GatewayLxc, s.GatewayLxc)
+`, s.GatewayLxc, newtURL, s.GatewayLxc, s.GatewayLxc, s.GatewayLxc)
 	}
 	gw := func(script string) string {
 		if s.HostedGateway {
@@ -495,7 +520,7 @@ Wants=network-online.target
 
 [Service]
 EnvironmentFile=/etc/freehold-newt.env
-ExecStart=/usr/local/bin/newt --id ${NEWT_ID} --secret ${NEWT_SECRET} --endpoint ${NEWT_ENDPOINT}
+ExecStart=/usr/local/bin/newt --id \${NEWT_ID} --secret \${NEWT_SECRET} --endpoint \${NEWT_ENDPOINT}
 Restart=always
 RestartSec=5
 
@@ -512,6 +537,7 @@ systemctl restart newt
 	if err := s.run(gw(unit), 120); err != nil {
 		return fmt.Errorf("the newt unit: %w", err)
 	}
+	s.newtAsserted = true
 	return nil
 }
 
