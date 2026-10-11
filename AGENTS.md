@@ -261,8 +261,8 @@ shells (tmux/herdr panes included) via the `freehold` CLI / SSH / doors — the 
   it needs), and **AI** (models/providers/agents, plus AI hardware — local-AI
   accelerators like an RTX 3090 or DGX Spark are provisioned and tuned by AI, separate
   from Compute's general resources) are its direct reports, each a distinct identity scoped to
-  one domain. The operator and any agent may converse with any department or agent directly;
-  core agents talk to each other (including the CPA) but not to custom agents — a custom
+  one domain. The operator may converse with any department or agent directly, and agents
+  may converse with each other — but core agents do not talk to custom agents: a custom
   agent's only counterpart for work is the CPA, which routes to the departments; what is
   bounded is *capability execution*. On the wire the
   talk surface is buzz-acp's inbound author gate: the CPA responds to **anyone** (relay
