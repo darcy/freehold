@@ -131,8 +131,6 @@ regardless of it.
     create, snapshot, and teardown engines remain reached by the composition
     roots directly.
 *   Core guests (relay, k3s, gateway) have no runner-client.
-*   World-config can lose create params after an update; a later teardown → rebuild may fail
-    at guest creation.
 *   Pre-terraform kube workloads can't be adopted; a re-adopted plane's `terraform destroy`
     can reach another world's cluster (needs a cluster-identity guard).
 *   `uninstall` leaves the cp-verb key's host line behind: the key cleanup collects the
@@ -146,13 +144,6 @@ regardless of it.
     yielding host root SSH. Only after `uninstall --remove-data` is the leftover line a true
     orphan. Adding the cp-verb key to the uninstall's key refs is the cleanup —
     security-relevant, not hygiene.
-*   **The re-adopt door: uninstall removes the host's `authorized_keys` line and the
-    provision-REUSE path never re-prints it.** An uninstall strips the box's substrate line
-    from the host; a re-install then reuses the runner package ("already exists" — no fresh
-    key printed, no door gate) and fails the transient door check with an EMPTY message (that
-    path lacks the served-runner path's recover/print affordance). Live-proven three times on
-    the gateway reinstall round. Fix: the reuse path re-derives + prints the door line, and
-    the transient verify carries the same recover/print affordance.
 *   **The fresh-install CP package is a wholesale clone of the box's runner package** — so a
     later re-adopt's substrate rotation drops the BOX's own line as "the old one" (the same
     key body in both packages; the box's door dies mid-reinstall, the adopt fails on the dead
@@ -160,7 +151,9 @@ regardless of it.
     credential to the CP at first deploy (or exempt the box's own line from the rotation's
     deauthorize).
 *   The transient uninstall can't destroy running guests (no stop-first).
-*   No per-guest or per-pod resource bounds (no `--cores`, no requests/limits, no quota).
+*   No per-guest resource bounds (no `--cores`), and the service manifests carry no
+    CPU/memory requests or limits — a kube slot's optional ResourceQuota is the one
+    exception.
 *   Create-device storage is deferred.
 *   A kube slot's token read is substrate-local (`pct exec` into the k3s
     guest); a kube cluster on a remote box needs a credential-source seam

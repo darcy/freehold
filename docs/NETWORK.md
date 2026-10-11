@@ -156,8 +156,9 @@ The gateway has TWO shapes, one per substrate:
     dials out). The client lives at `platform/services/pangolin`. The member gate on this
     path is Pangolin's own resource auth (its badger middleware) — the freehold verify
     gate's exact shape there is its own item below.
-*   **More DNS providers:** a provider registry (`dnsman`, hoisted out of the cloudflare
-    package) with per-provider A-record managers — Route53, Google Cloud DNS,
+*   **More DNS providers:** the provider registry (`dnsman` — it exists today beside the
+    Cloudflare manager, which is its only registration) grows per-provider A-record
+    managers — Route53, Google Cloud DNS,
     DigitalOcean — hand-rolled REST like the Cloudflare one (no SDKs; Route53's SigV4
     signed by hand), plus a shared metadata table (credential fields + manage
     capability) feeding the interactive ask and the doors; generalized

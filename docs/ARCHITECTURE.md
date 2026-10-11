@@ -21,7 +21,8 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
         ┌──────────────────┘   │   (gates: signature, audience, expiry, replay)
         ▼                      ▼
    freehold / the CP (Go) drives freehold-runner (Rust, independent)
-        │  single `exec` MCP tool (runShell) — dumb privileged hands
+        │  MCP: `exec` (the one work tool) + runner-management tools
+        │  (`list`/`config`/`status`/`upload`/`snapshot`) — dumb privileged hands
         │  signed, addressable, audited
         │  NO LLM, NO router, NO key vault in either
         ▼
@@ -98,8 +99,8 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
   `control-plane/` (server-only).
 
 * **Contents:** NIP-44 v2 encryption (chacha20poly1305, bech32, hkdf-sha256,
-  sha256, hex) and the signer (`CryptoProvider` over `CryptoDyn` —
-  `secp256k1` + `ring` only; `bip39`, `bs58`, and `keyring` are unused).
+  sha256, hex) and the signer — secp256k1 signing via `btcec/v2`,
+  X25519 + ChaCha20-Poly1305 sealed boxes via `x/crypto`.
 
 * **Rust→Go port status:** the Go `contract/crypto` reproduces the Rust
   `core` surface **byte-exactly** — verified by
@@ -109,12 +110,13 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
   ed25519, `SecretPackage` as sorted-map JSON matching serde's `BTreeMap`
   output, NIP-98 canonical events, kind-48001 audit, NIP-44 v2 engrams).
 
-* **`RunnerCall`:** `{call_id, ts, nonce, issuer, audience, tool, args, sig}`
-  (full schema + per-field notes in `RUNTIME_CONTRACT.md`).
+* **The signed call:** MCP `tools/call` authorized by a canonical string —
+  `{runner_pubkey}|{ts}|{raw}` — signed by the caller
+  (`contract/client/mcp.go`).
 
-* **`SecretPackage`:** `{secrets:[{name, ciphertext(nonce‖ct), nonce,
-  aad:"<name>", alg:"sealed-ex-nopb-hkdf-sha256-cha20p1305", tags,
-  issuer, audience:[...], active, created}]}`.
+* **`SecretPackage`:** `{secrets: {name → sealed ciphertext}, targets,
+  grants}` — the name-keyed ciphertext map plus the target and grant rows it
+  ships with (`contract/wire/secrets.go`).
 
 * **`identity.json` / `providers.json`:** identity holds `nostr_secret`
   (nsec) + `enc_secret` (nenc), both encrypted under the *plaintext*
@@ -130,7 +132,7 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     byte-gate), `runner/`, and `testkit/` (the runner's hermetic fixtures). The
     acceptance gate is Go under `acceptance/`, driving the real
     `runner` binary as a subprocess. The local operator interface (`freehold`
-    CLI + TUI, `login/`, `flows/`, install) lives in the sibling
+    CLI + TUI, `login/`, install) lives in the sibling
     `freehold-cli/` module; the server never imports it.
 
 *   **Two apps, zero cross-imports (local/server split).** The server
@@ -297,8 +299,9 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
 
 ### `freehold` TUI (bubbletea; the operator's console)
 
-*   **It is bubbletea, not HTML.** `freehold-cli/tui/tui.go` is full-screen
-    alt-screen (`tea.NewProgram(m, WithAltScreen(), …)`); `freehold` with no
+*   **It is bubbletea, not HTML.** `freehold-cli/cmd/freehold` launches the
+    full-screen alt-screen program (`tea.NewProgram(m, WithAltScreen(), …)`);
+    `freehold-cli/tui/` defines the model and views; `freehold` with no
     args enters it, a subcommand routes to the CLI.
 
 *   **Seven views**, cycled with `Tab` / `Shift-Tab`: Services · Agents ·
@@ -375,10 +378,13 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
 
 *   **`platform/services/<capability>/<impl>/`** names services by stable
     capability + swappable implementation: `relay/buzz/` (the relay deploy
-    driver), `webproxy/caddy/` (the TLS edge), `llmproxy/litellm/` (kube
-    manifests), `database/postgres/`, `internaldns/dnsmasq/`,
-    `externaldns/cloudflare/` (`dnsman`), `certificates/letsencrypt/` (`cert`,
-    lego provider registry).
+    driver), `webproxy/caddy/` (the TLS edge),
+    `externaldns/cloudflare/` (`dnsman` — the DNS-provider registry, Cloudflare
+    today), `certificates/letsencrypt/` (the lego cert path), and
+    `pangolin/` (the Pangolin integration-API client — the public-path north
+    star). LiteLLM's kube definitions live in
+    `control-plane/api/cpbuild/terraform/litellm.tf`; dnsmasq handling in the
+    console's support surface.
 
 *   **`platform/` is provider-independent.** Substrate-specific commands
     (Proxmox `pct`, LVM/ZFS, later Vultr/Hetzner APIs) live behind the
@@ -733,16 +739,18 @@ freehold exec blog 'curl -sS "$VULTR_URL/v2/instances" -H "Authorization: Bearer
   --runner-pubkey <runner-nostr>
 ```
 
-1.  `run_call` validates signature (roster), audience, expiry, and nonce, and
-    selects the connector.
-2.  `runShell` executes the command **verbatim**, streaming output.
-3.  Results (`//> …` / `<! …`) return to the calling agent.
+1.  The runner validates the call's signature (against the whitelist),
+    audience, and timestamp window, and selects the target.
+2.  `exec` executes the command **verbatim**, streaming output.
+3.  Results return to the calling agent as the tool result's `stdout`/`stderr`.
 
-**No MCP, no REST, no LLM, no router, no key vault in the runner.** A connector
+**No MCP router, no LLM, no key vault in the runner.** A connector
 MUST NOT cache plaintext credentials, hold a "master key," or consult the router
-— credentials are injected per attempt via `envFrom`/`env`, and the LiteLLM
-router is an **API connector** whose `baseUrl` and `apiKey` ride as env vars
-(`LITELLM_HOST`, `LITELLM_API_KEY`).
+— credentials are injected per attempt as env vars named for the secret
+(uppercase, non-alphanumerics → `_`: `vultr-api-key` → `VULTR_API_KEY`; an API
+connector's address rides `<NAME>_URL`), and the LiteLLM router is an **API
+connector** whose key rides `LITELLM_API_ADMIN`, its base URL
+`LITELLM_API_ADMIN_URL`, and the gateway provider's key `PROVIDER_KEY`.
 
 **The whitelist has two sources.** With a relay configured (`--relay-url` +
 `--relay-pubkey`, plus `--relay-auth-url` when the dial is a LAN origin — the
@@ -828,21 +836,14 @@ funnel for substrate and service work (`pct`, `qm`, `zfs`, `lvm`, `systemctl`,
 
 ### Targets (where the work lands)
 
-| Kind | Example target | Connector | State |
-| --- | --- | --- | --- |
-| `pct` LXC | relay (`<name>-relay`) | `pve` | `lxc.<role>` |
-| `pct` LXC | k3s (`<name>-k3s`) | `k8s` | `lxc.k3s` |
-| `pct` LXC | control plane | `local` | `cp.<role>` |
-| `vm` | … | `api` | `provider.<name>` |
-
-*   **A `TargetId`** is `pct`, `qm`, `pve`, `k8s`, `local`, `ssh`, `api`, or
-    `proxy` (full grammar in `control-plane/runner`; `TargetId::parse` lives
-    there).
-*   **`exec` is the one tool;** `local` is a generic exec on the runner itself
+*   **A target is `{name, kind}`** (`control-plane/runner/src/registry.rs`):
+    the substrate kinds — `local` (the runner's own box) and `ssh` (a host or
+    guest over root SSH) — plus one api-class kind per connector (`kubernetes`,
+    `vultr`, `b2`, `hetzner`, `github`, `websearch`, `litellm`, `cloudflare`,
+    `unifi`).
+*   **`exec` is the one work tool;** `local` is a generic exec on the runner itself
     (used by `provision`/`rotate` for `zfs` and `vzdump`), *not* a proxy,
     delegate-peer, or "executes in the control plane LXC."
-*   **`<id>` is the VMID,** not an LXC ID. **`<nn>`:** `managedStore{root}` at
-    `/srv/data/cp`, **not** `managed: false`.
 
 ### The single control plane (CP)
 
@@ -857,15 +858,12 @@ funnel for substrate and service work (`pct`, `qm`, `zfs`, `lvm`, `systemctl`,
 
 ### Skills
 
-*   **A skill is a directory** (`SKILL.md`) with YAML frontmatter (`name`,
-    `description`, `metadata.openclaw.*`); the `metadata` key holds **`openclaw`**
-    (or **`omarchy`**), and *all* supported values live under it. **One skill = one
-    host = one `SKILL.md`.**
-*   **Skills are composed onto an agent's prompt** (`agents/<name>/skills/*.md`,
-    through `agents/prompt.go`): the CPA carries `granting` and `access-unifi`, Data
-    `snapshot`, Compute `create-lxc`. There is no `freehold skill` CLI.
+*   **A skill is a markdown file** composed onto an agent's prompt
+    (`agents/<name>/skills/*.md`, through `agents/prompt.go`): the CPA carries
+    `granting` and `access-unifi`, Data `snapshot` + `backblaze`, Compute
+    `create-lxc`, AI `litellm-ui-user`. There is no `freehold skill` CLI.
 *   **Never encode `sk-…`, `nsec…`, or `nenc…`** in a skill.
-*   **The agent MUST verify every `SKILL.md` command** against the real thing
+*   **The agent MUST verify every skill's commands** against the real thing
     (e.g. loopback `127.0.0.1:3000`) before documenting it; **don't guess from
     prose** — probe first.
 *   The skill schema's growth (`target:` hints, `verify:` postconditions) is a plan,
@@ -921,9 +919,11 @@ The department-owned architecture and the plans each domain carries:
 
 *   **Buzz is required; the management relay is created by the install; one relay
     per control plane** (relay-as-scope).
-*   **Agent = brain, runner = dumb privileged hands.** `exec(cmd, target, stream?)`
-    and `run_call` are the only tools; one `exec` tool per runner; `//>`/`<!`
-    frames stream the result. No semantic tools.
+*   **Agent = brain, runner = dumb privileged hands.** One work tool:
+    `exec(cmd, target, stream?)`; the runner's other MCP tools (`list`,
+    `config`, `status`, `upload`, `snapshot`) manage the runner itself.
+    Streaming is a property of `exec`; results return as `stdout`/`stderr`.
+    No semantic tools.
 *   **Secrets via the provisioner model** — a runner holds ciphertext + an injected
     key; an agent uses, never reads.
 *   **Deterministic agent pods:** every agent (the CPA and created ones alike) runs
