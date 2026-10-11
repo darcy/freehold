@@ -746,9 +746,11 @@ freehold exec blog 'curl -sS "$VULTR_URL/v2/instances" -H "Authorization: Bearer
 
 **No MCP router, no LLM, no key vault in the runner.** A connector
 MUST NOT cache plaintext credentials, hold a "master key," or consult the router
-— credentials are injected per attempt via `envFrom`/`env`, and the LiteLLM
-router is an **API connector** whose `baseUrl` and `apiKey` ride as env vars
-(`LITELLM`, `PROVIDER_KEY`).
+— credentials are injected per attempt as env vars named for the secret
+(uppercase, non-alphanumerics → `_`: `vultr-api-key` → `VULTR_API_KEY`; an API
+connector's address rides `<NAME>_URL`), and the LiteLLM router is an **API
+connector** whose key rides `LITELLM_API_ADMIN`, its base URL
+`LITELLM_API_ADMIN_URL`, and the gateway provider's key `PROVIDER_KEY`.
 
 **The whitelist has two sources.** With a relay configured (`--relay-url` +
 `--relay-pubkey`, plus `--relay-auth-url` when the dial is a LAN origin — the
