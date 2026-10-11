@@ -59,27 +59,49 @@ The gateway has TWO shapes, one per substrate:
     service up (a homelab agent deploying a family calendar), reaching it is a Network
     capability: the **exposure verbs** (`expose_app` / `unexpose_app` on the agent toolset)
     turn {name, target, group} into a public TLS vhost on the edge — DNS pointed
-    (`<name>.<world domain>` — a SIBLING of the cp host: yuvomi.librem.freehold.technology; the member cookie scopes to the zone — → the proxy), a cert — ONE SHARED wildcard for the cp host's domain, issued once through the same
+    (`<name>.<the world's own domain>` — a child of the world root: the CP host with a
+    literal `cp.`/`admin.` label stripped — but only when a world label remains below
+    the zone, so `cp.example.com` keeps its name — else the CP host itself:
+    `cp.librem.freehold.technology` → `litellm.librem.freehold.technology`;
+    `sandbox.freehold.technology` → `litellm.sandbox.freehold.technology`; the member
+    cookie scopes to the same world domain — the world's boundary, never the shared zone), a cert — ONE SHARED wildcard for the world domain, issued once through the same
     in-process lego chain (an expose after that is DNS + config only — no per-app LE order), the Caddy config rendered + applied live — and the record lands
     in the **apps registry** (`apps.json`, the toolset's durable dir), which the build tail
-    re-ensures so teardown/rebuild restores the apps. Two invariants: **cert before
+    re-ensures so teardown/rebuild restores the apps (a row written by an older naming
+    shape re-derives to the world-domain shape and its stale public record is removed on
+    the next ensure). Two invariants: **cert before
     config** (a vhost whose cert is missing crash-loops the whole edge — an app's block
     enters the rendered Caddyfile only once its cert is installed) and **access narrows to
     groups the requester belongs to** (below). The gate is the console's **member identity
     tier**: NIP-07 Nostr login admitted by the relay's NIP-43 membership list plus
     single-use device-link invites (the no-Nostr path); gated apps verify through
     `/auth/verify` (a browser gets the 302 to the login page, an API client the 401), and
-    the operator session passes the same gate. Scope is structural: only the **network**
+    the operator session passes the same gate. The **gate is the standing default
+    posture**: every exposed app is member-gated unless the OPERATOR says otherwise for
+    that specific app — gate-off (`auth: app`/`none`, `visibility: public`) is an
+    operator-only exception, never an agent's default. Scope is structural: only the **network**
     department's identity or the operator may call the verbs; a custom agent that asks
     directly is refused (`-32003`) and routes through Network in conversation — and
     widening (`visibility: public`, `auth: none`) is refused from agents outright.
-    The console at `cp.<domain>` is the **portal**: the console's session-aware
+    The console is the **portal**: the console's session-aware
     launcher (`/api/my/apps`) answers what the asking session can open — the operator
     sees every exposed app, a member sees what their channel roster admits, a device
     session exactly its bound list — and the console renders it as launcher tiles
     (names + FQDNs only, no targets or owners) above the member's own scheduled jobs.
     One login (`/auth`) serves everyone: a whitelisted key lands the operator session,
     any other relay member key lands the member session — the role falls out of the key.
+    The world's tree is the layout — the portal at the world root (`<world>.<zone>`), the
+    operator face at `admin.<world>`, the relay at `chat.<world>` — and `freehold hosts`
+    renames a world onto it (it rewrites the profile's relay/cp URLs and refuses a rename
+    that would move the world's own domain: every exposed app's name anchors there).
+    When the console's host IS the world root (an unrenamed world), no separate portal
+    vhost exists — the console's own vhost serves that name; every prefixed-shape world
+    (the standard `cp.<world>`) has the portal live: its cert and public record ride the
+    same build that serves the vhost.
+    The operator surface is the TUI + the console's admin routes; the portal is the
+    member surface — two front doors over one backend. The origin guard accepts exactly
+    two origins — the console's own and the world root (never app children: same-site
+    subdomain requests would ride the operator session).
 *   **The optional Pangolin public path.** A world whose coords carry a `pangolin` block
     routes exposed apps through a Pangolin VPS's tunnel instead of pointing public DNS at
     home: the app A records point at the VPS (`dns_ip`) — the home IP appears in no public
@@ -149,8 +171,9 @@ The gateway has TWO shapes, one per substrate:
     they're onboarded (the add-member flow) — the one-time default that makes
     "the app rides #general" mean "available to everyone". Separate concern from the
     exposure verbs.
-*   **More DNS providers:** a provider registry (`dnsman`, hoisted out of the cloudflare
-    package) with per-provider A-record managers — Route53, Google Cloud DNS,
+*   **More DNS providers:** the provider registry (`dnsman` — it exists today beside the
+    Cloudflare manager, which is its only registration) grows per-provider A-record
+    managers — Route53, Google Cloud DNS,
     DigitalOcean — hand-rolled REST like the Cloudflare one (no SDKs; Route53's SigV4
     signed by hand), plus a shared metadata table (credential fields + manage
     capability) feeding the interactive ask and the doors; generalized

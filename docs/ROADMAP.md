@@ -23,15 +23,16 @@ its detail. The released version is the latest GitHub Release (never restated he
 The engine room (runners, the secret provisioner, connectors, readiness, grants), the relay
 scope (real Nostr membership, relay-persisted memory, the durable plane), a reasoning CPA
 that creates agents, the four departments and their runners, grants on the fly, durable
-agent workspaces, the freehold-subnet gateway, and the data plane (snapshot, export, backup).
+agent workspaces, the freehold-subnet gateway, the Vultr VPS provider (the created-host
+substrate), and the data plane (snapshot, export, backup, the off-site backup timer).
 A world converges on one `freehold build`.
 
 ## Now
 
 *   **Agents that ship code** — workspace LXC, durable commits in Buzz's git, a GitHub grant
     (`docs/AI.md`, `docs/COMPUTE.md`).
-*   **Harden the base** — console as a systemd unit, runner crash restart, relay roster
-    reconcile after redeploy, the live-grant roster break (`docs/FREEHOLD.md`).
+*   **Harden the base** — the live-grant roster break (the relay's put-user → re-sign
+    chain) (`docs/FREEHOLD.md`).
 *   **Scheduled jobs everywhere** — every agent offers and manages jobs (`create_job` et al.),
     the CP fires them as console-identity mentions, and the console web + TUI show the
     owner-redacted run state (`docs/AI.md`).
@@ -43,8 +44,9 @@ A world converges on one `freehold build`.
 *   **Agents deploy via Kubernetes** — kube slots (the door layer ships —
     `docs/COMPUTE.md`), skill schema, readiness postconditions,
     the department check-in hook (`docs/COMPUTE.md`, `docs/FREEHOLD.md`).
-*   **A VPS provider** and the gateway on a cloud host (`docs/COMPUTE.md`, `docs/NETWORK.md`).
-*   **Backup scheduling** (`docs/DATA.md`); **Network's first skills** (`docs/NETWORK.md`);
+*   **The gateway on a cloud host** and **Hetzner**, the third substrate
+    (`docs/COMPUTE.md`, `docs/NETWORK.md`).
+*   **Network's first skills** (`docs/NETWORK.md`);
     a **guest inventory** (`docs/FREEHOLD.md`).
 
 ## Later
@@ -70,7 +72,7 @@ docs.
     hardware, restore onto different hardware or a different provider — same identity,
     memory, grants, services. It proves the whole model (durable plane, relay-as-scope,
     deterministic rebuild) under the failure that matters, and doubles as a dogfood clone of
-    production. Needs a restore verb and a VPS provider (`docs/DATA.md`, `docs/COMPUTE.md`).
+    production. Needs a restore verb (`docs/DATA.md`).
 
 ## MVP — the public release
 

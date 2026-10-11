@@ -99,5 +99,5 @@ This is personal and family first. It's about:
 *   The agent as the "wall-breaker" — because the barrier was never access, it was effort.
     
 *   This doc is the single source of truth for the narrative/positioning. The architecture  
-    doc (The AI-operated Appliance — Vision & Architecture) links here for the "why" rather  
+    doc (The AI-operated Appliance — Architecture) links here for the "why" rather  
     than restating it.

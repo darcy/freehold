@@ -40,10 +40,11 @@ func TestComputePromptCarriesCreateLxc(t *testing.T) {
 	}
 }
 
-// TestOrientationOnlyOnNonCustomPrompts: the CPA and every department carry the
-// shared system orientation; the custom template (agents the CPA creates) does
-// not — it is exempt from the repo/escalation block.
-func TestOrientationOnlyOnNonCustomPrompts(t *testing.T) {
+// TestOrientationOnEveryPrompt: the CPA, every department, AND custom agents
+// carry the shared system orientation — the conversation-flow rules (plumbing
+// in #freehold, plain-language status in user channels) live in one place. The
+// raw custom renderer stays bare.
+func TestOrientationOnEveryPrompt(t *testing.T) {
 	const sentinel = "System orientation"
 	if got := CPASystemPrompt("", ""); !strings.Contains(got, sentinel) {
 		t.Errorf("CPA prompt is missing the shared orientation block")
@@ -53,11 +54,11 @@ func TestOrientationOnlyOnNonCustomPrompts(t *testing.T) {
 			t.Errorf("department %q prompt is missing the shared orientation block", name)
 		}
 	}
-	if got := SystemPrompt("waldo", "look after the garden", "", ""); strings.Contains(got, sentinel) {
-		t.Errorf("custom agent prompt must NOT carry the system orientation block")
+	if got := SystemPrompt("waldo", "look after the garden", "", ""); !strings.Contains(got, sentinel) {
+		t.Errorf("custom agent prompt must carry the system orientation block")
 	}
 	if got := AgentSystemPrompt("waldo", ""); strings.Contains(got, sentinel) {
-		t.Errorf("AgentSystemPrompt (custom) must NOT carry the system orientation block")
+		t.Errorf("AgentSystemPrompt (the raw renderer) must not prepend the orientation block")
 	}
 }
 
@@ -122,19 +123,19 @@ func TestDepartmentPromptsEmbeddedWithBoundary(t *testing.T) {
 }
 
 // TestProvisioningAsksFreehold: every composed prompt — the CPA, all four
-// departments, and the custom template — carries the provisioning rule: door
-// staging is freehold-only, asked in-channel (never a DM), with the
-// ask-the-operator fallback when no shared channel exists.
+// departments, and the custom template — carries the workroom rule: door
+// staging is freehold-only, asked in #freehold (never a DM), with the plumbing
+// kept out of user channels.
 func TestProvisioningAsksFreehold(t *testing.T) {
 	prompts := map[string]string{
 		"cpa":    CPASystemPrompt("", ""),
-		"custom": AgentSystemPrompt("waldo", "look after the garden"),
+		"custom": SystemPrompt("waldo", "look after the garden", "", ""),
 	}
 	for _, name := range DepartmentNames() {
 		prompts[name] = SystemPrompt(name, "", "", "")
 	}
 	for name, p := range prompts {
-		for _, want := range []string{"never a DM", "freehold is not in this channel"} {
+		for _, want := range []string{"never a DM", "plumbing"} {
 			if !strings.Contains(p, want) {
 				t.Errorf("%s prompt is missing %q", name, want)
 			}
@@ -216,8 +217,9 @@ func TestSystemPromptFallsBackToCustomTemplate(t *testing.T) {
 }
 
 // TestOrientationOperatorTZ: the timezone note renders only when the operator
-// timezone is set — core agents learn the zone; an unset setting renders no
-// note at all (the pods-run-UTC default, unchanged shape).
+// timezone is set — every agent learns the zone (custom agents included, the
+// orientation block is shared); an unset setting renders no note at all (the
+// pods-run-UTC default, unchanged shape). The raw custom renderer stays bare.
 func TestOrientationOperatorTZ(t *testing.T) {
 	got := CPASystemPrompt("", "America/Chicago")
 	if !strings.Contains(got, "America/Chicago") || !strings.Contains(got, "Timezones") {
@@ -231,9 +233,13 @@ func TestOrientationOperatorTZ(t *testing.T) {
 	if !strings.Contains(dept, "Europe/Berlin") {
 		t.Errorf("SystemPrompt(department) must carry the timezone note")
 	}
-	custom := AgentSystemPrompt("waldo", "")
-	if strings.Contains(custom, "Timezones") {
-		t.Errorf("custom agents carry no orientation block, timezone note included")
+	custom := SystemPrompt("waldo", "", "", "Europe/Berlin")
+	if !strings.Contains(custom, "Europe/Berlin") {
+		t.Errorf("SystemPrompt(custom) must carry the timezone note")
+	}
+	raw := AgentSystemPrompt("waldo", "")
+	if strings.Contains(raw, "Timezones") {
+		t.Errorf("AgentSystemPrompt (raw) renders no orientation, timezone note included")
 	}
 }
 

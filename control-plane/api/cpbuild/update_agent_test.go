@@ -78,8 +78,8 @@ func TestResolvedUpdateKeepsAbsentFields(t *testing.T) {
 		Channels: []string{"#ops", "#extra"}, Private: true, Model: "Code",
 	}
 	name, purpose, channels, private, model := resolvedUpdate(row, agent.UpdateArgs{Name: "helper"})
-	if name != "helper" || purpose != "helps" || model != "Code" || private != true || len(channels) != 2 {
-		t.Fatalf("absent args must keep the row: %q %q model=%s private=%v channels=%v", name, purpose, model, private, channels)
+	if name != "helper" || purpose != "helps" || model != "Code" || private != true || len(channels) != 3 {
+		t.Fatalf("absent args must keep the row (+ #freehold): %q %q model=%s private=%v channels=%v", name, purpose, model, private, channels)
 	}
 	// A purpose edit keeps the model.
 	_, purpose, _, _, model = resolvedUpdate(row, agent.UpdateArgs{Name: "helper", Purpose: "new purpose"})
@@ -91,9 +91,9 @@ func TestResolvedUpdateKeepsAbsentFields(t *testing.T) {
 	if purpose != "helps" || model != "ExtraThinking" {
 		t.Fatalf("a model switch must keep the row's purpose: purpose=%q model=%s", purpose, model)
 	}
-	// A channel replace takes the new list (Private applies only then).
+	// A channel replace takes the new list (+ #freehold; Private applies only then).
 	_, _, channels, private, _ = resolvedUpdate(row, agent.UpdateArgs{Name: "helper", Channels: []string{"#solo"}})
-	if len(channels) != 1 || channels[0] != "#solo" || private != false {
+	if len(channels) != 2 || channels[0] != "#solo" || channels[1] != "#freehold" || private != false {
 		t.Fatalf("a channel replace must take the new list: %v private=%v", channels, private)
 	}
 	// And a rename resolves the new name through the same merge.

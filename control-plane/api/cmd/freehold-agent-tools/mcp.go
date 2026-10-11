@@ -21,6 +21,7 @@ import (
 	"os"
 	"os/exec"
 	"strconv"
+	"sort"
 	"strings"
 	"time"
 
@@ -39,7 +40,7 @@ func freeholdToolDefs(hasRunner bool, targets []string) []map[string]interface{}
 		return map[string]interface{}{"type": "object", "properties": props, "required": req}
 	}
 	defs := []map[string]interface{}{
-		{"name": "create_agent", "description": "Create a new conversational agent (name + one-line purpose + the channel(s) to add it to; each channel is created if it doesn't exist, the operator is added, and the CPA is added to every channel). model (optional) picks the LiteLLM alias the agent reasons on — Code for coding agents, ExtraThinking for deep architecture/thinking work, General (the default) otherwise. Returns the new agent's pubkey.",
+		{"name": "create_agent", "description": "Create a new conversational agent (name + one-line purpose + the channel(s) to add it to; each channel is created if it doesn't exist, the operator is added, the CPA is added to every channel, and the agent always also joins #freehold — the shared agent workroom where all hand-offs happen). model (optional) picks the LiteLLM alias the agent reasons on — Code for coding agents, ExtraThinking for deep architecture/thinking work, General (the default) otherwise. Returns the new agent's pubkey.",
 			"inputSchema": i(map[string]interface{}{
 				"name":     map[string]interface{}{"type": "string"},
 				"purpose":  map[string]interface{}{"type": "string"},
@@ -77,7 +78,7 @@ func freeholdToolDefs(hasRunner bool, targets []string) []map[string]interface{}
 			"inputSchema": i(map[string]interface{}{"id": map[string]interface{}{"type": "string"}}, []string{"id"})},
 		{"name": "pause_job", "description": "Pause or resume a scheduled job by id (paused=true pauses, false resumes).",
 			"inputSchema": i(map[string]interface{}{"id": map[string]interface{}{"type": "string"}, "paused": map[string]interface{}{"type": "boolean"}}, []string{"id", "paused"})},
-		{"name": "provision_runner", "description": "Stage a NEW capability runner on the fly and grant the named agents onto its roster (the grant-giving flow: new capability = new runner, named <target>-<protocol>-<identity>). The tool takes NO credential: kind=ssh mints the runner's own keypair and returns the public key to install on the target; api-class kinds ship EMPTY — DM the operator the returned door page link and they fill the credential in the console web UI. api-class kinds REQUIRE probe — the door's verify arm as data, since you know the API: \"<METHOD> <path> [auth] [want] [insecure]\" (e.g. \"GET /user/tokens/verify bearer\"; auth one of bearer (default) | basic | json-body — the credential IS the POST body, unifi-style | none; want a 3-digit status, default 200; the literal token \"insecure\" composes curl -k for a private-CA target like a k3s API) and optionally probe_body (a literal JSON request body alongside the credential — kubernetes' SelfSubjectReview; kind=kubernetes injects its own verify arm — never send a probe or probe_body on a kube door). The runner composes the curl itself; no rebuild is ever needed for a new kind. unifi doors: the operator fills username+password in the console and the exec env carries UNIFI_API_ADMIN as a JSON object with the keys username and password — POST it to <controller>/api/auth/login, take the session token from the response, and call the API with it; there is no X-API-KEY on this door (probe: \"POST /api/auth/login json-body\"). hosted=\"self\" (kind=local) enrolls a runner RESIDENT on the target instead of staging one on the CP guest: the runner-client was installed on the box and `runner enroll` printed its pubkeys — pass them (pubkey, enc_pubkey) plus host (the box's PINNED NAME — a bare host, no port; the CP allocates the port); the CP records the identity, starts nothing, and the target runs its own unit. The operator must confirm the enrollment on the door page (verifying the pubkeys against the guest's own enroll output) before the credential fill unlocks. kind=kubernetes is a KUBE SLOT — a namespace-scoped door for an agent's own workloads, NEVER cluster scope (the cluster itself is Compute's, kube-api-root): name it kube-api-<slot>, pass ns (the slot's namespace — a fresh DNS label, not a platform namespace (kube-*, default, caddy, litellm, agents)) and optionally quota (\"cpu=4,memory=8Gi,pods=32\"), and the slot must be CARVED FIRST by Compute through kube-api-root — ask Compute in conversation to apply the slot manifest (a missing slot's error carries it) — then this tool verifies the slot, reads its SA token and seals it CP-side: the door is live immediately, no console fill, no door page. The record re-creates the slot and re-seals the token on every rebuild (a k3s rebuild rotates the CA); the ns is fixed at first provision, and one slot per namespace — share the door via grant_to instead of re-slicing it. Grants land live; the grantees' pods are re-applied with the new coords. address is the target endpoint (user@host[:port] for ssh, the base URL for api-class) — REFUSED for kind=kubernetes (the CP derives the k3s API route; an agent-stated endpoint would hand the sealed token to a server the agent controls).",
+		{"name": "provision_runner", "description": "Stage a NEW capability runner on the fly and grant the named agents onto its roster (the grant-giving flow: new capability = new runner, named <target>-<protocol>-<identity>). The tool takes NO credential: kind=ssh mints the runner's own keypair and returns the public key to install on the target; api-class kinds ship EMPTY — DM the operator the returned door page link and they fill the credential in the console web UI. api-class kinds REQUIRE probe — the door's verify arm as data, since you know the API: \"<METHOD> <path> [auth] [want] [insecure]\" (e.g. \"GET /user/tokens/verify bearer\"; auth one of bearer (default) | basic | json-body — the credential IS the POST body, unifi-style | none; want a 3-digit status, default 200; the literal token \"insecure\" composes curl -k for a private-CA target like a k3s API) and optionally probe_body (a literal JSON request body alongside the credential — kubernetes' SelfSubjectReview; kind=kubernetes injects its own verify arm — never send a probe or probe_body on a kube door). The runner composes the curl itself; no rebuild is ever needed for a new kind. unifi doors: the operator fills username+password in the console and the exec env carries UNIFI_API_ADMIN as a JSON object with the keys username and password — POST it to <controller>/api/auth/login, take the session token from the response, and call the API with it; there is no X-API-KEY on this door (probe: \"POST /api/auth/login json-body\"). hosted=\"self\" (kind=local) enrolls a runner RESIDENT on the target instead of staging one on the CP guest: the runner-client was installed on the box and `runner enroll` printed its pubkeys — pass them (pubkey, enc_pubkey) plus host (the box's PINNED NAME — a bare host, no port; the CP allocates the port); the CP records the identity, starts nothing, and the target runs its own unit. The operator must confirm the enrollment on the door page (verifying the pubkeys against the guest's own enroll output) before the credential fill unlocks. kind=kubernetes is a KUBE SLOT — a namespace-scoped door for an agent's own workloads, NEVER cluster scope (the cluster itself is Compute's, kube-api-root): name it kube-api-<slot>, pass ns (the slot's namespace — a fresh DNS label, not a platform namespace (kube-*, default, caddy, litellm, agents)) and optionally quota (\"cpu=4,memory=8Gi,pods=32\"), and the slot must be CARVED FIRST by Compute through kube-api-root — ask Compute in conversation to apply the slot manifest (a missing slot's error carries it) — then this tool verifies the slot, reads its SA token and seals it CP-side: the door is live immediately, no console fill, no door page. The record re-creates the slot and re-seals the token on every rebuild (a k3s rebuild rotates the CA); the ns is fixed at first provision, and one slot per namespace — share the door via grant_to instead of re-slicing it. grant_to is the agent whose workloads live in the namespace (the service's owner) — the carving department's part ends at the carve. Grants land live; the grantees' pods are re-applied with the new coords. address is the target endpoint (user@host[:port] for ssh, the base URL for api-class) — REFUSED for kind=kubernetes (the CP derives the k3s API route; an agent-stated endpoint would hand the sealed token to a server the agent controls).",
 			"inputSchema": i(map[string]interface{}{
 				"name":       map[string]interface{}{"type": "string"},
 				"kind":       map[string]interface{}{"type": "string"},
@@ -97,7 +98,7 @@ func freeholdToolDefs(hasRunner bool, targets []string) []map[string]interface{}
 				"name":        map[string]interface{}{"type": "string"},
 				"revoke_from": map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
 			}, []string{"name"})},
-		{"name": "expose_app", "description": "Make a service reachable by the people it serves: a public TLS vhost on the edge (DNS pointed, cert issued, Caddy config applied live), gated by the member login. name is a DNS label — the app's hostname is <name>.<the world domain> (a SIBLING of the cp host: cp.librem.freehold.technology → yuvomi.librem.freehold.technology — the zone the member cookie scopes to). SCOPE: exposure is Network's capability — only the network department (or the operator) may call this; other agents are refused, so route the ask through Network in conversation. group is the relay CHANNEL the access rides (name or id; default general — the everyone-channel): the requester must ALREADY be in it — access narrows to groups the requester belongs to and never widens; the gate enforces the channel per request (IsMemberAuth), so removing someone from the channel revokes them within the cache TTL. requester is the pubkey of whoever asked (default: you). target is the service's internal host:port (the edge proxies plain HTTP to it). visibility: family (public DNS + gate — the default) | public (NO gate — operator-only) | lan (no public DNS). auth: gate (the member gate — the default) | app (the app has its own auth) | none (operator-only). The record survives rebuilds; a failed apply is re-ensured by the next build and the report names which legs landed.",
+		{"name": "expose_app", "description": "Make a service reachable by the people it serves: a public TLS vhost on the edge (DNS pointed, cert issued, Caddy config applied live), gated by the member login. auth=gate is the STANDING DEFAULT POSTURE — every app is member-gated unless the operator says otherwise for that app; auth=app (the app has its own auth) | none, and visibility=public, are operator-only exceptions, never an agent's default. name is a DNS label — the app's hostname is <name>.<the world's own domain>, the world's subtree derived from YOUR cp host (cp.librem.freehold.technology → librem.freehold.technology; sandbox.freehold.technology → itself — so an app named litellm lands at litellm.librem.freehold.technology or litellm.sandbox.freehold.technology; the member cookie scopes to the same world domain). NEVER compose the hostname from the DNS zone, another world's records, or a guess — derive it from your own world's cp host. SCOPE: exposure is Network's capability — only the network department (or the operator) may call this; other agents are refused, so route the ask through Network in conversation. group is the relay CHANNEL the access rides (name or id; default general — the everyone-channel): the requester must ALREADY be in it — access narrows to groups the requester belongs to and never widens; the gate enforces the channel per request (IsMemberAuth), so removing someone from the channel revokes them within the cache TTL. requester is the pubkey of whoever asked (default: you). target is the service's internal host:port (the edge proxies plain HTTP to it). visibility: family (public DNS + gate — the default) | public (NO gate — operator-only) | lan (no public DNS). The record survives rebuilds; a failed apply is re-ensured by the next build and the report names which legs landed.",
 			"inputSchema": i(map[string]interface{}{
 				"name":       map[string]interface{}{"type": "string"},
 				"target":     map[string]interface{}{"type": "string"},
@@ -113,8 +114,16 @@ func freeholdToolDefs(hasRunner bool, targets []string) []map[string]interface{}
 	}
 	if hasRunner {
 		execDesc := "Run a shell command VERBATIM on a capability runner's target through the runner-owned connection (the credential is fixed per target by this pod's config). Pass no secrets. Returns {stdout, stderr, exit_code, timed_out}."
+		// The schema tells the truth about routing: a multi-runner pod has NO
+		// default route, so target is REQUIRED there — an optional target
+		// invites an omitted field, and the bridge's fail-closed error is a
+		// wasted round trip. A single-runner pod pins; target stays optional.
+		required := []string{"cmd"}
 		if len(targets) > 1 {
-			execDesc += " target: which capability to use — one of [" + strings.Join(targets, ", ") + "]."
+			execDesc += " target is REQUIRED on this pod — there is no default route."
+			required = []string{"cmd", "target"}
+		} else if len(targets) == 1 {
+			execDesc += " target: this pod pins to " + targets[0] + "."
 		}
 		defs = append(defs,
 			map[string]interface{}{"name": "exec", "description": execDesc,
@@ -124,7 +133,7 @@ func freeholdToolDefs(hasRunner bool, targets []string) []map[string]interface{}
 					"stream":     map[string]interface{}{"type": "boolean"},
 					"session_id": map[string]interface{}{"type": "string"},
 					"timeout_s":  map[string]interface{}{"type": "integer"},
-				}, []string{"cmd"})},
+				}, required)},
 			map[string]interface{}{"name": "list", "description": "List the capability targets this pod can reach.",
 				"inputSchema": i(map[string]interface{}{}, []string{})},
 		)
@@ -247,7 +256,9 @@ func (b *mcpBridge) forwardRunner(raw []byte) ([]byte, error) {
 
 // routeRunner resolves which capability runner serves an exec call: an
 // explicit target must be one this pod holds; absent, a single-runner pod
-// pins to it and a multi-runner pod fails closed (naming the options).
+// pins to it and a multi-runner pod fails closed (naming the options — and
+// WHAT ARRIVED, so the agent's next attempt is a correction, not a guess:
+// the error rides back into the agent's own context).
 func (b *mcpBridge) routeRunner(call *struct {
 	Name      string                 `json:"name"`
 	Arguments map[string]interface{} `json:"arguments"`
@@ -263,7 +274,16 @@ func (b *mcpBridge) routeRunner(call *struct {
 	if len(b.runners) == 1 {
 		return &b.runners[0], nil
 	}
-	return nil, fmt.Errorf("target required — this pod can reach [%s]", strings.Join(b.targetNames(), ", "))
+	keys := make([]string, 0, len(call.Arguments))
+	for k := range call.Arguments {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	if len(keys) == 0 {
+		keys = append(keys, "none")
+	}
+	return nil, fmt.Errorf("target required (the call arrived with arguments [%s] — target missing or empty; pass target: one of [%s]) — this pod can reach [%s]",
+		strings.Join(keys, ", "), strings.Join(b.targetNames(), ", "), strings.Join(b.targetNames(), ", "))
 }
 
 // targetListText renders the list tool's answer from this pod's config.
@@ -485,6 +505,7 @@ func runBridge(in io.Reader, out io.Writer, b *mcpBridge) error {
 				resp, err := b.forwardRunner(raw)
 				if err != nil {
 					logBridge("runner-forward", call.Name, err.Error())
+					logBridge("runner-forward-raw", truncN(raw, 4096))
 					resp = rpcErrorWrapper(raw, err)
 				}
 				writeResp(w, resp)
@@ -795,10 +816,14 @@ func logBridge(v ...interface{}) {
 }
 
 // trunc keeps a short diagnostic prefix of a line.
-func trunc(b []byte) string {
+func trunc(b []byte) string { return truncN(b, 120) }
+
+// truncN is trunc with an explicit cap (the route-failure path logs the full
+// call shape so a dropped field is SEEN, not inferred).
+func truncN(b []byte, cap int) string {
 	s := strings.ReplaceAll(string(b), "\n", "\\n")
-	if len(s) > 120 {
-		s = s[:120] + "…"
+	if len(s) > cap {
+		s = s[:cap] + "…"
 	}
 	return s
 }

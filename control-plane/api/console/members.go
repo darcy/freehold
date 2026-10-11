@@ -30,6 +30,7 @@ import (
 	"sync"
 	"time"
 
+	"freehold/contract/config"
 	"freehold/contract/relay"
 	"freehold/control-plane/api/agenttools"
 )
@@ -410,24 +411,17 @@ func hostOf(origin string) string {
 	return rest
 }
 
-// memberDomain is the appliance's own ZONE: the console host's world domain
-// (cp.librem.freehold.technology → librem.freehold.technology). Apps are
-// SIBLINGS of the cp host (yuvomi.librem…), so the member cookie and the
-// post-login targets scope to the zone — the appliance's own DNS zone, the
-// trust boundary the operator already controls.
+// memberDomain is the appliance's own WORLD DOMAIN (config.WorldDomain): the
+// per-world subtree of the zone — the CP host with a literal "cp."/"admin."
+// label stripped, else the CP host itself. Apps are CHILDREN of that domain
+// (litellm.sandbox.freehold.technology), so the member cookie and the
+// post-login targets scope to the world — the appliance's own boundary, not
+// the shared zone (one world's cookie never rides to another world's names).
 func (s *Server) memberDomain() string {
 	if s.PublicOrigin == nil || *s.PublicOrigin == "" {
 		return ""
 	}
-	// The FIRST-label rule, matching cpbuild's appDomainBase: the console
-	// host's world domain (cp.librem… → librem…; control.example.com →
-	// example.com). A two-label host IS the zone — returned unchanged.
-	host := hostOf(*s.PublicOrigin)
-	labels := strings.Split(host, ".")
-	if len(labels) >= 3 {
-		return strings.Join(labels[1:], ".")
-	}
-	return host
+	return config.WorldDomain(hostOf(*s.PublicOrigin))
 }
 
 // memberCookieDomain scopes the member cookie to the appliance's zone —

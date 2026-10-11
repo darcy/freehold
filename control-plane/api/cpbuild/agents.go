@@ -368,17 +368,18 @@ func (s *Spec) reassertAgentRow(reg *agenttools.Registry, tools *agent.Tools, a 
 // reconciledChannels derives an agent's channel list + visibility: a reserved
 // department re-derives its fixed channels; any other agent rejoins the full
 // list the registry preserved, falling back to the single recorded channel for
-// rows written before Channels was persisted.
+// rows written before Channels was persisted. Normalized through channelNames,
+// so #freehold always rides the list (the shared agent workroom).
 func reconciledChannels(a console.AgentInfo) ([]string, bool) {
 	if channels := agents.DepartmentChannels(a.Name); channels != nil {
-		return channels, true
+		return channelNames(channels), true
 	}
 	channels := a.Channels
 	private := a.Private
 	if len(channels) == 0 && strings.TrimSpace(a.Channel) != "" {
 		channels = []string{a.Channel}
 	}
-	return channels, private
+	return channelNames(channels), private
 }
 
 // registerWorldFactsServer pushes the deployer-side world facts onto the CP's
@@ -486,7 +487,7 @@ func (s *Spec) manageDomainDNS() (string, error) {
 		return "", err
 	}
 	ip := s.ProxyIP
-	for _, host := range []string{s.RelayHost, s.CpHost} {
+	for _, host := range []string{s.RelayHost, s.CpHost, appsPortalHost(s.CpHost)} {
 		if host == "" {
 			continue
 		}
@@ -505,6 +506,11 @@ func (s *Spec) manualDNSNote() string {
 	hosts := []string{s.RelayHost}
 	if s.CpHost != "" {
 		hosts = append(hosts, s.CpHost)
+	}
+	// The portal (the world root) is a public face the same way when the
+	// console has moved off it — the operator must create its record too.
+	if p := appsPortalHost(s.CpHost); p != "" {
+		hosts = append(hosts, p)
 	}
 	var missing, verified []string
 	for _, h := range hosts {

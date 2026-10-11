@@ -176,7 +176,7 @@ func provisionProxmoxLxc(exec proxmox.ExecFunc, cmd *cobra.Command) error {
 		NetIP: ip, NetGW: gw, Tag: tag,
 		Net1IP: net1IP, Net1GW: net1GW, Net1Tag: net1Tag,
 		NoDocker: mustBool(cmd, "no-docker"),
-		Mounts: mounts,
+		Mounts:   mounts,
 	}
 	res, err := proxmox.BootstrapProxmoxLxc(exec, spec)
 	if err != nil {

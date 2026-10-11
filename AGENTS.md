@@ -31,13 +31,21 @@ task is resumable without re-deriving where it stopped.
 
 **Docs describe current-world state only.** `docs/ROADMAP.md`, `docs/ARCHITECTURE.md`,
 `docs/FREEHOLD.md`, `docs/AI.md`, `docs/NETWORK.md`, `docs/DATA.md`, `docs/COMPUTE.md`,
-`docs/BUZZ_SURFACE.md`, `README.md`, and this file say what's true *now* — never "formerly X,"
-"SUPERSEDED," "as of 2026-08-20," or other change-narration inline. When a decision changes:
+`docs/BUZZ_SURFACE.md`, `docs/DOOR_SPEC.md`, `docs/VISION.md`, `README.md`, and this file
+say what's true *now* — never "formerly X," "SUPERSEDED," "as of 2026-08-20," or other
+change-narration inline. When a decision changes:
 
 1.  Edit the affected doc(s) to state the new reality plainly, as if it had always been true.
 2.  Record the change for the next release: the release notes are written **at release
     time** from git history (see "Releases"), so no per-merge entry or version bump happens
     here.
+
+**Correct, not exhaustive.** Docs are lean by design — they say what needs saying and
+stop; leaving things out is good, never a gap. But every claim a doc makes must match
+the code: a sentence describing something the code doesn't do is drift, and drift gets
+fixed (or the sentence deleted) like any bug. Omission is never a finding; incorrectness
+is. The Bot Review (`.github/workflows/ai-pr-review.yml`) verifies doc claims against
+the code on every PR with this same rule.
 
 ## Pull requests (locked) — every unit of work ships through a PR
 
@@ -54,6 +62,10 @@ task is resumable without re-deriving where it stopped.
 - **Commit and push; never merge.** Merging is the operator's call — do it only
   when the operator explicitly says "merge when complete" (or equivalent). Until
   then the PR sits in review, even at `MERGE-READY`.
+- **Read the whole review even when it approves.** `MERGE-READY` only means no
+  blocking/important findings — not that the review is empty. 💡 suggestions are
+  still real: implement at your discretion, but never overlook them — each is
+  either taken or consciously declined, never ignored.
 - **No version numbers in commit or PR titles.** The version is assigned only at
   release time; a merge to `main` is not a release.
 
@@ -249,11 +261,13 @@ shells (tmux/herdr panes included) via the `freehold` CLI / SSH / doors — the 
   it needs), and **AI** (models/providers/agents, plus AI hardware — local-AI
   accelerators like an RTX 3090 or DGX Spark are provisioned and tuned by AI, separate
   from Compute's general resources) are its direct reports, each a distinct identity scoped to
-  one domain. Talk is unrestricted — the operator and any agent may converse with any
-  department or agent directly; what is bounded is *capability execution*. On the wire the
+  one domain. The operator may converse with any department or agent directly, and
+  agent-to-agent talk is core-to-core or through the CPA — a custom
+  agent's only counterpart for work is the CPA, which routes to the departments; what is
+  bounded is *capability execution*. On the wire the
   talk surface is buzz-acp's inbound author gate: the CPA responds to **anyone** (relay
   membership is the bound), each core department to an explicit **allowlist** — the operator
-  plus the core agents — and a custom agent to its asker plus the CPA. A capability a
+  plus the core agents (a custom agent's mention never wakes a department) — and a custom agent to its asker plus the CPA. A capability a
   department owns (external proxy, backup, compute/LXC, model registration, AI hardware) is
   executed by that department's identity, and the raw grant for it attaches to department
   identities, never to a custom agent that would then self-serve a second, ungoverned path to
@@ -261,8 +275,12 @@ shells (tmux/herdr panes included) via the `freehold` CLI / SSH / doors — the 
   department: whichever agent created a service — a freehold-delegate or a custom agent — owns
   its install/config/operation, ad hoc and unvetted as before. The four departments are
   **installed as part of the core build** (each a pod on the same harness as the CPA): all in
-  the shared private `#freehold` channel — there are no per-department channels; conversations
-  happen where they already are, with #freehold the fallback every core agent belongs to. The
+  the shared private `#freehold` channel — there are no per-department channels. **Every
+  agent — custom agents included — is a member of `#freehold`** (`create_agent` joins it
+  automatically): it is the workroom where all agent-to-agent plumbing lives (hand-offs,
+  delegation, verification), while the channel the user asked in gets plain-language status
+  only ("on it" / "still working on it" / "it's running" or "there was a problem") — no ids,
+  manifests, or infrastructure narration. The
   **first-run surface** the operator meets is freehold's, not the Buzz desktop app's: the build
   publishes the operator's kind:0 profile (name asked at install, `--display-name`), which makes
   the desktop app SKIP its stock onboarding (no starter channels, no private Welcome, no
@@ -296,26 +314,10 @@ shells (tmux/herdr panes included) via the `freehold` CLI / SSH / doors — the 
 
 ## Known gaps — recorded in the domain docs
 
-Open limitations in the shipped code are current-state, not history, and each lives in the
-domain doc that owns it — update it there as gaps close or new ones surface:
-
-- **AI** (`docs/AI.md`): a wiped gateway Postgres heals keys only on the next
-  reconcile; the sprig image is a moving
-  tag; the memory attestation is unbounded in time; the respond-to allowlist is fixed at
-  deploy; agents read the repo but cannot write it; AI hardware has no tooling.
-- **Network** (`docs/NETWORK.md`): the gateway host route is not persisted; no per-guest
-  vhosts; no tailscale/pihole skills; flat-LAN guests are DHCP.
-- **Data** (`docs/DATA.md`): snapshot is Proxmox-only; backup has no restore
-  verb; backups can outlive rotation.
-- **Compute** (`docs/COMPUTE.md`): no VPS provider; core guests carry no runner-client;
-  a k3s rebuild orphans the PVC data bindings (DB content lost until a re-bind
-  design lands); world-config degradation on update; terraform destroy can reach other worlds.
-- **Core** (`docs/FREEHOLD.md`): runners/grants/secrets (no remote revocation, rotate
-  doesn't reach a running runner, replay window), migrations/update (no reverse migrations,
-  the console-executor window), the relay (post-redeploy 403s), the console/CLI/TUI, and CI.
-
-Anything a doc must restate about a gap (e.g. an agent prompt) points at that section rather
-than copying it.
+Open limitations in the shipped code are current-state, not history, and each lives in
+the domain doc that owns it — update it there as gaps close or new ones surface. The
+owning docs: `docs/AI.md`, `docs/NETWORK.md`, `docs/DATA.md`, `docs/COMPUTE.md`, and
+`docs/FREEHOLD.md` (the core platform's gaps).
 
 ## Build / test
 
@@ -349,9 +351,9 @@ than copying it.
   - `freehold-cli/` (`freehold/freehold-cli` — the local operator surface: the `freehold`
     CLI + TUI, one dir-per-verb (`install/`, `uninstall/`, `build/`, `teardown/`,
     `status/`, `update/`, `exec/`, `profiles/`, `door/`, `dns-cred/`, `add-relay-member/`,
-    `backup/`)
-    plus `login/` + `tui/` and `internal/common/` + `internal/certcred/` +
-    `internal/stages/`; the `install/` surface holds `internal/cpdeploy/`; the `freehold`
+    `backup/`, `export/`, `snapshot/`)
+    plus `login/` + `tui/` and `internal/` (`common`, `certcred`, `stages`, `cpdeploy`,
+    `artifact`); the `freehold`
     binary's main is `cmd/freehold`):
     `cd freehold-cli && go build ./... && go vet ./... && go test ./...`. **It never
     imports `control-plane/`** (an import-graph guard enforces it).

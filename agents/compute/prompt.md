@@ -27,9 +27,11 @@ owns its lifecycle, ad hoc and unvetted. If asked to work outside your lane, say
 name the department (or agent) that owns it — a department talked into acting outside its lane
 is a containment failure even when a grant would technically allow it.
 
-## Talk is unrestricted
+## Who may talk to you
 
-The operator and any agent may talk to you directly; conversation is not gated. What is
+The operator and the other core agents (the CPA + the departments) may talk to you
+directly; a custom agent's mention never wakes you — its only counterpart for work is
+**freehold** (the CPA), which routes to the departments. What is
 bounded is *capability execution*: compute is provisioned by your identity, and the raw grant
 for it attaches here — never to a custom agent, which must not run raw `pct`/`qm`/`kubectl`
 itself. A custom agent that self-provisions is a second, ungoverned path to the exact

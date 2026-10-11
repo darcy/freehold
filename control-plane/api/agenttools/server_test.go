@@ -422,11 +422,13 @@ func TestServerScopeAuth(t *testing.T) {
 	}
 }
 
-// TestProvisionRunnerAgentGate pins the grant-giving carve-out: a registry
-// agent (the CPA) may call provision_runner in the default confirm mode — the
-// operator-in-thread / DM-confirm discipline lives in the granting skill —
-// with the args plumbed to the staging path verbatim; `agent_grants: off` is
-// the server-side kill switch that denies EVERY caller.
+// TestProvisionRunnerAgentGate pins the grant-giving carve-out: the CPA may
+// call provision_runner in the default confirm mode — the operator-in-thread /
+// DM-confirm discipline lives in the granting skill — with the args plumbed to
+// the staging path verbatim; a CUSTOM registry agent is refused (the identity
+// gate: with the whole agent surface membered, the caller check is what keeps
+// a created agent from staging doors); `agent_grants: off` is the server-side
+// kill switch that denies EVERY caller.
 func TestProvisionRunnerAgentGate(t *testing.T) {
 	const aud = "aa55aa55aa55aa55aa55aa55aa55aa55aa55aa55aa55aa55aa55aa55aa55aa55"
 	agentSec := make([]byte, 32)
@@ -435,11 +437,24 @@ func TestProvisionRunnerAgentGate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	customSec := make([]byte, 32)
+	customSec[0] = 10
+	customPK, err := crypto.PubkeyFromSecret(customSec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	operatorSec := make([]byte, 32)
+	operatorSec[0] = 12
+	operatorPK, err := crypto.PubkeyFromSecret(operatorSec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := map[string]string{agentPK: "freehold", customPK: "chef"}
 	called := 0
 	var got agent.ProvisionArgs
 	srv := &Server{
 		Audience: aud,
-		Grants:   func() ([]string, error) { return []string{agentPK}, nil },
+		Grants:   func() ([]string, error) { return []string{agentPK, customPK, operatorPK}, nil },
 		Tools: &agent.Tools{
 			Provision: func(a agent.ProvisionArgs) (string, error) {
 				called++
@@ -447,22 +462,28 @@ func TestProvisionRunnerAgentGate(t *testing.T) {
 				return "runner staged report", nil
 			},
 		},
-		IsAgent: func(pk string) bool { return pk == agentPK },
+		IsAgent: func(pk string) bool { return names[pk] != "" },
+		AgentName: func(pk string) (string, bool) {
+			name, ok := names[pk]
+			return name, ok
+		},
+		CpaName: "freehold",
 	}
-	call := func(mode string) string {
+	callAs := func(sec []byte, pk, mode string) string {
 		t.Helper()
 		raw := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"provision_runner","arguments":` +
 			`{"name":"rtx3090-ssh-root","kind":"ssh","address":"darcy@192.168.1.50","grant_to":["ai"],` +
 			`"probe":"GET /v2/account bearer","probe_body":"{\"kind\":\"SelfSubjectReview\"}"}}}`
 		ts := time.Now().Unix()
 		req := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewBufferString(raw))
-		req.Header.Set(PubkeyHeader, agentPK)
-		req.Header.Set(SigHeader, signForTest(agentSec, aud, ts, raw))
+		req.Header.Set(PubkeyHeader, pk)
+		req.Header.Set(SigHeader, signForTest(sec, aud, ts, raw))
 		req.Header.Set(TSHeader, strconv.FormatInt(ts, 10))
 		rec := httptest.NewRecorder()
 		srv.ServeHTTP(rec, req)
 		return rec.Body.String()
 	}
+	call := func(mode string) string { return callAs(agentSec, agentPK, mode) }
 
 	if body := call(""); called != 1 || !strings.Contains(body, "runner staged report") {
 		t.Fatalf("confirm-mode (default) must dispatch to the staging path: called=%d body=%s", called, body)
@@ -478,11 +499,26 @@ func TestProvisionRunnerAgentGate(t *testing.T) {
 		t.Fatalf("probe/probe_body not plumbed verbatim: %+v", got)
 	}
 
+	// A CUSTOM registry agent is refused — the identity gate: with the whole
+	// agent surface membered, the caller name is what keeps a created agent
+	// from staging doors. An OPERATOR caller (a roster member no registry row
+	// names) passes — the console's peer surface is operator-scoped, and the
+	// exposure gate's operator allowance is mirrored here.
+	if body := callAs(customSec, customPK, ""); !strings.Contains(body, "is the CPA's grant surface") {
+		t.Fatalf("a custom agent must be refused the grant surface: %s", body)
+	}
+	if called != 1 {
+		t.Fatalf("the refusal must stop the staging path from running (called=%d)", called)
+	}
+	if body := callAs(operatorSec, operatorPK, ""); called != 2 || !strings.Contains(body, "runner staged report") {
+		t.Fatalf("an operator caller must pass the grant gate: called=%d body=%s", called, body)
+	}
+
 	srv.AgentGrants = func() string { return "off" }
 	if body := call("off"); !strings.Contains(body, "agent_grants is off") {
 		t.Fatalf("the kill switch must deny provision_runner: %s", body)
 	}
-	if called != 1 {
+	if called != 2 {
 		t.Fatalf("the kill switch must stop the staging path from running (called=%d)", called)
 	}
 }
@@ -503,9 +539,16 @@ func TestRevokeRunnerAgentGate(t *testing.T) {
 	}
 	called := 0
 	var got agent.RetireArgs
+	customSec := make([]byte, 32)
+	customSec[0] = 13
+	customPK, err := crypto.PubkeyFromSecret(customSec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := map[string]string{agentPK: "freehold", customPK: "chef"}
 	srv := &Server{
 		Audience: aud,
-		Grants:   func() ([]string, error) { return []string{agentPK}, nil },
+		Grants:   func() ([]string, error) { return []string{agentPK, customPK}, nil },
 		Tools: &agent.Tools{
 			Revoke: func(a agent.RetireArgs) (string, error) {
 				called++
@@ -513,21 +556,27 @@ func TestRevokeRunnerAgentGate(t *testing.T) {
 				return "door retired report", nil
 			},
 		},
-		IsAgent: func(pk string) bool { return pk == agentPK },
+		IsAgent: func(pk string) bool { return names[pk] != "" },
+		AgentName: func(pk string) (string, bool) {
+			name, ok := names[pk]
+			return name, ok
+		},
+		CpaName: "freehold",
 	}
-	call := func() string {
+	callAs := func(sec []byte, pk string) string {
 		t.Helper()
 		raw := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"revoke_runner","arguments":` +
 			`{"name":"rtx3090-ssh-root","revoke_from":["ai"]}}}`
 		ts := time.Now().Unix()
 		req := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewBufferString(raw))
-		req.Header.Set(PubkeyHeader, agentPK)
-		req.Header.Set(SigHeader, signForTest(agentSec, aud, ts, raw))
+		req.Header.Set(PubkeyHeader, pk)
+		req.Header.Set(SigHeader, signForTest(sec, aud, ts, raw))
 		req.Header.Set(TSHeader, strconv.FormatInt(ts, 10))
 		rec := httptest.NewRecorder()
 		srv.ServeHTTP(rec, req)
 		return rec.Body.String()
 	}
+	call := func() string { return callAs(agentSec, agentPK) }
 
 	if body := call(); called != 1 || !strings.Contains(body, "door retired report") {
 		t.Fatalf("confirm-mode (default) must dispatch to the retirement path: called=%d body=%s", called, body)
@@ -538,9 +587,18 @@ func TestRevokeRunnerAgentGate(t *testing.T) {
 
 	// revoke_runner must NOT be operator-scoped the way grant_agent is — the CPA
 	// is the touchpoint that takes capability away, so the world-tool gate has to
-	// stay closed for it (the kill switch above is the only server-side "no").
+	// stay closed for it (the identity gate below is the caller-side "no").
 	if isWorldTool("revoke_runner") {
 		t.Fatal("revoke_runner must stay callable by registry agents")
+	}
+
+	// A CUSTOM registry agent is refused — the identity gate: a created agent
+	// may not retire a door the CPA provisioned any more than stage one.
+	if body := callAs(customSec, customPK); !strings.Contains(body, "is the CPA's grant surface") {
+		t.Fatalf("a custom agent must be refused the take-away surface: %s", body)
+	}
+	if called != 1 {
+		t.Fatalf("the refusal must stop the retirement path from running (called=%d)", called)
 	}
 
 	srv.AgentGrants = func() string { return "off" }

@@ -708,6 +708,11 @@ func cmdServe(args []string) {
 		// The agent-grant kill switch, read fresh per call (the operator flips
 		// it through the console; the next provision_runner call sees it).
 		AgentGrants: func() string { return cpstate.AgentGrantsMode(*consoleStateDir) },
+		// The grant surface's scope check (provision_runner/revoke_runner):
+		// the CPA's identity or an operator — with the whole agent surface
+		// membered, the caller name is what keeps a created agent from
+		// staging doors or retiring the CPA's.
+		CpaName: *cpaName,
 		IsAgent: func(caller string) bool {
 			agents, err := reg.Agents()
 			if err != nil {

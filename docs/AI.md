@@ -54,14 +54,22 @@ AI owns the gateway directly; the runtime is what all agents share.
     workspace on the durable plane (`/srv/data/k8s-volumes/agent-home/<pod>`), a prompt
     mounted from a ConfigMap and re-read on every spawn, and a tool bridge fetched from the
     CP at boot.
-*   **Prompts.** A shared orientation block (repo, "be loud", memory) + the agent's own
-    prompt + its skills, composed in `agents/prompt.go`. Custom agents get a bare template.
+*   **Prompts.** A shared orientation block (repo, "be loud", memory, and the
+    conversation-flow rule: plumbing in #freehold, plain-language status in user
+    channels) + the agent's own prompt + its skills, composed in
+    `agents/prompt.go`. Custom agents get the same orientation + their template.
 *   **Who may talk to whom** is the inbound author gate fixed at deploy: the CPA answers
-    anyone in the relay; departments answer the operator and core agents; custom agents
-    answer their asker and the CPA.
+    anyone in the relay; departments answer the operator and core agents (a custom
+    agent's mention never wakes one); custom agents
+    answer their asker and the CPA. Every agent — custom agents included — is a
+    member of `#freehold` (`create_agent` joins it automatically): the shared
+    workroom where all agent-to-agent plumbing lives, while the channel the user
+    asked in gets plain-language status only.
 *   **Memory** is relay-persisted and encrypted; each pod carries an operator-signed NIP-OA
     attestation scoped to memory writes. It survives pod re-applies and full rebuilds.
-*   **Creation.** `create_agent` mints identity, joins the relay, applies the pod; the build
+*   **Creation.** `create_agent` mints identity, joins the relay, applies the pod, and
+    joins the new agent to `#freehold` (idempotent — re-asserted on every
+    reconcile); the build
     reconciles the whole registry (CPA, then departments, then custom agents) every time.
 *   **Editing.** `update_agent` rewrites a created agent's purpose (its system prompt re-renders
     from the registry row and lands on the next spawn), switches its litellm model, replaces its
@@ -193,7 +201,10 @@ action it causes is signed, authorized, and audited by machinery that cannot rea
     audited leg, never the CPA's — and the CP then reads the SA token from the slot and
     seals it CP-side, so the door is live with no console fill; the record re-creates the
     slot and re-seals the token on every rebuild, the same role `doors.tf` plays for the
-    static kube doors. Confirmation is governed by
+    static kube doors. The grant surface itself is the CPA's identity alone,
+    server-enforced: a created agent (or department) calling
+    `provision_runner`/`revoke_runner` is refused — capability asks route
+    through freehold in conversation. Confirmation is governed by
     `agent_grants` on the CP state —
     `confirm` (default: in-thread yes, or a DM), `auto`, or `off` (the server-side kill
     switch, `freehold-console grants-mode`) — but the discipline itself is the granting
@@ -291,6 +302,25 @@ action it causes is signed, authorized, and audited by machinery that cannot rea
 *   **Console jobs management is read-only**: pause/delete run through agents
     (`pause_job`/`delete_job`), since jobs.json is the agent-tools process's own store.
 *   Agents read the repo but can't write it.
+*   **An agent's reply can be silently dropped by the relay**: buzz-acp's turn
+    delivery publishes over the relay's HTTP bridge (`POST /events`), and one
+    publish in a turn is intermittently refused with a non-retriable 403 —
+    the harness gives up on it, the agent's other publishes in the same turn
+    (and seconds around it) succeed, and the channel never sees the reply.
+    The operator-visible shape: an agent that answered but nothing landed —
+    a nudge (a second message) re-publishes and lands. Confirmed clean while
+    the refusal fired: the pubkey's relay membership, the channel membership,
+    no bans, no archived identity — and the same identity's neighboring
+    publishes (the same route, seconds apart) were accepted. The relay's own
+    error path logs only the HTTP status (no reason, no event kind/id), and
+    buzz-acp logs the status but not the response body, so the discriminating
+    datum is dropped on both sides; the suspects are the ingest's
+    channel-write auth or the NIP-FI admission state, both inside
+    buzz-relay/buzz-acp (external OSS this appliance pins — not patchable
+    freehold-side). Diagnose from the pod's log
+    (`buzz_acp::relay: POST /events returned non-retriable HTTP 403
+    Forbidden`) and the relay's (`HTTP bridge request … status:403,
+    accepted:false`); the fix is filing upstream with that evidence.
 *   AI hardware, local AI, optimization dashboards, and eval harnesses are prompt claims
     with no tooling. No resource baseline per agent exists.
 

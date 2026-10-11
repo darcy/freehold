@@ -45,8 +45,9 @@ Each department is scoped to one domain and the capabilities it owns.
 | **@compute** | The box itself and provisioning: CPU/RAM/disk, LXC and kube, remote hosts, monitoring. | Proxmox, k3s, Vultr, Hetzner, monitoring |
 | **@ai** | Models, providers, and agents, plus local AI hardware. | LiteLLM, local AI (RTX 3090 / DGX Spark), benchmarking |
 
-Talk is unrestricted; capability execution is bounded, and the first run the operator
-meets is freehold's, not the desktop app's — see
+Core agents talk to each other (including freehold) but not to custom agents — a
+custom agent's only counterpart for work is freehold; capability execution is bounded, and
+the first run the operator meets is freehold's, not the desktop app's — see
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) (the agent org) and
 [`docs/AI.md`](docs/AI.md) (the runtime).
 
@@ -269,8 +270,9 @@ control-plane/        freehold/control-plane — the stable mechanism (Go, plus 
 freehold-cli/         freehold/freehold-cli — the local operator surface (never imported
                       by control-plane/): one dir per verb (install/, uninstall/,
                       build/, teardown/, status/, update/, exec/, profiles/, door/,
-                      dns-cred/, backup/), plus login/, tui/, internal/ (common,
-                      cpdeploy, certcred, stages).
+                      dns-cred/, add-relay-member/, backup/, export/, snapshot/),
+                      plus login/, tui/, internal/ (common, cpdeploy, certcred,
+                      stages, artifact).
 providers/            freehold/providers — the substrate providers; proxmox/ holds
                       guest create/exec/list, storage, the pct stage/DNS builders,
                       and the world-destroy engine. Imports platform/ + contract/;
@@ -278,8 +280,9 @@ providers/            freehold/providers — the substrate providers; proxmox/ h
 platform/             freehold/platform — the provider-independent world the mechanism
                       installs/evolves: services/<capability>/<impl>/ (relay/buzz,
                       webproxy/caddy, externaldns/cloudflare,
-                      certificates/letsencrypt), provisioning/ (bootstrap, box,
-                      deploy, planebase, stages, the provider seam), migrations/.
+                      certificates/letsencrypt, pangolin/), provisioning/
+                      (bootstrap, box, deploy, planebase, stages, the provider
+                      seam), migrations/.
                       Adding a service touches only this module — never control-plane/.
 migrations/           the box-applied migration scripts
 AGENTS.md             agent guidance: locked model, conventions, known gaps
