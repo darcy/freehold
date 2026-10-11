@@ -451,6 +451,7 @@ func cmdServe(args []string) {
 	// The operator display name rides B64 (operatorNameArg) — free-form text
 	// on a root-executed argv must never carry shell/flag metacharacters.
 	operatorNameB64 := fs.String("operator-name-b64", "", "operator display name in Buzz, base64 (the kind:0 profile the build publishes; default \"Operator\")")
+	pangolinB64 := fs.String("pangolin-b64", "", "the pangolin public-path coords (org/site/domain/dns_ip) as base64 JSON — the non-secret shape; the instance address + root key stay sealed CP-side")
 	ownerPub := fs.String("owner-pubkey", "", "operator pubkey (agent identity secret owner)")
 	litellmBase := fs.String("litellm-base", "", "litellm gateway base URL for agent pods")
 	selfURL := fs.String("self-url", "", "this server's reachable HTTP base URL (e.g. http://<cpIP>:8089) the CPA pod bootstraps its mcp bridge from")
@@ -508,6 +509,10 @@ func cmdServe(args []string) {
 			log.Fatalf("--operator-name-b64 is not valid base64: %v", derr)
 		}
 	}
+	pangolinCoords, err := cpbuild.PangolinFromArg(*pangolinB64)
+	if err != nil {
+		log.Fatalf("--pangolin-b64 is not valid base64 JSON: %v", err)
+	}
 
 	spec := &cpbuild.Spec{
 		StateDir:       *stateDir,
@@ -545,6 +550,7 @@ func cmdServe(args []string) {
 		CpaName:        *cpaName,
 		OwnerPub:       *ownerPub,
 		OperatorName:   operatorName,
+		Pangolin:       pangolinCoords,
 		LitellmBaseURL: litellmBaseURL,
 		Sec:            secBytes,
 		Audience:       audience,

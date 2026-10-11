@@ -54,32 +54,32 @@ type Flags struct {
 	Name       string
 	// LocalPort is the box-side runner MCP loopback port (--local-port); Addr
 	// is derived 127.0.0.1:<LocalPort> at the composition roots.
-	LocalPort          uint32
-	Addr               string
-	Target             string
-	Host               string
-	Domain             string
-	RelayDomain        string
-	CpDomain           string
-	ProxyIP            string
-	RelayIP            string
-	CpIP               string
-	OperatorPubkey     string
-	OperatorIdentity   string
-	AgentName          string
-	SizeGB             uint64
-	PoolSizeGB         uint64
-	ThinPool           string
-	PlanePool          string // select a detected backend by name (VG or zpool)
-	ConfirmSharedPool  bool   // headless consent to share a pool with live guests
-	EraseFreehold      bool   // headless consent to erase a detected freehold plane
-	NoK3s              bool
-	NoLitellm          bool
-	RootfsGB           uint32
-	MemoryMB           uint32
-	RelayGw            string
-	StorageName        string
-	Bridge             string
+	LocalPort         uint32
+	Addr              string
+	Target            string
+	Host              string
+	Domain            string
+	RelayDomain       string
+	CpDomain          string
+	ProxyIP           string
+	RelayIP           string
+	CpIP              string
+	OperatorPubkey    string
+	OperatorIdentity  string
+	AgentName         string
+	SizeGB            uint64
+	PoolSizeGB        uint64
+	ThinPool          string
+	PlanePool         string // select a detected backend by name (VG or zpool)
+	ConfirmSharedPool bool   // headless consent to share a pool with live guests
+	EraseFreehold     bool   // headless consent to erase a detected freehold plane
+	NoK3s             bool
+	NoLitellm         bool
+	RootfsGB          uint32
+	MemoryMB          uint32
+	RelayGw           string
+	StorageName       string
+	Bridge            string
 	// The freehold-subnet gateway (docs/NETWORK.md): GatewayCIDR is
 	// the internal subnet ("" = no gateway — the flat-LAN world), GatewayVlan
 	// the in-host bridge tag. When set, relay/cp/k3s are born static on the
@@ -2535,6 +2535,12 @@ func mergeWorldConfig(prior, next string) string {
 	if n.RelayGW == "" {
 		n.RelayGW = p.RelayGW
 	}
+	if n.Pangolin == nil {
+		// The public path survives updates: the next render never silently
+		// re-points the apps' A records at the proxy (the coords carry no
+		// credential — the sealed pangolin.json is untouched by this).
+		n.Pangolin = p.Pangolin
+	}
 	b, err := json.Marshal(n)
 	if err != nil {
 		return next
@@ -2703,6 +2709,7 @@ func (e *Engine) worldConfigJSON(cfg *config.Config) string {
 		CpaName:        cpaNameOrDefault(e.F.AgentName),
 		OwnerPub:       e.F.OperatorPubkey,
 		OperatorName:   firstNonBlank(e.F.OperatorName, cfg.OperatorName),
+		Pangolin:       cfg.Pangolin,
 		LitellmBaseURL: cfg.Litellm.URL,
 		// The agent-tools server's reachable URL, NOT the console's: this is the
 		// `--self-url` the server reports AND the URL the CPA pod curls its

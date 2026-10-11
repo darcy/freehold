@@ -1,6 +1,12 @@
 package cpbuild
 
-import "freehold/contract/config"
+import (
+	"encoding/base64"
+	"encoding/json"
+	"strings"
+
+	"freehold/contract/config"
+)
 
 // Coords is the shared world-config type, owned by the contract (both this
 // console and the install CLI render/consume them). Alias kept so existing
@@ -10,6 +16,23 @@ type Coords = config.Coords
 // NewSpec builds a build engine Spec from the world coords + a driving
 // identity (the console's own secret + pubkey, granted on the co-located
 // runner at deploy). sec must be 32 bytes.
+// PangolinFromArg decodes the agent-tools serve argv's pangolin block (b64
+// JSON of the non-secret coords shape). Empty returns nil.
+func PangolinFromArg(arg string) (*config.PangolinCoords, error) {
+	if strings.TrimSpace(arg) == "" {
+		return nil, nil
+	}
+	raw, err := base64.StdEncoding.DecodeString(strings.TrimSpace(arg))
+	if err != nil {
+		return nil, err
+	}
+	var p config.PangolinCoords
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return nil, err
+	}
+	return &p, nil
+}
+
 func NewSpec(c Coords, sec []byte, audience string) *Spec {
 	s := &Spec{
 		Name:           c.Name,
@@ -44,6 +67,7 @@ func NewSpec(c Coords, sec []byte, audience string) *Spec {
 		CpaName:        c.CpaName,
 		OwnerPub:       c.OwnerPub,
 		OperatorName:   c.OperatorName,
+		Pangolin:       c.Pangolin,
 		LitellmBaseURL: c.LitellmBaseURL,
 		SelfURL:        c.SelfURL,
 		GatewayCIDR:    c.GatewayCIDR,
@@ -96,6 +120,7 @@ func (s *Spec) Coords() Coords {
 		OwnerPub: s.OwnerPub, OperatorName: s.OperatorName, LitellmBaseURL: s.LitellmBaseURL, SelfURL: s.SelfURL,
 		GatewayCIDR: s.GatewayCIDR, GatewayVlan: s.GatewayVlan, GatewayLxc: s.GatewayLxc,
 		HostedGateway: s.HostedGateway,
-		K3sIP: s.K3sIP,
+		K3sIP:         s.K3sIP,
+		Pangolin:      s.Pangolin,
 	}
 }

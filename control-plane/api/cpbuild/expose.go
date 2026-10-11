@@ -23,21 +23,26 @@
 package cpbuild
 
 import (
+	"context"
 	"crypto/x509"
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
 	"freehold/contract/config"
+	"freehold/contract/crypto"
 	"freehold/contract/relay"
 	"freehold/control-plane/api/agent"
 	"freehold/control-plane/api/agenttools"
 	cert "freehold/platform/services/certificates/letsencrypt"
 	dnsman "freehold/platform/services/externaldns/cloudflare"
+	"freehold/platform/services/pangolin"
 	caddydeploy "freehold/platform/services/webproxy/caddy"
 )
 
@@ -306,7 +311,14 @@ func (s *Spec) appDNSEnsure(rec agenttools.AppRecord) (bool, error) {
 		return false, nil
 	}
 	fqdn := s.appRecordFQDN(rec)
-	if s.ProxyIP == "" {
+	// The pangolin public path: the app's A record points at the VPS (the
+	// home IP appears in no public DNS). Empty DNSIP keeps the proxy IP — a
+	// dev/test world exercises the tunnel without moving the public DNS.
+	ip := s.ProxyIP
+	if s.Pangolin != nil && s.Pangolin.DNSIP != "" {
+		ip = s.Pangolin.DNSIP
+	}
+	if ip == "" {
 		return false, fmt.Errorf("app dns %s: the proxy IP is not in the world coords", fqdn)
 	}
 	provider, env, err := s.dnsCredFromStore("relay")
@@ -326,10 +338,140 @@ func (s *Spec) appDNSEnsure(rec agenttools.AppRecord) (bool, error) {
 	if rec.FQDN != "" && rec.FQDN != fqdn {
 		_ = mgr.DeleteA(rec.FQDN)
 	}
-	if err := mgr.UpsertA(fqdn, s.ProxyIP); err != nil {
+	if err := mgr.UpsertA(fqdn, ip); err != nil {
 		return false, fmt.Errorf("app dns %s: %w", fqdn, err)
 	}
 	return true, nil
+}
+
+// pangolinCreds opens the world's Pangolin credential — the instance's
+// integration address + the root key, sealed to the console identity at
+// world-secrets/pangolin.json (the DNS-cred record shape; the coords carry
+// no credential). Written by the box hand-off (or the operator, via the
+// console's enc pubkey).
+func (s *Spec) pangolinCreds() (base, key string, err error) {
+	root := s.consoleStateRoot()
+	path := filepath.Join(root, "world-secrets", "pangolin.json")
+	if !cert.CredExists(path) {
+		return "", "", fmt.Errorf("no pangolin credential on the CP at %s — seal PANGOLIN_BASE + PANGOLIN_KEY to the console identity (the DNS-cred record shape)", path)
+	}
+	secret, err := s.consoleEncSecretAt(root)
+	if err != nil {
+		return "", "", err
+	}
+	open := func(sec, aad, blob []byte) ([]byte, error) { return crypto.Open(sec, aad, blob) }
+	_, env, err := cert.LoadCreds(path, open, secret)
+	if err != nil {
+		return "", "", fmt.Errorf("pangolin credential: %w", err)
+	}
+	return env["PANGOLIN_BASE"], env["PANGOLIN_KEY"], nil
+}
+
+// pangolinEnsure puts one app behind the world's Pangolin public path
+// (docs/NETWORK.md): the gateway's Newt site ensured, the resource found or
+// created (subdomain on the base domain, mode http — the per-host cert is
+// Pangolin's Traefik's business, HTTP-01), and the target pointed at the
+// app's freehold-subnet address, reachable from the gateway where Newt
+// dials out. LAN-visibility records are skipped — their point is that the
+// name resolves only inside the world; a public Pangolin resource would
+// contradict it. A freshly created site's one-time Newt secret is sealed to
+// the console identity immediately (world-secrets/pangolin-newt.json — the
+// gateway stage opens it; losing it burns the identity). Idempotent — the
+// expose verb and the build tail both call it.
+func (s *Spec) pangolinEnsure(rec agenttools.AppRecord) error {
+	p := s.Pangolin
+	if p == nil || p.Org == "" || p.Site == "" || p.Domain == "" {
+		return fmt.Errorf("pangolin: the world coords lack the pangolin public path (org/site/domain)")
+	}
+	if rec.Visibility == agenttools.VisibilityLAN {
+		return nil
+	}
+	base, key, err := s.pangolinCreds()
+	if err != nil {
+		return err
+	}
+	host, portStr, err := net.SplitHostPort(rec.Target)
+	if err != nil {
+		return fmt.Errorf("pangolin: target %q is not host:port", rec.Target)
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		return fmt.Errorf("pangolin: target %q port: %w", rec.Target, err)
+	}
+	cl := &pangolin.Client{Base: base, Key: key}
+	site, created, err := cl.EnsureSite(context.Background(), p.Org, p.Site)
+	if err != nil {
+		return fmt.Errorf("pangolin: site %q: %w", p.Site, err)
+	}
+	if created {
+		if err := s.sealNewtIdentity(site); err != nil {
+			return fmt.Errorf("pangolin: site %q was CREATED and its one-time Newt secret could not be sealed — the identity is unusable until it is (remove the site on the instance and re-run): %w", p.Site, err)
+		}
+	}
+	domainID, err := cl.EnsureDomain(context.Background(), p.Org, p.Domain)
+	if err != nil {
+		return err
+	}
+	res, created, err := cl.EnsureResource(context.Background(), p.Org, site.SiteID, rec.Name, domainID, p.Domain)
+	if err != nil {
+		return fmt.Errorf("pangolin: resource %s: %w", rec.Name, err)
+	}
+	if err := cl.SetTargetIfDiffers(context.Background(), res.ResourceID, site.SiteID, host, port); err != nil {
+		return fmt.Errorf("pangolin: target %s: %w", rec.Target, err)
+	}
+	if created {
+		fmt.Fprintf(os.Stderr, "pangolin: resource %s created (%s)\n", rec.Name, res.FullDomain)
+	}
+	return nil
+}
+
+// pangolinRemove takes one app off the Pangolin public path: resolve the
+// resource by its fullDomain and delete it (the vhost + its target die with
+// it). Best-effort — the report names the failure, the next unexpose
+// converges.
+func (s *Spec) pangolinRemove(rec agenttools.AppRecord) error {
+	p := s.Pangolin
+	if p == nil || rec.Visibility == agenttools.VisibilityLAN {
+		return nil
+	}
+	base, key, err := s.pangolinCreds()
+	if err != nil {
+		return err
+	}
+	cl := &pangolin.Client{Base: base, Key: key}
+	resources, err := cl.ListResources(context.Background(), p.Org)
+	if err != nil {
+		return err
+	}
+	want := rec.Name + "." + p.Domain
+	for _, r := range resources {
+		if r.FullDomain == want {
+			return cl.DeleteResource(context.Background(), r.ResourceID)
+		}
+	}
+	return nil // nothing on the path — already gone
+}
+
+// sealNewtIdentity writes a created site's one-time Newt identity sealed to
+// the console identity — the SAME audience the DNS creds use, so the build
+// tail (console-side, in either process) can open it for the gateway stage.
+func (s *Spec) sealNewtIdentity(site pangolin.Site) error {
+	root := s.consoleStateRoot()
+	secret, err := s.consoleEncSecretAt(root)
+	if err != nil {
+		return err
+	}
+	pub, err := crypto.X25519PublicKey(secret)
+	if err != nil {
+		return err
+	}
+	return cert.SaveCreds(
+		filepath.Join(root, "world-secrets", "pangolin-newt.json"),
+		"pangolin-newt",
+		map[string]string{"NEWT_ID": site.NewtID, "NEWT_SECRET": site.NewtSecret},
+		func(recipientPub, aad, plain []byte) ([]byte, error) { return crypto.Seal(recipientPub, aad, plain) },
+		pub, "pangolin-newt",
+	)
 }
 
 // renderCaddyfile renders the CURRENT edge config from the world coords +
@@ -455,9 +597,27 @@ func (s *Spec) worldApps() (string, error) {
 		return "", nil
 	}
 	var failed []string
+	failedNames := map[string]bool{}
 	for _, rec := range records {
+		recordFailed := false
+		if s.Pangolin != nil {
+			if err := s.pangolinEnsure(rec); err != nil {
+				// The DNS leg SKIPS: pointing the A record at the VPS
+				// while no resource exists there is exactly the public
+				// name aimed at an edge with no route. The record keeps
+				// riding the direct path (or its last good state) until
+				// the next build re-ensures.
+				failed = append(failed, rec.Name+" pangolin: "+err.Error())
+				failedNames[rec.Name] = true
+				continue
+			}
+		}
 		if _, err := s.appDNSEnsure(rec); err != nil {
 			failed = append(failed, rec.Name+" dns: "+err.Error())
+			recordFailed = true
+		}
+		if recordFailed {
+			failedNames[rec.Name] = true
 		}
 	}
 	if _, err := s.appsCertEnsure(); err != nil {
@@ -467,7 +627,7 @@ func (s *Spec) worldApps() (string, error) {
 		return "", fmt.Errorf("edge config: %w", err)
 	}
 	if len(failed) > 0 {
-		return fmt.Sprintf("apps reconciled (%d of %d; FAILED: %s)", len(records)-len(failed), len(records), strings.Join(failed, "; ")), nil
+		return fmt.Sprintf("apps reconciled (%d of %d; FAILED: %s)", len(records)-len(failedNames), len(records), strings.Join(failed, "; ")), nil
 	}
 	return fmt.Sprintf("apps reconciled (%d)", len(records)), nil
 }
@@ -523,6 +683,14 @@ func BuildExposeAppFn(spec *Spec, apps *agenttools.AppsStore, consoleSecret []by
 		}
 		report := fmt.Sprintf("%s → https://%s (group %s, visibility %s, auth %s)",
 			rec.Name, rec.FQDN, gid, rec.Visibility, rec.Auth)
+		if spec.Pangolin != nil {
+			// The resource exists BEFORE the A record points at the VPS —
+			// a die-between-steps build never leaves the public name aimed
+			// at an edge that has no route for it.
+			if err := spec.pangolinEnsure(rec); err != nil {
+				return report + " — RECORDED; the pangolin step failed and the next build re-ensures it: " + err.Error(), nil
+			}
+		}
 		if _, err := spec.appDNSEnsure(rec); err != nil {
 			return report + " — RECORDED; the DNS step failed and the next build re-ensures it: " + err.Error(), nil
 		}
@@ -547,15 +715,30 @@ func BuildUnexposeAppFn(spec *Spec, apps *agenttools.AppsStore) func(name string
 			return "", err
 		}
 		report := fmt.Sprintf("unexposed %s (%s)", name, rec.FQDN)
+		edgeNote := ""
 		if err := spec.applyCaddyfile(); err != nil {
-			return report + " — RECORDED; the edge config apply failed (the vhost may still serve until the next build): " + err.Error(), nil
+			edgeNote = "; the edge config apply failed (the local vhost may still serve until the next build): " + err.Error()
 		}
+		removal := ""
+		if err := spec.pangolinRemove(rec); err != nil {
+			// The record is GONE (unexpose is record-first) — "the next
+			// unexpose" can never run. The real recovery: re-expose then
+			// unexpose again, which re-ensures the row and retries the
+			// removal.
+			removal = "; the pangolin resource could not be removed (it may still serve on the VPS) — re-expose " + rec.Name + " then unexpose it again to retry: " + err.Error()
+		}
+		dnsNote := ""
 		if rec.Visibility != agenttools.VisibilityLAN {
 			if provider, env, err := spec.dnsCredFromStore("relay"); err == nil {
 				if mgr, merr := dnsman.For(provider, env); merr == nil {
-					_ = mgr.DeleteA(spec.appRecordFQDN(rec)) // best-effort
+					if derr := mgr.DeleteA(spec.appRecordFQDN(rec)); derr != nil {
+						dnsNote = "; the A record delete failed: " + derr.Error()
+					}
 				}
 			}
+		}
+		if edgeNote != "" || removal != "" || dnsNote != "" {
+			return report + " — RECORDED" + edgeNote + removal + dnsNote, nil
 		}
 		return report + " — live", nil
 	}

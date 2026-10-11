@@ -3,6 +3,7 @@ package cpbuild
 import (
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/json"
 	"encoding/pem"
 	"fmt"
 	"net"
@@ -107,6 +108,14 @@ func (s *Spec) agentToolsServeFlags() string {
 		// silently eats every flag after it, a quote breaks the shell. B64
 		// is one argv-safe token for any unicode.
 		serveFlags += " --operator-name-b64 " + operatorNameArg(n)
+	}
+	if s.Pangolin != nil {
+		// B64 JSON, one argv-safe token (the operator-name pattern): the
+		// NON-secret shape only — the instance address + root key live in
+		// the sealed world-secrets store both processes open.
+		if b, err := json.Marshal(s.Pangolin); err == nil {
+			serveFlags += " --pangolin-b64 " + base64.StdEncoding.EncodeToString(b)
+		}
 	}
 	if s.RelayPK != "" {
 		serveFlags += " --relay-pubkey " + s.RelayPK

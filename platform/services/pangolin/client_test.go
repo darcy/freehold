@@ -28,12 +28,16 @@ func fakePangolin(t *testing.T) (*Client, *[]string) {
 			body += `{"orgId":"freehold","name":"freehold","subnet":"100.90.0.0/16"}`
 		case "/v1/org/freehold/site":
 			body += `{"siteId":1,"name":"librem","type":"newt","newtId":"noo1","newtSecret":"sek","address":"100.90.0.0/16","online":false}`
-		case "/v1/org/freehold/site/1/resource":
+		case "/v1/org/freehold/resource":
 			body += `{"resourceId":1,"name":"litellm","subdomain":"litellm","fullDomain":"litellm.pangolin.local","domainId":"domain1","ssl":true,"enabled":true}`
 		case "/v1/resource/1/target":
 			body += `{"targetId":1,"siteId":1,"ip":"10.78.0.13","port":31400,"method":"http"}`
 		case "/v1/resource/1":
-			body += `null`
+			if r.Method == http.MethodPost {
+				body += `null` // the sso gate update
+			} else {
+				body += `null` // the delete
+			}
 		default:
 			w.WriteHeader(404)
 			_, _ = w.Write([]byte(`{"success":false,"error":true,"message":"The requests url is not found"}"`))
@@ -81,7 +85,8 @@ func TestClientDrivesTheVerifiedShapes(t *testing.T) {
 		"PUT /v1/org",
 		"PUT /v1/org/freehold/site",
 		"GET /v1/org/freehold/domains",
-		"PUT /v1/org/freehold/site/1/resource",
+		"PUT /v1/org/freehold/resource",
+		"POST /v1/resource/1", // the sso gate — created resources are never open
 		"PUT /v1/resource/1/target",
 		"DELETE /v1/resource/1",
 	}
