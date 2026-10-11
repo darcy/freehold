@@ -1148,3 +1148,72 @@ func TestPangolinAbsentNewtIdentityRefusesLoudly(t *testing.T) {
 		t.Fatalf("the refusal must name the recovery: %s", report)
 	}
 }
+
+// TestPangolinStageReAssertsPerExpose pins the per-run reset: a second
+// expose on the same Spec re-asserts the stage (the once-per-build flag
+// resets per run — a re-minted secret must land without a rebuild).
+func TestPangolinStageReAssertsPerExpose(t *testing.T) {
+	consoleSec := make([]byte, 32)
+	consoleSec[0] = 0x42
+	family := "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+	homelab := strings.Repeat("b", 64)
+
+	pang := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/v1/org/freehold/sites":
+			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"sites":[{"siteId":3,"name":"librem","type":"newt"}]}}`))
+		case "/v1/org/freehold/domains":
+			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"domains":[{"domainId":"domain1","baseDomain":"librem.example","verified":true}]}}`))
+		case "/v1/org/freehold/resources":
+			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"resources":[{"resourceId":9,"name":"yuvomi","subdomain":"yuvomi","fullDomain":"yuvomi.librem.example","domainId":"domain1"}]}}`))
+		case "/v1/resource/9":
+			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":null}`))
+		case "/v1/resource/9/targets":
+			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"targets":[]}}`))
+		case "/v1/resource/9/target":
+			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"targetId":2}}`))
+		default:
+			w.WriteHeader(404)
+			_, _ = w.Write([]byte(`{"success":false,"error":true,"message":"no such route"}`))
+		}
+	}))
+	defer pang.Close()
+
+	te := newTestExposer(t, []relayChannel{{family, "family"}},
+		[]memberEvent{{channelID: family, pubkey: homelab, kind: wire.PutUser, ts: 100}})
+	te.spec.Pangolin = &config.PangolinCoords{Org: "freehold", Site: "librem", Domain: "librem.example"}
+	te.sealPangolinCreds(t, pang.URL, "k")
+	te.sealNewtIdentity(t, "noo1", "thesek")
+	fn := te.exposeFn(consoleSec)
+	args := agent.ExposeArgs{Name: "yuvomi", Target: "10.78.0.13:31400", Group: "family", Requester: homelab}
+
+	// The registry refuses a name clobber — the second call unexposes first
+	// (the same round-trip the recovery path names).
+	unexpose := BuildUnexposeAppFn(te.spec, te.apps)
+
+	count := func() int {
+		n := 0
+		for _, cmd := range te.cmds {
+			if strings.Contains(cmd, "systemctl restart newt") {
+				n++
+			}
+		}
+		return n
+	}
+	if _, err := fn(args); err != nil {
+		t.Fatal(err)
+	}
+	if count() != 1 {
+		t.Fatalf("the first expose asserts the stage once, got %d", count())
+	}
+	if _, err := unexpose("yuvomi"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fn(args); err != nil {
+		t.Fatal(err)
+	}
+	if count() != 2 {
+		t.Fatalf("the second expose must re-assert the stage (the reset), got %d", count())
+	}
+}
