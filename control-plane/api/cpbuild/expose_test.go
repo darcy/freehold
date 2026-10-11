@@ -29,27 +29,40 @@ import (
 // ---- pure pieces ----
 
 // TestAppFQDNPinsDerivation pins the hostname composition: the app is a
-// SIBLING of the relay/cp hosts — the member cookie scopes to the
-// appliance's own ZONE (the world domain), so the cookie reaches every
-// sibling app, and the shared wildcard's challenge name is unique in the
-// zone (no collision with the cp cert's challenge).
+// CHILD of the world's own domain — the per-world subtree the member cookie
+// scopes to (never a shared-zone-level name), and the shared wildcard's
+// challenge name stays inside the world.
 func TestAppFQDNPinsDerivation(t *testing.T) {
-	if got := appDomainBase("cp.librem.freehold.technology"); got != "librem.freehold.technology" {
-		t.Fatalf("appDomainBase: %q", got)
+	cases := []struct{ host, want string }{
+		// A cp.-prefixed host strips to its world domain.
+		{"cp.librem.freehold.technology", "librem.freehold.technology"},
+		// The admin.-prefixed shape (the re-org's operator face) strips the same.
+		{"admin.librem.freehold.technology", "librem.freehold.technology"},
+		// An unprefixed host that already IS its world domain: unchanged.
+		{"sandbox.freehold.technology", "sandbox.freehold.technology"},
+		// A prefixed 3-label host does NOT strip (stripping would land on a
+		// zone this world doesn't own).
+		{"cp.example.com", "cp.example.com"},
+		{"control.example.com", "control.example.com"},
+		// A two-label host IS the zone: unchanged (exposure refuses it).
+		{"example.com", "example.com"},
 	}
-	// The rule is the FIRST LABEL, not a "cp." prefix.
-	if got := appDomainBase("control.example.com"); got != "example.com" {
-		t.Fatalf("appDomainBase (non-cp prefix): %q", got)
-	}
-	// A two-label cp host IS the zone: no world domain below it.
-	if got := appDomainBase("example.com"); got != "example.com" {
-		t.Fatalf("appDomainBase (degenerate): %q", got)
+	for _, c := range cases {
+		if got := WorldDomain(c.host); got != c.want {
+			t.Fatalf("WorldDomain(%q): %q, want %q", c.host, got, c.want)
+		}
 	}
 	if got := appWildcardHost("cp.librem.freehold.technology"); got != "*.librem.freehold.technology" {
 		t.Fatalf("appWildcardHost: %q", got)
 	}
-	if got := appFQDN("cp.librem.freehold.technology", "yuvomi"); got != "yuvomi.librem.freehold.technology" {
+	if got := appFQDN("sandbox.freehold.technology", "litellm"); got != "litellm.sandbox.freehold.technology" {
 		t.Fatalf("appFQDN: %q", got)
+	}
+	if got := appFQDN("cp.librem.freehold.technology", "litellm"); got != "litellm.librem.freehold.technology" {
+		t.Fatalf("appFQDN (prefixed host): %q", got)
+	}
+	if !appDomainIsZone("example.com") || appDomainIsZone("sandbox.freehold.technology") {
+		t.Fatal("appDomainIsZone: only a two-label host is the zone itself")
 	}
 	if !looksLikeChannelID("3fa85f64-5717-4562-b3fc-2c963f66afa6") {
 		t.Fatal("a dashed-uuid channel id must pass through")
@@ -111,6 +124,7 @@ type testExposer struct {
 	bodies    map[string]string
 	relaySrv  *httptest.Server
 	cfWrites  *int // the fake CF's record-write counter
+	cfDeletes *int // the fake CF's record-delete counter
 }
 
 func newTestExposer(t *testing.T, channels []relayChannel, members []memberEvent) *testExposer {
@@ -142,12 +156,12 @@ func newTestExposer(t *testing.T, channels []relayChannel, members []memberEvent
 
 	// A self-signed cert for the durable-mirror reads (the render's
 	// cert-existence filter parses it).
-	fc := selfSigned(t, "*.librem.example")
+	fc := selfSigned(t, "*.librem.example.test")
 
 	spec := &Spec{
 		StateDir: toolsetState, AgentRegistry: testRegistryForExpose(t),
-		RelayURL: srv.URL, RelayAuthURL: srv.URL, RelayHost: "relay.librem.example",
-		RelayIP: "10.78.0.11", CpHost: "cp.librem.example", CpIP: "10.78.0.12",
+		RelayURL: srv.URL, RelayAuthURL: srv.URL, RelayHost: "relay.librem.example.test",
+		RelayIP: "10.78.0.11", CpHost: "cp.librem.example.test", CpIP: "10.78.0.12",
 		ProxyIP: "192.168.30.5", K3sVmid: 105, K3sIP: "10.78.0.13",
 		RunnerTarget: "proxmox-box", Sec: nostrSec, Audience: nostrSecPK,
 		OwnerPub: strings.Repeat("a", 64),
@@ -155,20 +169,23 @@ func newTestExposer(t *testing.T, channels []relayChannel, members []memberEvent
 	// A fake Cloudflare API (the zone cred's CLOUDFLARE_BASE_URL points here —
 	// a test must never touch the real API): /zones resolves one zone, record
 	// writes succeed (and COUNT — the lan mode's no-public-DNS skip pins
-	// against the counter).
-	var cfWrites int
+	// against the counter); deletes count too (the stale-shape migration).
+	var cfWrites, cfDeletes int
 	cf := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		if r.URL.Path == "/zones" || (r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/dns_records")) {
 			_ = json.NewEncoder(w).Encode(map[string]interface{}{
 				"success":     true,
-				"result":      []map[string]interface{}{{"id": "zoneid", "name": "librem.example", "status": "active"}},
+				"result":      []map[string]interface{}{{"id": "zoneid", "name": "librem.example.test", "status": "active"}},
 				"result_info": map[string]interface{}{"total_pages": 1},
 			})
 			return
 		}
 		if r.Method == http.MethodPost || r.Method == http.MethodPut {
 			cfWrites++
+		}
+		if r.Method == http.MethodDelete {
+			cfDeletes++
 		}
 		_ = json.NewEncoder(w).Encode(map[string]interface{}{"success": true, "result": map[string]interface{}{}})
 	}))
@@ -189,7 +206,7 @@ func newTestExposer(t *testing.T, channels []relayChannel, members []memberEvent
 	if err != nil {
 		t.Fatal(err)
 	}
-	te := &testExposer{spec: spec, apps: apps, bodies: map[string]string{}, cfWrites: &cfWrites}
+	te := &testExposer{spec: spec, apps: apps, bodies: map[string]string{}, cfWrites: &cfWrites, cfDeletes: &cfDeletes}
 	spec.Apps = apps
 	spec.execHook = func(cmd string, _ uint64, _ ...string) (string, error) {
 		te.cmds = append(te.cmds, cmd)
@@ -284,10 +301,10 @@ func TestExposePinsRequesterInGroup(t *testing.T) {
 		t.Fatalf("a requester in the group must pass, got %v", err)
 	}
 	rec, ok := te.apps.Get("yuvomi")
-	if !ok || rec.Group != family || rec.FQDN != "yuvomi.librem.example" {
+	if !ok || rec.Group != family || rec.FQDN != "yuvomi.librem.example.test" {
 		t.Fatalf("record: %+v ok=%v", rec, ok)
 	}
-	if !strings.Contains(report, "https://yuvomi.librem.example") {
+	if !strings.Contains(report, "https://yuvomi.librem.example.test") {
 		t.Fatalf("report must carry the URL: %s", report)
 	}
 }
@@ -321,7 +338,7 @@ func TestExposeRecordFirstAndEdgeSafe(t *testing.T) {
 	// The rendered config the apply CARRIES (file-transit): the app vhost
 	// with its gate — forward_auth to the console on the CP guest.
 	cfg := te.bodies["/tmp/fh-caddyfile"]
-	if !strings.Contains(cfg, "yuvomi.librem.example {") ||
+	if !strings.Contains(cfg, "yuvomi.librem.example.test {") ||
 		!strings.Contains(cfg, "forward_auth 10.78.0.12:8080") ||
 		!strings.Contains(cfg, "tls /data/tls/apps/fullchain.pem") {
 		t.Fatalf("the rendered edge config must carry the gated app vhost: %s", cfg)
@@ -430,11 +447,12 @@ func TestExposeRefusesTheEdgeHosts(t *testing.T) {
 	}
 
 	// The degenerate shape (the cp host IS the zone): refused loud — the
-	// shared wildcard's challenge would collide with the cp cert's.
+	// shared wildcard would cover the whole zone and its challenge would
+	// collide with the cp cert's.
 	te.spec.CpHost = "librem.example"
 	if _, err := te.exposeFn(consoleSec)(agent.ExposeArgs{
 		Name: "yuvomi", Target: "10.78.0.13:3000", Group: family, Requester: strings.Repeat("b", 64),
-	}); err == nil || !strings.Contains(err.Error(), "no world domain below it") {
+	}); err == nil || !strings.Contains(err.Error(), "the zone itself") {
 		t.Fatalf("a zone-shaped cp host must refuse, got %v", err)
 	}
 	if _, ok := te.apps.Get("relay"); ok {
@@ -524,14 +542,75 @@ func TestLanVisibilitySkipsPublicDNS(t *testing.T) {
 // shape's cert would TLS-mismatch every app behind an "apps reconciled"
 // report; the mirror miss falls through to a fresh issue.
 func TestAppsCertReuseCoversTheHost(t *testing.T) {
-	oldShape := selfSigned(t, "*.cp.librem.example")
-	if certCovers(oldShape, "*.librem.example") {
+	oldShape := selfSigned(t, "*.cp.librem.example.test")
+	if certCovers(oldShape, "*.librem.example.test") {
 		t.Fatal("the old shape's cert must not cover the moved wildcard")
 	}
-	if !certCovers(selfSigned(t, "*.librem.example"), "*.librem.example") {
+	if !certCovers(selfSigned(t, "*.librem.example.test"), "*.librem.example.test") {
 		t.Fatal("the matching wildcard must cover")
 	}
-	if certCovers([]byte("not a pem"), "*.librem.example") {
+	if certCovers([]byte("not a pem"), "*.librem.example.test") {
 		t.Fatal("garbage must not cover")
+	}
+}
+
+// TestWorldAppsMigratesStaleShapeRecords pins the DNS migration: a row whose
+// stored FQDN was written by an older naming shape (the released per-app
+// shape, <name>.<cpHost> — a name the shared wildcard never covered)
+// repoints the public record to the DERIVED hostname and deletes the stale
+// one, so an old-shape name never lingers pointing at the edge.
+func TestWorldAppsMigratesStaleShapeRecords(t *testing.T) {
+	family := "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+	te := newTestExposer(t, []relayChannel{{family, "family"}}, nil)
+	if err := te.apps.Expose(agenttools.AppRecord{
+		Name: "yuvomi", FQDN: "yuvomi.cp.librem.example.test", Target: "10.78.0.13:3000",
+		Visibility: agenttools.VisibilityFamily, Auth: agenttools.AuthGate,
+		Group: family, Owner: "op", Requester: strings.Repeat("b", 64), CreatedAt: 7,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	rep, err := te.spec.worldApps()
+	if err != nil {
+		t.Fatalf("worldApps: %v", err)
+	}
+	if !strings.Contains(rep, "apps reconciled (1)") {
+		t.Fatalf("worldApps report: %q", rep)
+	}
+	if *te.cfDeletes < 1 {
+		t.Fatal("the stale-shape record must be deleted")
+	}
+	if *te.cfWrites < 1 {
+		t.Fatal("the derived record must be pointed")
+	}
+	// The render serves the DERIVED name (the wildcard covers it).
+	cfg := te.bodies["/tmp/fh-caddyfile"]
+	if !strings.Contains(cfg, "yuvomi.librem.example.test {") {
+		t.Fatalf("the render must carry the derived hostname: %s", cfg)
+	}
+}
+
+// TestAppsCertWaitsOutPendingOrders pins the shared-challenge guard: while a
+// relay/cp cert order is un-resolved (its state file exists), the apps
+// wildcard's issue refuses — when the cp host IS the world domain the two
+// orders challenge at the SAME name (_acme-challenge.<world-domain>), and a
+// fresh apps order would purge the pending one's challenge TXT out from
+// under it. The next build/expose re-ensures.
+func TestAppsCertWaitsOutPendingOrders(t *testing.T) {
+	family := "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+	te := newTestExposer(t, []relayChannel{{family, "family"}}, nil)
+	if err := te.apps.Expose(agenttools.AppRecord{
+		Name: "yuvomi", FQDN: appFQDN(te.spec.CpHost, "yuvomi"), Target: "10.78.0.13:3000",
+		Visibility: agenttools.VisibilityFamily, Auth: agenttools.AuthGate,
+		Group: family, Owner: "op", Requester: strings.Repeat("b", 64), CreatedAt: 7,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	write(t, filepath.Join(te.spec.consoleStateRoot(), "world-secrets", "cert-pending-cp.json"), []byte("{}"))
+	rep, err := te.spec.worldApps()
+	if err != nil {
+		t.Fatalf("worldApps: %v", err)
+	}
+	if !strings.Contains(rep, "still pending") {
+		t.Fatalf("a pending relay/cp order must hold the apps cert off (in the report): %q", rep)
 	}
 }
