@@ -470,10 +470,10 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     installed OSS.
 
 *   **Talk is bounded core→custom.** The operator may converse with any
-    department or agent directly, and agents may converse with each other — but
-    core agents do not converse with custom agents: a custom agent's only
-    counterpart for work is the CPA, which routes to the departments (a custom
-    agent's mention never wakes a department). All agent-to-agent plumbing
+    department or agent directly, and agent-to-agent talk is core-to-core or
+    through the CPA — a custom agent's only counterpart for work is the CPA,
+    which routes to the departments (a custom agent's mention never wakes a
+    department or another custom agent). All agent-to-agent plumbing
     lives in `#freehold`, which every agent joins.
 
 *   **Capability execution is bounded.** A capability a department owns (external
