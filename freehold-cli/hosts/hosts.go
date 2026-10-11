@@ -65,6 +65,16 @@ func newHostsCmd() *cobra.Command {
 			cfg.RelayURL = "https://" + newRelay
 			cfg.RelayWsURL = "wss://" + newRelay
 			cfg.CPURL = "https://" + newCP
+			// The login-seeded agent_tools_url rides the cp host's PUBLIC
+			// form (https://<cp-host>/mcp) on a login'd box — a stale host
+			// feeds the redeployed console (--agent-tools-url) and the
+			// update's own migration dial, which would die post-rename (the
+			// old cp vhost is gone). Swap the host when the field carries
+			// it; a dial-LAN IP-form URL survives the rename untouched.
+			if at := cfg.AgentToolsURL; strings.Contains(at, oldCP) {
+				cfg.AgentToolsURL = strings.ReplaceAll(at, oldCP, newCP)
+				fmt.Printf("  agent_tools_url  %s -> %s\n", at, cfg.AgentToolsURL)
+			}
 			if err := cfg.Save(path); err != nil {
 				return fmt.Errorf("save config: %w", err)
 			}

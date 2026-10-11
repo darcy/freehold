@@ -55,6 +55,31 @@ func TestHostsVerb(t *testing.T) {
 		}
 	}
 
+	// The login-seeded agent_tools_url rides the cp host's PUBLIC form: the
+	// rewrite swaps the host; a dial-LAN IP form survives untouched.
+	if err := os.WriteFile(cfgPath, []byte(testConfig+"agent_tools_url = 'https://cp.librem.example.test/mcp'\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c = Command()
+	c.SetArgs([]string{"--relay", "chat.librem.example.test", "--cp", "admin.librem.example.test", "--config", cfgPath})
+	if err := c.Execute(); err != nil {
+		t.Fatalf("rename with a public agent_tools_url: %v", err)
+	}
+	if raw, _ := os.ReadFile(cfgPath); !strings.Contains(string(raw), "agent_tools_url = 'https://admin.librem.example.test/mcp'") {
+		t.Fatalf("the public agent_tools_url must swap hosts:\n%s", raw)
+	}
+	if err := os.WriteFile(cfgPath, []byte(testConfig+"agent_tools_url = 'http://10.0.0.5:8089'\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c = Command()
+	c.SetArgs([]string{"--cp", "admin.librem.example.test", "--config", cfgPath})
+	if err := c.Execute(); err != nil {
+		t.Fatalf("rename with an IP-form agent_tools_url: %v", err)
+	}
+	if raw, _ := os.ReadFile(cfgPath); !strings.Contains(string(raw), "agent_tools_url = 'http://10.0.0.5:8089'") {
+		t.Fatalf("a dial-LAN agent_tools_url must survive untouched:\n%s", raw)
+	}
+
 	// A cp host that moves the world's own domain: refused, config untouched.
 	if err := os.WriteFile(cfgPath, []byte(testConfig), 0o600); err != nil {
 		t.Fatal(err)
