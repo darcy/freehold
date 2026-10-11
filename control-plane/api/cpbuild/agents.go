@@ -498,6 +498,11 @@ func (s *Spec) manualDNSNote() string {
 	if s.CpHost != "" {
 		hosts = append(hosts, s.CpHost)
 	}
+	// The portal (the world root) is a public face the same way when the
+	// console has moved off it — the operator must create its record too.
+	if p := appsPortalHost(s.CpHost); p != "" {
+		hosts = append(hosts, p)
+	}
 	var missing, verified []string
 	for _, h := range hosts {
 		if manualAResolves(h, s.ProxyIP) {
