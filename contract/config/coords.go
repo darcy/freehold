@@ -1,9 +1,30 @@
 package config
 
+import "strings"
+
 // AgentToolsPort is the CP's freehold-agent-tools MCP bind port. Any URL the
 // console/install hands to the toolset — and the URL the CPA pod uses to curl
 // its stdio bridge binary — is derived from it.
 const AgentToolsPort = "8089"
+
+// WorldDomain derives a world's own domain — the per-world subtree of the
+// zone every world name hangs off. It is the CP host with a literal "cp." or
+// "admin." label stripped (the prefixed house shapes, and only when at least
+// one world label remains below the zone — stripping cp.example.com would
+// land on a zone this world doesn't own); a host that already IS its world
+// domain (sandbox.freehold.technology) comes back unchanged. The world's
+// tree hangs off that root: the portal at the root, chat./admin. and every
+// exposed app (<name>) as children — so a CP-host rename never moves an app.
+// Lives in the contract because every module composes world names from it
+// (the CLI's hosts verb, the CP's exposure machinery, the console's cookie
+// scope).
+func WorldDomain(cpHost string) string {
+	labels := strings.Split(cpHost, ".")
+	if len(labels) >= 4 && (labels[0] == "cp" || labels[0] == "admin") {
+		return strings.Join(labels[1:], ".")
+	}
+	return cpHost
+}
 
 // Coords is the operator-supplied world configuration the CP needs to own the
 // build — the non-secret subset of the build Spec, serialized so a box can hand

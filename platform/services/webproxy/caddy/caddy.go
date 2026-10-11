@@ -24,10 +24,28 @@ import (
 // pod on the same node binding 5000): the relay vhost routes /pair* to it so
 // Buzz's mobile pairing handshake works through the edge. Empty (no k3s node
 // IP resolved) omits the route — the pairing surface needs the edge.
-func RenderCaddyfile(relayHost, relayUpstream, pairUpstream, cpHost, cpUpstream, cpMcpUpstream string) string {
+// portalUpstream shares the CP vhost's upstream: the portal (the world root —
+// the member face) and the operator console are two front doors over ONE
+// backend.
+func RenderCaddyfile(relayHost, relayUpstream, pairUpstream, cpHost, cpUpstream, cpMcpUpstream, portalHost string) string {
 	relayHandle := fmt.Sprintf("  handle /pair* {\n    reverse_proxy %s\n  }\n", pairUpstream)
 	if pairUpstream == "" {
 		relayHandle = ""
+	}
+	// The portal vhost rides only when the console has moved OFF the world
+	// root (admin.<root>): the root then fronts the same backend with the
+	// portal slot's cert. While the console IS the root, its own vhost serves
+	// that name and no portal vhost exists.
+	portal := ""
+	if portalHost != "" && portalHost != cpHost && portalHost != relayHost {
+		portal = fmt.Sprintf(`
+%s {
+  tls /data/tls/portal/fullchain.pem /data/tls/portal/key.pem
+  handle {
+    reverse_proxy %s
+  }
+}
+`, portalHost, cpUpstream)
 	}
 	return fmt.Sprintf(`{
   auto_https off
@@ -49,7 +67,7 @@ func RenderCaddyfile(relayHost, relayUpstream, pairUpstream, cpHost, cpUpstream,
     reverse_proxy %s
   }
 }
-`, relayHost, relayHandle, relayUpstream, cpHost, cpMcpUpstream, cpUpstream)
+%s`, relayHost, relayHandle, relayUpstream, cpHost, cpMcpUpstream, cpUpstream, portal)
 }
 
 // AppVhost is one agent-exposed service's site block: its own hostname, the
@@ -91,7 +109,7 @@ func RenderAppVhosts(apps []AppVhost) string {
 
 // RenderCaddyfileApps is the full edge config: the base vhosts plus the apps'
 // site blocks (RenderAppVhosts) — the one renderer both appliers share.
-func RenderCaddyfileApps(relayHost, relayUpstream, pairUpstream, cpHost, cpUpstream, cpMcpUpstream string, apps []AppVhost) string {
-	return RenderCaddyfile(relayHost, relayUpstream, pairUpstream, cpHost, cpUpstream, cpMcpUpstream) +
+func RenderCaddyfileApps(relayHost, relayUpstream, pairUpstream, cpHost, cpUpstream, cpMcpUpstream, portalHost string, apps []AppVhost) string {
+	return RenderCaddyfile(relayHost, relayUpstream, pairUpstream, cpHost, cpUpstream, cpMcpUpstream, portalHost) +
 		RenderAppVhosts(apps)
 }

@@ -19,6 +19,8 @@ import (
 	"sync"
 	"time"
 
+	"freehold/contract/config"
+
 	"freehold/contract/wire"
 )
 
@@ -388,6 +390,14 @@ func checkOrigin(r *http.Request, publicOrigin *string) error {
 			pub = pub[:i]
 		}
 		if host == pub {
+			return nil
+		}
+		// The PORTAL: the world root fronts the same console backend once the
+		// operator face lives at admin.<root> — the ONE extra origin the
+		// console accepts, EXACTLY (never its children: exposed apps are
+		// agent-built surfaces in a member's browser, and same-site subdomain
+		// requests would ride the SameSite=Strict operator session).
+		if host == config.WorldDomain(pub) {
 			return nil
 		}
 	}

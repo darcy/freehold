@@ -478,7 +478,7 @@ func (s *Spec) manageDomainDNS() (string, error) {
 		return "", err
 	}
 	ip := s.ProxyIP
-	for _, host := range []string{s.RelayHost, s.CpHost} {
+	for _, host := range []string{s.RelayHost, s.CpHost, appsPortalHost(s.CpHost)} {
 		if host == "" {
 			continue
 		}
@@ -497,6 +497,11 @@ func (s *Spec) manualDNSNote() string {
 	hosts := []string{s.RelayHost}
 	if s.CpHost != "" {
 		hosts = append(hosts, s.CpHost)
+	}
+	// The portal (the world root) is a public face the same way when the
+	// console has moved off it — the operator must create its record too.
+	if p := appsPortalHost(s.CpHost); p != "" {
+		hosts = append(hosts, p)
 	}
 	var missing, verified []string
 	for _, h := range hosts {

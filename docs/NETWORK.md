@@ -90,11 +90,18 @@ The gateway has TWO shapes, one per substrate:
     (names + FQDNs only, no targets or owners) above the member's own scheduled jobs.
     One login (`/auth`) serves everyone: a whitelisted key lands the operator session,
     any other relay member key lands the member session — the role falls out of the key.
-    The portal takes the world root (`<world>.<zone>` — the launcher lives there today,
-    on the CP host); the operator face gets its own `admin.<world>` child and the relay a
-    `chat.<world>` child as the member surface grows (the operator surface is the TUI +
-    the console's admin routes; the portal is the member surface — two front doors over
-    one backend).
+    The world's tree is the layout — the portal at the world root (`<world>.<zone>`), the
+    operator face at `admin.<world>`, the relay at `chat.<world>` — and `freehold hosts`
+    renames a world onto it (it rewrites the profile's relay/cp URLs and refuses a rename
+    that would move the world's own domain: every exposed app's name anchors there).
+    When the console's host IS the world root (an unrenamed world), no separate portal
+    vhost exists — the console's own vhost serves that name; every prefixed-shape world
+    (the standard `cp.<world>`) has the portal live: its cert and public record ride the
+    same build that serves the vhost.
+    The operator surface is the TUI + the console's admin routes; the portal is the
+    member surface — two front doors over one backend. The origin guard accepts exactly
+    two origins — the console's own and the world root (never app children: same-site
+    subdomain requests would ride the operator session).
 *   **Groups are relay channels.** Every exposed app rides a relay channel as its ACL —
     the record stores the channel ID (names change; the display layer resolves the current
     name), `#general` is the everyone-channel and the default, and the expose validates

@@ -32,6 +32,7 @@ import (
 	"strings"
 	"time"
 
+	"freehold/contract/config"
 	"freehold/contract/relay"
 	"freehold/control-plane/api/agent"
 	"freehold/control-plane/api/agenttools"
@@ -40,27 +41,27 @@ import (
 	caddydeploy "freehold/platform/services/webproxy/caddy"
 )
 
-// WorldDomain derives a world's own domain — the per-world subtree of the
-// zone every world name hangs off. It is the CP host with a literal "cp." or
-// "admin." label stripped (the prefixed house shapes, and only when at least
-// one world label remains below the zone — stripping cp.example.com would
-// land on a zone this world doesn't own); a host that already IS its world
-// domain (sandbox.freehold.technology) comes back unchanged. The world's
-// tree hangs off that root: the portal at the root, chat./admin. and every
-// exposed app (<name>) as children — so a CP-host rename never moves an app.
-func WorldDomain(cpHost string) string {
-	labels := strings.Split(cpHost, ".")
-	if len(labels) >= 4 && (labels[0] == "cp" || labels[0] == "admin") {
-		return strings.Join(labels[1:], ".")
-	}
-	return cpHost
-}
+// WorldDomain is the world's own domain (config.WorldDomain) — the per-world
+// subtree every world name hangs off; kept as a local alias so the exposure
+// machinery reads its own vocabulary.
+func WorldDomain(cpHost string) string { return config.WorldDomain(cpHost) }
 
 // appDomainIsZone reports whether the cp host IS a zone apex (two labels) —
 // the one shape where the apps' shared wildcard (*.host) would cover the
 // whole zone rather than one world's subtree.
 func appDomainIsZone(cpHost string) bool {
 	return len(strings.Split(cpHost, ".")) < 3
+}
+
+// appsPortalHost is the PORTAL's public host — the world root itself, the
+// member face the edge points at the same backend as the operator console.
+// Empty while the cp host IS the world root (the console hasn't moved off it:
+// its own vhost serves that name, no portal vhost exists).
+func appsPortalHost(cpHost string) string {
+	if root := WorldDomain(cpHost); root != cpHost {
+		return root
+	}
+	return ""
 }
 
 // appFQDN is an app's public hostname: a CHILD of the world's own domain
@@ -162,6 +163,12 @@ func shortHex(s string) string {
 // propagation wait per app).
 const appsCertSlot = "apps"
 
+// portalCertSlot is the PORTAL's cert slot — the world root's own (non-
+// wildcard) name, the member face. Its challenge name is the world root's
+// (_acme-challenge.<root>), shared with the apps wildcard's — the certPending
+// guard covers the overlap.
+const portalCertSlot = "portal"
+
 // appWildcardHost is the wildcard the apps' shared cert covers — the WORLD
 // DOMAIN's wildcard (one cert covers every app the world will ever expose;
 // its challenge name is unique inside the world).
@@ -220,15 +227,19 @@ func certCovers(fullchain []byte, host string) bool {
 	return false
 }
 
-// certPending reports whether a relay/cp order is still un-resolved: the
-// state file exists until its Resolve succeeds (DiscardState). When the cp
-// host IS the world domain, those orders' challenge name
-// (_acme-challenge.<world-domain>) is the SAME name the apps wildcard
-// challenges at — a fresh apps order would purge the pending order's
-// challenge TXT out from under it (the blast radius is one failed build that
-// self-heals, but the check turns that race into a clean refusal).
+// certPending reports whether a relay/cp/portal order is still un-resolved:
+// the state file exists until its Resolve succeeds (DiscardState). Those
+// slots' challenge names include the world root's own (_acme-challenge.<world
+// -domain> — the portal cert's, and the cp cert's whenever the cp host IS the
+// world root) — the SAME name the apps wildcard challenges at. A fresh apps
+// order would purge the pending order's challenge TXT out from under it (the
+// blast radius is one failed build that self-heals, but the check turns that
+// race into a clean refusal).
 func (s *Spec) certPending() bool {
-	for _, sl := range []string{"relay", "cp"} {
+	for _, sl := range []string{"relay", "cp", portalCertSlot} {
+		if sl == portalCertSlot && appsPortalHost(s.CpHost) == "" {
+			continue // no portal slot on this world
+		}
 		if _, err := os.Stat(filepath.Join(s.consoleStateRoot(), "world-secrets", "cert-pending-"+sl+".json")); err == nil {
 			return true
 		}
@@ -240,7 +251,7 @@ func (s *Spec) appsCertEnsure() (bool, error) {
 	slot := appsCertSlot
 	host := appWildcardHost(s.CpHost)
 	if s.certPending() {
-		return false, fmt.Errorf("cert %s: a relay/cp cert order is still pending (shared challenge name) — the next build re-ensures", slot)
+		return false, fmt.Errorf("cert %s: a relay/cp/portal cert order is still pending (shared challenge name) — the next build re-ensures", slot)
 	}
 	if fc, err := s.durableFullchain(s.K3sVmid, slot); err == nil && s.durableKeyPresent(s.K3sVmid, slot) {
 		if _, ok := cert.ReuseIfValidBytes(fc, time.Now(), 30*24*time.Hour); ok && certCovers(fc, host) {
@@ -357,9 +368,24 @@ func (s *Spec) renderCaddyfile() string {
 		cpUpstream = s.CpIP + ":8080"
 		cpMcpUpstream = s.CpIP + ":8089"
 	}
+	// Cert-before-config applies to the PORTAL vhost too: it renders only
+	// when its cert is on the durable mirror AND covers the world root — on
+	// the first build after a rename the mirror is empty, the block is
+	// skipped, and the next build renders it (worldCert issued the cert by
+	// then). An ungated render would crash-loop the whole edge on the missing
+	// tls files.
+	portalHost := appsPortalHost(s.CpHost)
+	if portalHost != "" {
+		if pc, err := s.durableFullchain(s.K3sVmid, portalCertSlot); err != nil {
+			portalHost = ""
+		} else if _, ok := cert.ReuseIfValidBytes(pc, time.Now(), 0); !ok || !certCovers(pc, portalHost) {
+			portalHost = ""
+		}
+	}
 	return caddydeploy.RenderCaddyfileApps(
 		s.RelayHost, s.RelayIP+":3000", pair,
 		s.CpHost, cpUpstream, cpMcpUpstream,
+		portalHost,
 		apps)
 }
 

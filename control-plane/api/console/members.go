@@ -30,9 +30,9 @@ import (
 	"sync"
 	"time"
 
+	"freehold/contract/config"
 	"freehold/contract/relay"
 	"freehold/control-plane/api/agenttools"
-	"freehold/control-plane/api/cpbuild"
 )
 
 const (
@@ -411,7 +411,7 @@ func hostOf(origin string) string {
 	return rest
 }
 
-// memberDomain is the appliance's own WORLD DOMAIN (cpbuild.WorldDomain): the
+// memberDomain is the appliance's own WORLD DOMAIN (config.WorldDomain): the
 // per-world subtree of the zone — the CP host with a literal "cp."/"admin."
 // label stripped, else the CP host itself. Apps are CHILDREN of that domain
 // (litellm.sandbox.freehold.technology), so the member cookie and the
@@ -421,7 +421,7 @@ func (s *Server) memberDomain() string {
 	if s.PublicOrigin == nil || *s.PublicOrigin == "" {
 		return ""
 	}
-	return cpbuild.WorldDomain(hostOf(*s.PublicOrigin))
+	return config.WorldDomain(hostOf(*s.PublicOrigin))
 }
 
 // memberCookieDomain scopes the member cookie to the appliance's zone —

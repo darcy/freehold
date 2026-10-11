@@ -1366,16 +1366,23 @@ func (s *Spec) worldCert() error {
 	var pending []pendSlot
 
 	// Phase A — durable-reuse seed, or open + PLACE each slot's order (no pause).
-	for _, sl := range []struct{ slot, host string }{
-		{"relay", s.RelayHost}, {"cp", s.CpHost},
+	// credSlot names the SEALED DNS credential the slot's order opens with:
+	// relay/cp carry their own; the portal rides the relay slot's — one
+	// token, one zone, every slot (the apps cert's own rule), so no
+	// dns-portal secret ever exists to ship or allowlist.
+	for _, sl := range []struct{ slot, host, credSlot string }{
+		{"relay", s.RelayHost, "relay"}, {"cp", s.CpHost, "cp"}, {"portal", appsPortalHost(s.CpHost), "relay"},
 	} {
 		if sl.host == "" {
 			continue
 		}
 		// Durable-reuse gate: a valid cert on the durable mirror (>= 30d left)
-		// means no LE order, no challenge, no rate-limit — seed the PVC from it.
+		// that COVERS this slot's host (a renamed world's mirror still holds
+		// the old host's cert — valid, wrong name: reuse would TLS-mismatch
+		// the new host behind a green report) means no LE order, no
+		// challenge, no rate-limit — seed the PVC from it.
 		if fc, err := s.durableFullchain(s.K3sVmid, sl.slot); err == nil && s.durableKeyPresent(s.K3sVmid, sl.slot) {
-			if _, ok := cert.ReuseIfValidBytes(fc, time.Now(), 30*24*time.Hour); ok {
+			if _, ok := cert.ReuseIfValidBytes(fc, time.Now(), 30*24*time.Hour); ok && certCovers(fc, sl.host) {
 				if err := s.seedCaddyCertFromDurable(s.K3sVmid, sl.slot); err != nil {
 					return fmt.Errorf("cert %s durable seed: %w", sl.slot, err)
 				}
@@ -1403,7 +1410,7 @@ func (s *Spec) worldCert() error {
 		// Issue path: the sealed DNS cred must be on the CP (the box build's
 		// hand-off ships it). The fresh fullchain+key pair is installed by
 		// file-transit — no restart of the serving co-located runner.
-		provider, env, err := s.dnsCredFromStore(sl.slot)
+		provider, env, err := s.dnsCredFromStore(sl.credSlot)
 		if err != nil {
 			return fmt.Errorf("cert %s: %w", sl.slot, err)
 		}
