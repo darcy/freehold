@@ -469,8 +469,12 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     ad hoc and unvetted as before. No dedicated department aggregates or monitors
     installed OSS.
 
-*   **Communication is unrestricted.** The operator and any agent may converse
-    with any department or agent directly — talk is not gated.
+*   **Talk is bounded core→custom.** The operator may converse with any
+    department or agent directly, and agents may converse with each other — but
+    core agents do not converse with custom agents: a custom agent's only
+    counterpart for work is the CPA, which routes to the departments (a custom
+    agent's mention never wakes a department). All agent-to-agent plumbing
+    lives in `#freehold`, which every agent joins.
 
 *   **Capability execution is bounded.** A capability a department owns (external
     proxy, backup, compute/LXC, model registration, AI hardware) is executed by

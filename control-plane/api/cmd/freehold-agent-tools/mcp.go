@@ -39,7 +39,7 @@ func freeholdToolDefs(hasRunner bool, targets []string) []map[string]interface{}
 		return map[string]interface{}{"type": "object", "properties": props, "required": req}
 	}
 	defs := []map[string]interface{}{
-		{"name": "create_agent", "description": "Create a new conversational agent (name + one-line purpose + the channel(s) to add it to; each channel is created if it doesn't exist, the operator is added, and the CPA is added to every channel). model (optional) picks the LiteLLM alias the agent reasons on — Code for coding agents, ExtraThinking for deep architecture/thinking work, General (the default) otherwise. Returns the new agent's pubkey.",
+		{"name": "create_agent", "description": "Create a new conversational agent (name + one-line purpose + the channel(s) to add it to; each channel is created if it doesn't exist, the operator is added, the CPA is added to every channel, and the agent always also joins #freehold — the shared agent workroom where all hand-offs happen). model (optional) picks the LiteLLM alias the agent reasons on — Code for coding agents, ExtraThinking for deep architecture/thinking work, General (the default) otherwise. Returns the new agent's pubkey.",
 			"inputSchema": i(map[string]interface{}{
 				"name":     map[string]interface{}{"type": "string"},
 				"purpose":  map[string]interface{}{"type": "string"},
