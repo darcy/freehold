@@ -109,8 +109,10 @@ must be a CURRENT state (grants; later, scope bookkeeping) uses the addressable 
 - Buzz has a **native agent-memory kind** (`KIND_AGENT_ENGRAM` 30174) plus the relay event log
   with Postgres FTS as the searchable history ("agents search six months of history").
 - Memory event payloads are **encrypted** (a relay operator is not a reader of agent
-  memory): the writer encrypts NIP-44 v2 against its agent↔owner pair, and the owner is
-  named by the NIP-OA owner attestation (an `auth` tag) rather than a freehold scheme.
+  memory): the writer encrypts NIP-44 v2 **to itself** — sender and receiver are both
+  the agent, so memory is per-agent (`control-plane/core/src/memory.rs`) — and the
+  owner is named by the NIP-OA owner attestation (an `auth` tag) rather than a
+  freehold scheme.
 - The **owner attestation rides the pod as `BUZZ_AUTH_TAG`** (the pod env, set by the
   CP's build): a four-element `["auth", <owner-pk>, <conditions>, <sig>]` tag the OWNER
   key signs over `nostr:agent-auth:<agent-pk>:<conditions>`, bounded to `kind=30174`
@@ -126,8 +128,9 @@ must be a CURRENT state (grants; later, scope bookkeeping) uses the addressable 
 
 - The relay runs its own **hash-chain tamper-evident audit log** (`buzz-audit`) for every
   stored event — so anything we publish is relay-audited by construction.
-- Runner exec-audit publishes as **kind 48001 (AUDIT_ENTRY)** — verify schema in D1; keep the
-  Chunk-1 local spool as the pre-relay/offline log (D5 stands).
+- Runner exec-audit publishes as **kind 48001 (AUDIT_ENTRY)** — verify schema in D1; the
+  Chunk-1 local spool stays the authoritative log, relay publish is best-effort and
+  degrades to spool-only on failure (D5 stands).
 
 ## 9. Per-capability port decision (the Phase 0 deliverable)
 
@@ -136,8 +139,8 @@ must be a CURRENT state (grants; later, scope bookkeeping) uses the addressable 
 | **Membership** | NATIVE | kind 13534 (relay-signed); `buzz-admin add-member`; relay enforces at auth + channel ingest | No |
 | **Grants** | NATIVE (NIP-29) | a runner is a private channel (9007 create); a grant is adding the agent's pubkey as a channel member (9000 put-user / 9001 remove-user, owner-gated); the runner's live whitelist is its own relay-signed 39002 roster, read fresh per call (fail-closed); profile/status is a kind-9 message tagged `t=fh-profile` | No |
 | **Memory** | NATIVE + encrypted payloads | kind 30174 engram + event-log FTS | Payload encryption is ours (D3) |
-| **Audit** | NATIVE | kind 48001 audit entry + relay hash-chain; local spool stays (D5) | No |
-| **Delegation** | NATIVE | kinds 43001–43006 job request/result/error (or @mention+reply as simplest path) | No |
+| **Audit** | NATIVE | kind 48001 audit entry + relay hash-chain; the local spool stays authoritative (D5) | No |
+| **Delegation** | NATIVE | kind-9 channel messages in a CPA-created OPEN channel — `job-request`/`job-result` content envelopes (§9.7; the native job kinds 43001–43006 are NOT in the ingest scope) | No |
 | **Surface (F)** | NATIVE | stream channels (kind 9) + DMs (41001); scripted @freehold CPA via its own NIP-42 client | No |
 
 ## 9.5 Ingest surface (found live, Phase D)
@@ -161,20 +164,17 @@ The stock ingest ACCEPTS kind-30174 (no patch gate — D3 was live-verifiable), 
 hard envelope validation (all observed live):
 - content MUST be a valid **NIP-44 v2 payload** (base64; other base64 or JSON wrappers
   get `agent-engram content is not valid base64 (length)` / `too short for NIP-44 v2`);
-- exactly one `d` tag, 64 lowercase hex — the HMAC d-tag the writer derives from its
-  NIP-44 conversation key with the owner (`d_tag = lower_hex(HMAC(K_c, "agent-memory/v1/d-tag" || 0x00 || slug))`);
-  the freehold-side `pk#key` composite (the retired `contract/relay` scheme) was refused
-  (`agent-engram d tag must be 64 lowercase hex chars`) and is NOT the scheme the
-  plane uses;
-- exactly one `p` tag, 64 lowercase hex — the OWNER counterparty the engram is
-  addressed to (the reader queries `#p=[owner]`, decrypts with the agent↔owner
-  conversation key);
-- reads require `authors=[self]` or `#p=[self]` (`restricted: agent-engram reads...`).
+- exactly one `d` tag, 64 lowercase hex — the writer derives it as
+  `lower_hex(sha256(<agent-pk> || "#" || <key>))`; the raw `pk#key` composite (the
+  retired `contract/relay` scheme) was refused
+  (`agent-engram d tag must be 64 lowercase hex chars`), so the plane hashes it;
+- exactly one `p` tag, 64 lowercase hex — the agent's OWN pubkey (writer and
+  reader are the same identity);
+- reads require `authors=[self]` or `#p=[self]` (`restricted: agent-engram reads...`);
+  the reader filters `authors=[self]` + the `#d` tag.
 
-Freehold outcome: memory = NIP-44 v2 encryption over the agent↔owner pair (writer =
-agent key, counterparty = owner; the relay only ever stores ciphertext); the owner the
-writer encrypts against comes from the NIP-OA `auth` attestation (§7), so a pod's
-writes land in the owner namespace its harness already reads. The envelope is
+Freehold outcome: memory = NIP-44 v2 self-encryption (writer = reader = the agent;
+the relay only ever stores ciphertext). The envelope is
 shape-checked only — the relay does NOT bind the event signature to the claimed
 `p` owner (integrity gap recorded in docs/AI.md); confidentiality is
 cryptographic and unaffected.

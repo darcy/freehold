@@ -19,8 +19,6 @@ the ordering across all of them is `docs/ROADMAP.md`.
 *   Replay within a call's 60 s window; `timeout_s` leaves orphans; abandoned streaming
     sessions are never reaped; the SSH and API connectors have a handful of edge cases;
     the state store is single-process.
-*   The co-located runner reads package grants, not the relay roster; the runner's audit
-    is local-spool only (stock buzz rejects kind 48001).
 *   On-the-fly grants are new-door-only and confirm-mode; the confirmation discipline is a
     prompt rule the server can't see. Doors are intent-and-audit boundaries, not hard
     containment on a shared host.
@@ -29,13 +27,10 @@ the ordering across all of them is `docs/ROADMAP.md`.
 
 **Migrations and update**
 *   No reverse migrations or downgrade verb.
-*   The console executor's migration window can race a `create_agent` on the old serve.
 *   Unshipped migration scripts look like a converged world (only the report line shows it).
 *   Agent-tools audience drift is detected, not repaired.
 
 **The relay (Buzz)**
-*   After a redeploy, private-channel publishes 403 until channel rosters are reconciled,
-    and the console's relay membership goes stale — the build should reconcile and re-member.
 *   Non-department relay runners need a manual community-membership step.
 *   Exec receipts as channel messages are designed, not built; no relay-down drill;
     no relay-contract verification skill.
@@ -45,10 +40,8 @@ the ordering across all of them is `docs/ROADMAP.md`.
     `Restart=on-failure` units — a guest reboot or a crash returns the whole CP.
 *   A box's local runner binds 8787 — or the next free loopback port when that is taken
     (`--local-port` pins it; a re-adopt keeps its recorded addr and reclaims the port) — so
-    multi-profile mints no longer collide on 8787. Residual: `exec`'s `--addr` still defaults
-    literally to `127.0.0.1:8787` instead of the profile's recorded `[runner] addr`
-    (`build`/`teardown`/`uninstall` dial the recorded addr) — a runner picked onto another
-    port needs `--addr`.
+    multi-profile mints no longer collide on 8787; `exec` resolves the profile's recorded
+    `[runner] addr` when `--addr` is not given.
 *   Go-console port gaps: no `rebuild` verb, a few missing CLI verbs, no request-body cap,
     dropped env-var flag bindings; secrets in `/api/provision` live briefly in memory.
 *   Scheduled jobs are **read-only in the console**: pause/delete run through agents
