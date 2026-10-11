@@ -35,7 +35,7 @@ func newHostsCmd() *cobra.Command {
 			if err := common.ResolveExecProfile(cmd); err != nil {
 				return err
 			}
-			path := cmd.Flag("config").Value.String()
+			path := common.ProfileConfigPath(cmd)
 			cfg, err := config.Load(path)
 			if err != nil || cfg == nil {
 				return fmt.Errorf("load config: %w", err)
