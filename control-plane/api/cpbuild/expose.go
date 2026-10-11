@@ -349,22 +349,22 @@ func (s *Spec) appDNSEnsure(rec agenttools.AppRecord) (bool, error) {
 // world-secrets/pangolin.json (the DNS-cred record shape; the coords carry
 // no credential). Written by the box hand-off (or the operator, via the
 // console's enc pubkey).
-func (s *Spec) pangolinCreds() (base, key string, err error) {
+func (s *Spec) pangolinCreds() (base, key, endpoint string, err error) {
 	root := s.consoleStateRoot()
 	path := filepath.Join(root, "world-secrets", "pangolin.json")
 	if !cert.CredExists(path) {
-		return "", "", fmt.Errorf("no pangolin credential on the CP at %s — seal PANGOLIN_BASE + PANGOLIN_KEY to the console identity (the DNS-cred record shape)", path)
+		return "", "", "", fmt.Errorf("no pangolin credential on the CP at %s — seal PANGOLIN_BASE + PANGOLIN_KEY + PANGOLIN_ENDPOINT to the console identity (the DNS-cred record shape)", path)
 	}
 	secret, err := s.consoleEncSecretAt(root)
 	if err != nil {
-		return "", "", err
+		return "", "", "", err
 	}
 	open := func(sec, aad, blob []byte) ([]byte, error) { return crypto.Open(sec, aad, blob) }
 	_, env, err := cert.LoadCreds(path, open, secret)
 	if err != nil {
-		return "", "", fmt.Errorf("pangolin credential: %w", err)
+		return "", "", "", fmt.Errorf("pangolin credential: %w", err)
 	}
-	return env["PANGOLIN_BASE"], env["PANGOLIN_KEY"], nil
+	return env["PANGOLIN_BASE"], env["PANGOLIN_KEY"], env["PANGOLIN_ENDPOINT"], nil
 }
 
 // pangolinEnsure puts one app behind the world's Pangolin public path
@@ -386,9 +386,12 @@ func (s *Spec) pangolinEnsure(rec agenttools.AppRecord) error {
 	if rec.Visibility == agenttools.VisibilityLAN {
 		return nil
 	}
-	base, key, err := s.pangolinCreds()
+	base, key, endpoint, err := s.pangolinCreds()
 	if err != nil {
 		return err
+	}
+	if s.GatewayLxc == 0 && !s.HostedGateway {
+		return fmt.Errorf("pangolin: the world has no gateway — the Newt tunnel client has nowhere to run (the pangolin public path needs one)")
 	}
 	host, portStr, err := net.SplitHostPort(rec.Target)
 	if err != nil {
@@ -408,6 +411,9 @@ func (s *Spec) pangolinEnsure(rec agenttools.AppRecord) error {
 			return fmt.Errorf("pangolin: site %q was CREATED and its one-time Newt secret could not be sealed — the identity is unusable until it is (remove the site on the instance and re-run): %w", p.Site, err)
 		}
 	}
+	if err := s.ensureNewtGateway(endpoint); err != nil {
+		return fmt.Errorf("pangolin: the gateway's newt stage: %w", err)
+	}
 	domainID, err := cl.EnsureDomain(context.Background(), p.Org, p.Domain)
 	if err != nil {
 		return err
@@ -425,6 +431,118 @@ func (s *Spec) pangolinEnsure(rec agenttools.AppRecord) error {
 	return nil
 }
 
+// newtVersion pins the Newt release the gateway stage installs; newtURL is
+// its linux-amd64 asset (the guests and the VPS worlds are amd64 — a
+// different arch's stage needs the asset name split out).
+const (
+	newtVersion = "1.18.1"
+	newtURL     = "https://github.com/fosrl/newt/releases/download/" + newtVersion + "/newt_linux_amd64"
+)
+
+// ensureNewtGateway asserts the gateway's Newt tunnel client — the public
+// path's dial-out leg, re-asserted by every build like the nftables
+// ruleset (docs/NETWORK.md). The binary downloads on the host (best-effort
+// when a copy is already installed — an offline host keeps the old one) and
+// pushes to the gateway guest; the identity rides an env file sealed to
+// root (600) and the unit restarts on every assert, so a re-minted secret
+// lands live. On a hosted gateway (api-vultr) the same script runs bare on
+// the host. endpoint is the Pangolin instance's external API origin (what
+// Newt dials).
+func (s *Spec) ensureNewtGateway(endpoint string) error {
+	ident, err := s.newtIdentity()
+	if err != nil {
+		return err
+	}
+	if endpoint == "" {
+		return fmt.Errorf("the pangolin credential lacks PANGOLIN_ENDPOINT (the instance origin Newt dials, e.g. http://vps:3000)")
+	}
+	// The binary: present-or-download. The download rides the HOST (the
+	// runner's own box) — the guests' outbound varies; the host's is the
+	// install path itself.
+	var binEnsure string
+	if s.HostedGateway {
+		binEnsure = fmt.Sprintf(`if [ ! -x /usr/local/bin/newt ]; then
+  curl -sL -o /usr/local/bin/newt %s && chmod +x /usr/local/bin/newt
+fi
+[ -x /usr/local/bin/newt ] || { echo "newt download failed and no copy installed"; exit 1; }
+`, newtURL)
+	} else {
+		binEnsure = fmt.Sprintf(`if ! pct exec %d -- test -x /usr/local/bin/newt; then
+  curl -sL -o /tmp/fh-newt %s
+  pct push %d /tmp/fh-newt /usr/local/bin/newt
+fi
+pct exec %d -- test -x /usr/local/bin/newt
+`, s.GatewayLxc, newtURL, s.GatewayLxc, s.GatewayLxc)
+	}
+	gw := func(script string) string {
+		if s.HostedGateway {
+			return script
+		}
+		return fmt.Sprintf("pct exec %d -- sh -c '%s'", s.GatewayLxc, script)
+	}
+	unit := fmt.Sprintf(`set -e
+cat > /etc/freehold-newt.env <<ENV
+NEWT_ID=%s
+NEWT_SECRET=%s
+NEWT_ENDPOINT=%s
+ENV
+chmod 600 /etc/freehold-newt.env
+cat > /etc/systemd/system/newt.service <<UNIT
+[Unit]
+Description=Newt tunnel client (freehold public path)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+EnvironmentFile=/etc/freehold-newt.env
+ExecStart=/usr/local/bin/newt --id ${NEWT_ID} --secret ${NEWT_SECRET} --endpoint ${NEWT_ENDPOINT}
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+systemctl daemon-reload
+systemctl enable newt >/dev/null 2>&1
+systemctl restart newt
+`, ident.ID, ident.Secret, endpoint)
+	if err := s.run(binEnsure, 300); err != nil {
+		return fmt.Errorf("the newt binary: %w", err)
+	}
+	if err := s.run(gw(unit), 120); err != nil {
+		return fmt.Errorf("the newt unit: %w", err)
+	}
+	return nil
+}
+
+// newtIdentity opens the sealed Newt identity (world-secrets/
+// pangolin-newt.json — written when the ensure created the site; the
+// operator can also seal one by hand for a pre-existing site). Absent =
+// fail loud with the recovery: the site was minted outside this world's
+// first ensure, so its one-time secret was never handed to the CP.
+func (s *Spec) newtIdentity() (struct{ ID, Secret string }, error) {
+	var out struct{ ID, Secret string }
+	root := s.consoleStateRoot()
+	path := filepath.Join(root, "world-secrets", "pangolin-newt.json")
+	if !cert.CredExists(path) {
+		return out, fmt.Errorf("no Newt identity on the CP at %s — the pangolin site predates this world's first ensure: remove the site on the instance and re-run the build (the ensure re-creates it and seals the one-time secret)", path)
+	}
+	secret, err := s.consoleEncSecretAt(root)
+	if err != nil {
+		return out, err
+	}
+	open := func(sec, aad, blob []byte) ([]byte, error) { return crypto.Open(sec, aad, blob) }
+	_, env, err := cert.LoadCreds(path, open, secret)
+	if err != nil {
+		return out, fmt.Errorf("the Newt identity: %w", err)
+	}
+	out.ID, out.Secret = env["NEWT_ID"], env["NEWT_SECRET"]
+	if out.ID == "" || out.Secret == "" {
+		return out, fmt.Errorf("the Newt identity record lacks NEWT_ID/NEWT_SECRET")
+	}
+	return out, nil
+}
+
 // pangolinRemove takes one app off the Pangolin public path: resolve the
 // resource by its fullDomain and delete it (the vhost + its target die with
 // it). Best-effort — the report names the failure, the next unexpose
@@ -434,7 +552,7 @@ func (s *Spec) pangolinRemove(rec agenttools.AppRecord) error {
 	if p == nil || rec.Visibility == agenttools.VisibilityLAN {
 		return nil
 	}
-	base, key, err := s.pangolinCreds()
+	base, key, _, err := s.pangolinCreds()
 	if err != nil {
 		return err
 	}

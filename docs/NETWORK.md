@@ -114,11 +114,14 @@ The gateway has TWO shapes, one per substrate:
     fronts is publicly open by default; the tunnel is proven with a resource access
     token via the `p_token` param) and the target points at the app's freehold-subnet
     address, reachable from the gateway where Newt dials out. A created site's one-time
-    Newt secret seals to the console identity immediately (`pangolin-newt.json`).
-    `unexpose` removes the resource; a failed removal names the recovery (re-expose then
-    unexpose). The coords carry no credential. Still open on this path: the freehold
-    member gate's exact shape (today Pangolin's own SSO gates it), the Newt stage on the
-    gateway, and the pangolin-compose VPS payload through the created-host lifecycle.
+    Newt secret seals to the console identity immediately (`pangolin-newt.json`), and the
+    gateway's Newt client is re-asserted by every build — the binary ensured (downloaded
+    on the host, pushed to the guest; a hosted gateway installs bare), the identity and
+    the instance endpoint riding a root-only env file, the unit restarted so a re-minted
+    secret lands live. `unexpose` removes the resource; a failed removal names the
+    recovery (re-expose then unexpose). The coords carry no credential. Still open on
+    this path: the freehold member gate's exact shape (today Pangolin's own SSO gates
+    it), and the pangolin-compose VPS payload through the created-host lifecycle.
 *   **Groups are relay channels.** Every exposed app rides a relay channel as its ACL —
     the record stores the channel ID (names change; the display layer resolves the current
     name), `#general` is the everyone-channel and the default, and the expose validates
