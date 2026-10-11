@@ -359,17 +359,18 @@ func (s *Spec) reassertAgentRow(reg *agenttools.Registry, tools *agent.Tools, a 
 // reconciledChannels derives an agent's channel list + visibility: a reserved
 // department re-derives its fixed channels; any other agent rejoins the full
 // list the registry preserved, falling back to the single recorded channel for
-// rows written before Channels was persisted.
+// rows written before Channels was persisted. Normalized through channelNames,
+// so #freehold always rides the list (the shared agent workroom).
 func reconciledChannels(a console.AgentInfo) ([]string, bool) {
 	if channels := agents.DepartmentChannels(a.Name); channels != nil {
-		return channels, true
+		return channelNames(channels), true
 	}
 	channels := a.Channels
 	private := a.Private
 	if len(channels) == 0 && strings.TrimSpace(a.Channel) != "" {
 		channels = []string{a.Channel}
 	}
-	return channels, private
+	return channelNames(channels), private
 }
 
 // registerWorldFactsServer pushes the deployer-side world facts onto the CP's

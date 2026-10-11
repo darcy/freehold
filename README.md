@@ -45,8 +45,9 @@ Each department is scoped to one domain and the capabilities it owns.
 | **@compute** | The box itself and provisioning: CPU/RAM/disk, LXC and kube, remote hosts, monitoring. | Proxmox, k3s, Vultr, Hetzner, monitoring |
 | **@ai** | Models, providers, and agents, plus local AI hardware. | LiteLLM, local AI (RTX 3090 / DGX Spark), benchmarking |
 
-Talk is unrestricted; capability execution is bounded, and the first run the operator
-meets is freehold's, not the desktop app's — see
+Core agents talk to each other (including freehold) but not to custom agents — a
+custom agent's only counterpart for work is freehold; capability execution is bounded, and
+the first run the operator meets is freehold's, not the desktop app's — see
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) (the agent org) and
 [`docs/AI.md`](docs/AI.md) (the runtime).
 

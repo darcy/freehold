@@ -2997,20 +2997,23 @@ func (s *Spec) litellmProviderMaxTokens() int {
 }
 
 // channelNames normalizes a requested channel list: blank entries dropped,
-// duplicates collapsed, and an empty list becomes the default freehold channel.
+// duplicates collapsed, an empty list becomes the default freehold channel,
+// and #freehold is always included — every agent (custom agents included)
+// joins the shared workroom, so agent-to-agent work lands there. The guards
+// at the join site keep re-asserting it event-idempotent.
 func channelNames(channels []string) []string {
 	var out []string
 	seen := map[string]bool{}
 	for _, c := range channels {
 		c = strings.TrimSpace(c)
-		if c == "" || seen[c] {
+		if c == "" || seen[strings.ToLower(c)] {
 			continue
 		}
-		seen[c] = true
+		seen[strings.ToLower(c)] = true
 		out = append(out, c)
 	}
-	if len(out) == 0 {
-		return []string{"#freehold"}
+	if !seen["#freehold"] {
+		out = append(out, "#freehold")
 	}
 	return out
 }

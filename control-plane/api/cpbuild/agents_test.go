@@ -30,12 +30,12 @@ func TestReconciledChannels(t *testing.T) {
 		t.Fatalf("stale department channels = %v private=%v, want just private #freehold", stale, private)
 	}
 	got, priv := reconciledChannels(console.AgentInfo{Name: "custom", Channels: []string{"#a", "#b"}, Private: true})
-	if !reflect.DeepEqual(got, []string{"#a", "#b"}) || !priv {
-		t.Fatalf("custom channels = %v private=%v, want [#a #b] true", got, priv)
+	if !reflect.DeepEqual(got, []string{"#a", "#b", "#freehold"}) || !priv {
+		t.Fatalf("custom channels = %v private=%v, want [#a #b #freehold] true", got, priv)
 	}
 	legacy, priv := reconciledChannels(console.AgentInfo{Name: "legacy", Channel: "#old"})
-	if !reflect.DeepEqual(legacy, []string{"#old"}) || priv {
-		t.Fatalf("legacy channels = %v private=%v, want [#old] false", legacy, priv)
+	if !reflect.DeepEqual(legacy, []string{"#old", "#freehold"}) || priv {
+		t.Fatalf("legacy channels = %v private=%v, want [#old #freehold] false", legacy, priv)
 	}
 }
 
