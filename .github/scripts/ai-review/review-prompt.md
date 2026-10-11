@@ -17,27 +17,26 @@ store, rotation-as-re-issue, single-process state) unless they are actually
 wrong. No style, naming, comment-wording, or "could simplify"
 suggestions — no perfectionism.
 
-Documentation drift: if this diff changes something the docs describe, or a
-doc hunk in the diff drifts from the code, rate the drift like any other
-problem instead of a side note. Drift that would mislead (documented behavior
-the code doesn't have, a shipped command/flag/config missing from the docs, a
-stated guarantee the code breaks) is IMPORTANT; cosmetic drift (a verb missing
-from a list, wording, an example) is a suggestion. Pin the finding to the doc
-hunk's line, or to the code line that caused the drift when the doc isn't part
-of this diff. Never re-litigate locked decisions, and report only NEW drift.
+Documentation alignment: the repo's doc surface is AGENTS.md, README.md, and `docs/`
+(VISION, ARCHITECTURE, ROADMAP, FREEHOLD, AI, NETWORK, DATA, COMPUTE, BUZZ_SURFACE,
+DOOR_SPEC), plus the agent prompts and skills under `agents/`. Docs must be CORRECT,
+not exhaustive — a doc omitting something is never a finding; a doc stating something
+the code doesn't do always is. If this diff changes behavior any doc describes (or
+touches a doc itself), read that doc in the checked-out tree and verify its claims
+against the code. Drift that would mislead (documented behavior the code doesn't have,
+a documented command/flag/config/schema the code doesn't ship, a stated guarantee the
+code breaks) is IMPORTANT; cosmetic drift (wording, a stale example) is a suggestion.
+Pin the finding to the doc hunk's line, or to the code line that caused the drift when
+the doc isn't part of this diff. Never re-litigate locked decisions, and report only
+NEW drift.
 
-Diagram accuracy: the README's mermaid sequence diagrams document real wiring —
-bootstrap (9007 create, 9000 put-user, the kind-13534 COMMUNITY membership layer
-via buzz-admin run in the relay LXC through the box runner, the A4 domain gate
-checked on the OPERATOR machine after a manual DNS mapping, relay LXC optional
-for the attach flow), runner setup + grant (channel membership vs the shipped-
-package grants path, secret sealed TO the runner's key), and the exec call path
-(roster whitelist read per call, detached 48001 audit). If the diff touches a
-diagram or changes behavior a diagram depicts, verify the diagram's claims
-(kinds, arrows, lifelines, steps) against the code it claims to show (mermaid
-10.9.1; do not re-render, review the claims). A mismatch is IMPORTANT and gets
-an inline comment on the diagram lines. Diagram layout, styling, or wording is
-a nit — omit it.
+Diagram accuracy: the mermaid sequence diagrams in docs/ARCHITECTURE.md (the exec call
+path, the bootstrap sequence) and docs/AI.md (runner setup + grant) document real
+wiring. If the diff touches a diagram or changes behavior a diagram depicts, verify the
+diagram's claims (kinds, arrows, lifelines, steps) against the code it claims to show
+(mermaid 10.9.1; do not re-render, review the claims). A mismatch is IMPORTANT and gets
+an inline comment on the diagram lines. Diagram layout, styling, or wording is a nit —
+omit it.
 
 Lockfile-only hunks (Cargo.lock, package-lock.json): a dependency bump legitimately
 re-points sibling locked refs to other in-range versions — the resolver re-resolves the

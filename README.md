@@ -269,8 +269,9 @@ control-plane/        freehold/control-plane — the stable mechanism (Go, plus 
 freehold-cli/         freehold/freehold-cli — the local operator surface (never imported
                       by control-plane/): one dir per verb (install/, uninstall/,
                       build/, teardown/, status/, update/, exec/, profiles/, door/,
-                      dns-cred/, backup/), plus login/, tui/, internal/ (common,
-                      cpdeploy, certcred, stages).
+                      dns-cred/, add-relay-member/, backup/, export/, snapshot/),
+                      plus login/, tui/, internal/ (common, cpdeploy, certcred,
+                      stages, artifact).
 providers/            freehold/providers — the substrate providers; proxmox/ holds
                       guest create/exec/list, storage, the pct stage/DNS builders,
                       and the world-destroy engine. Imports platform/ + contract/;
@@ -278,8 +279,9 @@ providers/            freehold/providers — the substrate providers; proxmox/ h
 platform/             freehold/platform — the provider-independent world the mechanism
                       installs/evolves: services/<capability>/<impl>/ (relay/buzz,
                       webproxy/caddy, externaldns/cloudflare,
-                      certificates/letsencrypt), provisioning/ (bootstrap, box,
-                      deploy, planebase, stages, the provider seam), migrations/.
+                      certificates/letsencrypt, pangolin/), provisioning/
+                      (bootstrap, box, deploy, planebase, stages, the provider
+                      seam), migrations/.
                       Adding a service touches only this module — never control-plane/.
 migrations/           the box-applied migration scripts
 AGENTS.md             agent guidance: locked model, conventions, known gaps

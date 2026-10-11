@@ -103,6 +103,10 @@ jobs:
           # Shared review config (the legacy single-shot-reviewer vars are
           # gone — main's script is the harness script now): PROMPT_FILE,
           # CONTEXT_FILES, EXCLUDE_PATTERNS and the MAX_* limits below.
+          # CONTEXT_FILES stays lean; the prompt's documentation-alignment
+          # mandate has the reviewer read ANY doc the diff touches (docs/*.md,
+          # agents/**) from this same trusted checkout, so all docs are
+          # verified against the code on every PR.
           PROMPT_FILE: "review-prompt.md"
           CONTEXT_FILES: "AGENTS.md,README.md,docs/ARCHITECTURE.md"
           EXCLUDE_PATTERNS: "**/package-lock.json,**/*.lock,**/dist/**,**/vendor/**"
