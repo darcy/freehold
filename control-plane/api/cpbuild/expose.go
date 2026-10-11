@@ -368,10 +368,24 @@ func (s *Spec) renderCaddyfile() string {
 		cpUpstream = s.CpIP + ":8080"
 		cpMcpUpstream = s.CpIP + ":8089"
 	}
+	// Cert-before-config applies to the PORTAL vhost too: it renders only
+	// when its cert is on the durable mirror AND covers the world root — on
+	// the first build after a rename the mirror is empty, the block is
+	// skipped, and the next build renders it (worldCert issued the cert by
+	// then). An ungated render would crash-loop the whole edge on the missing
+	// tls files.
+	portalHost := appsPortalHost(s.CpHost)
+	if portalHost != "" {
+		if pc, err := s.durableFullchain(s.K3sVmid, portalCertSlot); err != nil {
+			portalHost = ""
+		} else if _, ok := cert.ReuseIfValidBytes(pc, time.Now(), 0); !ok || !certCovers(pc, portalHost) {
+			portalHost = ""
+		}
+	}
 	return caddydeploy.RenderCaddyfileApps(
 		s.RelayHost, s.RelayIP+":3000", pair,
 		s.CpHost, cpUpstream, cpMcpUpstream,
-		appsPortalHost(s.CpHost),
+		portalHost,
 		apps)
 }
 

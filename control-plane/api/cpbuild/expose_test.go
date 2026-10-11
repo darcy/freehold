@@ -697,11 +697,20 @@ func TestCertStageDiscardsAStalePendingOrder(t *testing.T) {
 	te := newTestExposer(t, nil, nil)
 	pendingPath := filepath.Join(te.spec.consoleStateRoot(), "world-secrets", "cert-pending-cp.json")
 	write(t, pendingPath, []byte("{}"))
-	// The durable mirror answers VALID certs + keys for both slots; the seed
-	// and every other pct exec just succeed.
+	// The durable mirror answers VALID certs + keys, PER SLOT (the reuse
+	// gate checks coverage — each slot's cert must cover its own host,
+	// including the portal slot: the world root); the seed and every other
+	// pct exec just succeed.
 	te.spec.execHook = func(cmd string, _ uint64, _ ...string) (string, error) {
 		if strings.Contains(cmd, "base64 -w0 <") {
-			return base64.StdEncoding.EncodeToString(selfSigned(t, "cp.librem.example.test")), nil
+			switch {
+			case strings.Contains(cmd, "caddy-edge/relay"):
+				return base64.StdEncoding.EncodeToString(selfSigned(t, "relay.librem.example.test")), nil
+			case strings.Contains(cmd, "caddy-edge/portal"):
+				return base64.StdEncoding.EncodeToString(selfSigned(t, "librem.example.test")), nil
+			default:
+				return base64.StdEncoding.EncodeToString(selfSigned(t, "cp.librem.example.test")), nil
+			}
 		}
 		return "OK", nil
 	}

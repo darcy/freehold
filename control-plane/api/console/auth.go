@@ -392,13 +392,12 @@ func checkOrigin(r *http.Request, publicOrigin *string) error {
 		if host == pub {
 			return nil
 		}
-		// The world tree: the console fronts BOTH faces — the operator host
-		// (its own origin, above) and the portal (the world root the edge
-		// points at the same backend). Any origin inside the world's own
-		// domain is the appliance's own surface — the same boundary the
-		// member cookie scopes to (config.WorldDomain).
-		world := config.WorldDomain(pub)
-		if host == world || strings.HasSuffix(host, "."+world) {
+		// The PORTAL: the world root fronts the same console backend once the
+		// operator face lives at admin.<root> — the ONE extra origin the
+		// console accepts, EXACTLY (never its children: exposed apps are
+		// agent-built surfaces in a member's browser, and same-site subdomain
+		// requests would ride the SameSite=Strict operator session).
+		if host == config.WorldDomain(pub) {
 			return nil
 		}
 	}
