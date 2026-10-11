@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
+	"io"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
@@ -19,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	"freehold/contract/config"
 	"freehold/contract/crypto"
 	"freehold/contract/wire"
 	"freehold/control-plane/api/agent"
@@ -123,8 +125,9 @@ type testExposer struct {
 	uploads   []string // remote paths
 	bodies    map[string]string
 	relaySrv  *httptest.Server
-	cfWrites  *int // the fake CF's record-write counter
-	cfDeletes *int // the fake CF's record-delete counter
+	cfWrites  *int      // the fake CF's record-write counter
+	cfDeletes *int      // the fake CF's record-delete counter
+	cfBodies  *[]string // the fake CF's write bodies (the A-record content)
 }
 
 func newTestExposer(t *testing.T, channels []relayChannel, members []memberEvent) *testExposer {
@@ -171,6 +174,8 @@ func newTestExposer(t *testing.T, channels []relayChannel, members []memberEvent
 	// writes succeed (and COUNT — the lan mode's no-public-DNS skip pins
 	// against the counter); deletes count too (the stale-shape migration).
 	var cfWrites, cfDeletes int
+	var cfBodies []string
+	cfBodiesPtr := &cfBodies
 	cf := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		if r.URL.Path == "/zones" || (r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/dns_records")) {
@@ -183,6 +188,9 @@ func newTestExposer(t *testing.T, channels []relayChannel, members []memberEvent
 		}
 		if r.Method == http.MethodPost || r.Method == http.MethodPut {
 			cfWrites++
+			if b, rerr := io.ReadAll(r.Body); rerr == nil {
+				*cfBodiesPtr = append(*cfBodiesPtr, string(b))
+			}
 		}
 		if r.Method == http.MethodDelete {
 			cfDeletes++
@@ -206,7 +214,7 @@ func newTestExposer(t *testing.T, channels []relayChannel, members []memberEvent
 	if err != nil {
 		t.Fatal(err)
 	}
-	te := &testExposer{spec: spec, apps: apps, bodies: map[string]string{}, cfWrites: &cfWrites, cfDeletes: &cfDeletes}
+	te := &testExposer{spec: spec, apps: apps, bodies: map[string]string{}, cfWrites: &cfWrites, cfDeletes: &cfDeletes, cfBodies: cfBodiesPtr}
 	spec.Apps = apps
 	spec.execHook = func(cmd string, _ uint64, _ ...string) (string, error) {
 		te.cmds = append(te.cmds, cmd)
@@ -225,6 +233,28 @@ func newTestExposer(t *testing.T, channels []relayChannel, members []memberEvent
 		return nil
 	}
 	return te
+}
+
+// sealPangolinCreds writes the pangolin cred sealed to the fixture's
+// console identity (the same shape the box hand-off produces).
+func (te *testExposer) sealPangolinCreds(t *testing.T, base, key string) {
+	t.Helper()
+	secret, err := te.spec.consoleEncSecretAt(te.spec.consoleStateRoot())
+	if err != nil {
+		t.Fatal(err)
+	}
+	pub, err := crypto.X25519PublicKey(secret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cert.SaveCreds(
+		filepath.Join(te.spec.consoleStateRoot(), "world-secrets", "pangolin.json"),
+		"pangolin", map[string]string{"PANGOLIN_BASE": base, "PANGOLIN_KEY": key},
+		func(recipientPub, aad, plain []byte) ([]byte, error) { return crypto.Seal(recipientPub, aad, plain) },
+		pub, "pangolin",
+	); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func (te *testExposer) exposeFn(consoleSec []byte) func(agent.ExposeArgs) (string, error) {
@@ -677,5 +707,218 @@ func TestCertStageDiscardsAStalePendingOrder(t *testing.T) {
 	}
 	if te.spec.certPending() {
 		t.Fatal("certPending must read false once the stale order is discarded")
+	}
+}
+
+// TestExposeRidesThePangolinPath pins the pangolin public path: with the
+// coords' pangolin block set, the expose verb ensures the site, finds or
+// creates the resource on the base domain, and points the target at the
+// app's freehold-subnet address — while the local edge (cert + Caddyfile)
+// still converges for the LAN surface. The A record follows the DNSIP (the
+// VPS) when set, and stays on the proxy IP when it's empty (the dev/test
+// posture that exercises the tunnel without moving public DNS).
+func TestExposeRidesThePangolinPath(t *testing.T) {
+	consoleSec := make([]byte, 32)
+	consoleSec[0] = 0x42
+	family := "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+	homelab := strings.Repeat("b", 64)
+	var calls []string
+	pang := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls = append(calls, r.Method+" "+r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/v1/org/freehold/sites":
+			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"sites":[{"siteId":3,"name":"librem","type":"newt"}]}}`))
+		case "/v1/org/freehold/domains":
+			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"domains":[{"domainId":"domain1","baseDomain":"librem.example","verified":true}]}}`))
+		case "/v1/org/freehold/resources":
+			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"resources":[]}}`))
+		case "/v1/org/freehold/resource":
+			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"resourceId":7,"name":"yuvomi","subdomain":"yuvomi","fullDomain":"yuvomi.librem.example","domainId":"domain1","ssl":true,"enabled":true}}`))
+		case "/v1/resource/7":
+			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":null}`))
+		case "/v1/resource/7/targets":
+			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"targets":[]}}`))
+		case "/v1/resource/7/target":
+			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"targetId":1}}`))
+		default:
+			w.WriteHeader(404)
+			_, _ = w.Write([]byte(`{"success":false,"error":true,"message":"no such route"}`))
+		}
+	}))
+	defer pang.Close()
+
+	te := newTestExposer(t, []relayChannel{{family, "family"}},
+		[]memberEvent{{channelID: family, pubkey: homelab, kind: wire.PutUser, ts: 100}})
+	te.spec.Pangolin = &config.PangolinCoords{Org: "freehold", Site: "librem", Domain: "librem.example", DNSIP: "203.0.113.9"}
+	te.sealPangolinCreds(t, pang.URL, "yi5o.thesecret")
+
+	report, err := te.exposeFn(consoleSec)(agent.ExposeArgs{
+		Name: "yuvomi", Target: "10.78.0.13:31400", Group: "family", Requester: homelab,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(report, "live") {
+		t.Fatalf("the expose must land live: %s", report)
+	}
+	want := []string{
+		"GET /v1/org/freehold/sites",
+		"GET /v1/org/freehold/domains",
+		"GET /v1/org/freehold/resources",
+		"PUT /v1/org/freehold/resource",
+		"POST /v1/resource/7", // the sso gate — created resources are never open
+		"GET /v1/resource/7/targets",
+		"PUT /v1/resource/7/target",
+	}
+	for i, w := range want {
+		if len(calls) <= i || calls[i] != w {
+			t.Fatalf("pangolin call %d: got %v want %s", i, calls, w)
+		}
+	}
+	// The app's A record points at the VPS, not the proxy.
+	if !strings.Contains(strings.Join(*te.cfBodies, "\n"), "203.0.113.9") {
+		t.Fatalf("the A record must ride the VPS: %v", *te.cfBodies)
+	}
+	// The local edge still converges (the LAN surface).
+	if len(te.cmds) == 0 || !strings.Contains(strings.Join(te.cmds, "\n"), "kubectl") {
+		t.Fatal("the local edge apply must still run for the LAN surface")
+	}
+}
+
+// TestExposePangolinEmptyDNSKeepsTheProxyIP pins the dev/test posture: a
+// pangolin block WITHOUT dns_ip exercises the tunnel while the public A
+// record stays on the proxy IP — nothing in public DNS moves.
+func TestExposePangolinEmptyDNSKeepsTheProxyIP(t *testing.T) {
+	consoleSec := make([]byte, 32)
+	consoleSec[0] = 0x42
+	family := "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+	homelab := strings.Repeat("b", 64)
+	pang := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/v1/org/freehold/sites":
+			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"sites":[{"siteId":3,"name":"librem","type":"newt"}]}}`))
+		case "/v1/org/freehold/domains":
+			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"domains":[{"domainId":"domain1","baseDomain":"librem.example","verified":true}]}}`))
+		case "/v1/org/freehold/resources":
+			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"resources":[{"resourceId":9,"name":"yuvomi","subdomain":"yuvomi","fullDomain":"yuvomi.librem.example","domainId":"domain1"}]}}`))
+		case "/v1/resource/9":
+			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":null}`)) // the sso re-assert
+		case "/v1/resource/9/targets":
+			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"targets":[]}}`))
+		case "/v1/resource/9/target":
+			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"targetId":2}}`))
+		default:
+			w.WriteHeader(404)
+			_, _ = w.Write([]byte(`{"success":false,"error":true,"message":"no such route"}`))
+		}
+	}))
+	defer pang.Close()
+
+	te := newTestExposer(t, []relayChannel{{family, "family"}},
+		[]memberEvent{{channelID: family, pubkey: homelab, kind: wire.PutUser, ts: 100}})
+	te.spec.Pangolin = &config.PangolinCoords{Org: "freehold", Site: "librem", Domain: "librem.example"}
+	te.sealPangolinCreds(t, pang.URL, "yi5o.thesecret")
+
+	if _, err := te.exposeFn(consoleSec)(agent.ExposeArgs{
+		Name: "yuvomi", Target: "10.78.0.13:31400", Group: "family", Requester: homelab,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(strings.Join(*te.cfBodies, "\n"), "192.168.30.5") {
+		t.Fatalf("the A record must stay on the proxy IP: %v", *te.cfBodies)
+	}
+}
+
+// TestExposePangolinSkipsLAN pins finding two: a LAN-visibility record gets
+// NO pangolin resource — its whole point is that the name resolves only
+// inside the world; a public resource would contradict it.
+func TestExposePangolinSkipsLAN(t *testing.T) {
+	consoleSec := make([]byte, 32)
+	consoleSec[0] = 0x42
+	family := "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+	homelab := strings.Repeat("b", 64)
+
+	var calls []string
+	pang := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls = append(calls, r.Method+" "+r.URL.Path)
+		_, _ = w.Write([]byte(`{"success":false,"error":true,"message":"must never be called"}`))
+	}))
+	defer pang.Close()
+
+	te := newTestExposer(t, []relayChannel{{family, "family"}},
+		[]memberEvent{{channelID: family, pubkey: homelab, kind: wire.PutUser, ts: 100}})
+	te.spec.Pangolin = &config.PangolinCoords{Org: "freehold", Site: "librem", Domain: "librem.example", DNSIP: "203.0.113.9"}
+	te.sealPangolinCreds(t, pang.URL, "k")
+
+	report, err := te.exposeFn(consoleSec)(agent.ExposeArgs{
+		Name: "yuvomi", Target: "10.78.0.13:31400", Group: "family", Requester: homelab,
+		Visibility: agenttools.VisibilityLAN,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(report, "live") {
+		t.Fatalf("the LAN expose lands: %s", report)
+	}
+	if len(calls) != 0 {
+		t.Fatalf("a LAN record must not touch pangolin: %v", calls)
+	}
+}
+
+// TestExposePangolinSealsTheNewtSecret pins finding three: a site CREATED
+// by the ensure has its one-time Newt secret sealed to the console identity
+// immediately — discarding it would burn the identity.
+func TestExposePangolinSealsTheNewtSecret(t *testing.T) {
+	consoleSec := make([]byte, 32)
+	consoleSec[0] = 0x42
+	family := "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+	homelab := strings.Repeat("b", 64)
+
+	pang := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/v1/org/freehold/sites":
+			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"sites":[]}}`))
+		case "/v1/org/freehold/site":
+			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"siteId":5,"name":"librem","type":"newt","newtId":"noo9","newtSecret":"one-time-sek","address":"100.90.0.0/16"}}`))
+		case "/v1/org/freehold/domains":
+			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"domains":[{"domainId":"domain1","baseDomain":"librem.example","verified":true}]}}`))
+		case "/v1/org/freehold/resources":
+			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"resources":[]}}`))
+		case "/v1/org/freehold/site/5/resource":
+			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"resourceId":8,"name":"yuvomi","subdomain":"yuvomi","fullDomain":"yuvomi.librem.example","domainId":"domain1"}}`))
+		case "/v1/resource/8/targets":
+			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"targets":[]}}`))
+		case "/v1/resource/8/target":
+			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"targetId":3}}`))
+		default:
+			w.WriteHeader(404)
+			_, _ = w.Write([]byte(`{"success":false,"error":true,"message":"no such route"}`))
+		}
+	}))
+	defer pang.Close()
+
+	te := newTestExposer(t, []relayChannel{{family, "family"}},
+		[]memberEvent{{channelID: family, pubkey: homelab, kind: wire.PutUser, ts: 100}})
+	te.spec.Pangolin = &config.PangolinCoords{Org: "freehold", Site: "librem", Domain: "librem.example"}
+	te.sealPangolinCreds(t, pang.URL, "k")
+
+	if _, err := te.exposeFn(consoleSec)(agent.ExposeArgs{
+		Name: "yuvomi", Target: "10.78.0.13:31400", Group: "family", Requester: homelab,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	secret, err := te.spec.consoleEncSecretAt(te.spec.consoleStateRoot())
+	if err != nil {
+		t.Fatal(err)
+	}
+	open := func(sec, aad, blob []byte) ([]byte, error) { return crypto.Open(sec, aad, blob) }
+	_, env, err := cert.LoadCreds(filepath.Join(te.spec.consoleStateRoot(), "world-secrets", "pangolin-newt.json"), open, secret)
+	if err != nil {
+		t.Fatalf("the one-time Newt secret must be sealed: %v", err)
+	}
+	if env["NEWT_ID"] != "noo9" || env["NEWT_SECRET"] != "one-time-sek" {
 	}
 }

@@ -123,13 +123,13 @@ type Spec struct {
 	// guest's vmid. K3sIP is the k3s node's address — with a gateway the
 	// INTERNAL one (ProxyIP is then the gateway's LAN address, the edge);
 	// without one it mirrors ProxyIP.
-	GatewayCIDR    string
-	GatewayVlan    int
-	GatewayLxc     uint32
+	GatewayCIDR string
+	GatewayVlan int
+	GatewayLxc  uint32
 	// HostedGateway: the HOST is the gateway (api-vultr) — no guest, the
 	// nftables assert runs on the host itself.
-	HostedGateway bool
-	K3sIP         string
+	HostedGateway  bool
+	K3sIP          string
 	RunnerAddr     string
 	RunnerPK       string
 	RunnerTarget   string
@@ -146,6 +146,11 @@ type Spec struct {
 	// RepoURL is the source repository the shared system-orientation block
 	// points agents at. Empty = the agents package's upstream default.
 	RepoURL string
+
+	// Pangolin is the optional public path (docs/NETWORK.md): when set,
+	// exposed apps ride a Pangolin VPS's tunnel (the A records point at the
+	// VPS, the vhosts live on Pangolin's edge). Nil = the direct Caddy edge.
+	Pangolin *config.PangolinCoords
 
 	// AgentRegistry/FactsStore are the running agent-tools server's in-process
 	// durable stores, set only when the build runs INSIDE that server (its own
@@ -986,7 +991,7 @@ func (s *Spec) seedCaddyCertFromDurable(k3sVmid uint32, slot string) error {
 pct exec %d -- bash -c '
 set -e
 K="/usr/local/bin/kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml"
-` + resolveCaddyPVDir + `
+`+resolveCaddyPVDir+`
 DIR=$PDIR/tls/%s
 SRC=%s
 mkdir -p "$DIR"
@@ -1325,7 +1330,7 @@ pct push %d /tmp/fh-key-%s.pem /tmp/key-%s.pem
 pct exec %d -- sh -c '
 set -e
 K="/usr/local/bin/kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml"
-` + resolveCaddyPVDir + `
+`+resolveCaddyPVDir+`
 DIR=$PDIR/tls/%s
 DUR=%s
 mkdir -p "$DIR" "$DUR"

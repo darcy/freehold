@@ -92,6 +92,23 @@ The gateway has TWO shapes, one per substrate:
     `chat.<world>` child as the member surface grows (the operator surface is the TUI +
     the console's admin routes; the portal is the member surface — two front doors over
     one backend).
+*   **The optional Pangolin public path.** A world whose coords carry a `pangolin` block
+    routes exposed apps through a Pangolin VPS's tunnel instead of pointing public DNS at
+    home: the app A records point at the VPS (`dns_ip`) — the home IP appears in no public
+    DNS and nothing at home accepts unsolicited traffic (Newt dials OUT from the gateway);
+    relay/cp keep the direct Caddy edge, and the apps' LAN surface rides it unchanged.
+    The verbs drive Pangolin's REST integration server (verified against 1.24.0 — Pangolin
+    generates its Traefik config from its own DB, so a file-provider door would fight it):
+    a Bearer root key sealed to the console identity (`world-secrets/pangolin.json`)
+    calls org/site/resource/target — the resource is created **SSO-gated** (nothing it
+    fronts is publicly open by default; the tunnel is proven with a resource access
+    token via the `p_token` param) and the target points at the app's freehold-subnet
+    address, reachable from the gateway where Newt dials out. A created site's one-time
+    Newt secret seals to the console identity immediately (`pangolin-newt.json`).
+    `unexpose` removes the resource; a failed removal names the recovery (re-expose then
+    unexpose). The coords carry no credential. Still open on this path: the freehold
+    member gate's exact shape (today Pangolin's own SSO gates it), the Newt stage on the
+    gateway, and the pangolin-compose VPS payload through the created-host lifecycle.
 *   **Groups are relay channels.** Every exposed app rides a relay channel as its ACL —
     the record stores the channel ID (names change; the display layer resolves the current
     name), `#general` is the everyone-channel and the default, and the expose validates

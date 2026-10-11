@@ -155,14 +155,47 @@ func (c *Client) CreateSite(ctx context.Context, orgID, name string) (Site, erro
 
 // CreateResource exposes one app: subdomain + the base domain form the
 // fqdn Pangolin routes and certifies (per-host HTTP-01 through its Traefik).
+// The resource is created SSO-GATED (its `sso` flag set right after create):
+// nothing it fronts is publicly open by default — reaching the app means
+// logging into the instance, until the freehold member gate's exact shape
+// on this path lands (docs/NETWORK.md). The tunnel itself is proven with a
+// resource access token (MintAccessToken), which badger accepts in place
+// of a login.
 func (c *Client) CreateResource(ctx context.Context, orgID string, siteID int, name, subdomain, domainID string) (Resource, error) {
 	var r Resource
-	if err := c.do(ctx, http.MethodPut, fmt.Sprintf("/v1/org/%s/site/%d/resource", orgID, siteID), map[string]interface{}{
+	if err := c.do(ctx, http.MethodPut, "/v1/org/"+orgID+"/resource", map[string]interface{}{
 		"name": name, "subdomain": subdomain, "mode": "http", "domainId": domainID,
 	}, &r); err != nil {
 		return Resource{}, err
 	}
+	if err := c.requireSSO(ctx, r.ResourceID); err != nil {
+		return Resource{}, err
+	}
 	return r, nil
+}
+
+// requireSSO sets the resource's sso flag — the gate that keeps nothing it
+// fronts publicly open by default.
+func (c *Client) requireSSO(ctx context.Context, resourceID int) error {
+	return c.do(ctx, http.MethodPost, fmt.Sprintf("/v1/resource/%d", resourceID), map[string]interface{}{"sso": true}, nil)
+}
+
+// MintAccessToken mints a resource access token — the credential badger
+// accepts in place of a Pangolin login (the `p_token` query param by
+// default). The tunnel-verification path.
+func (c *Client) MintAccessToken(ctx context.Context, resourceID int, title string, validForSeconds int) (string, error) {
+	var out struct {
+		Token string `json:"token"`
+	}
+	if err := c.do(ctx, http.MethodPost, fmt.Sprintf("/v1/resource/%d/access-token", resourceID), map[string]interface{}{
+		"title": title, "validForSeconds": validForSeconds,
+	}, &out); err != nil {
+		return "", err
+	}
+	if out.Token == "" {
+		return "", fmt.Errorf("pangolin: the access token came back empty")
+	}
+	return out.Token, nil
 }
 
 // SetTarget points the resource at the app's internal address, reachable
@@ -178,4 +211,105 @@ func (c *Client) SetTarget(ctx context.Context, resourceID, siteID int, ip strin
 // DeleteResource removes one app's public surface.
 func (c *Client) DeleteResource(ctx context.Context, resourceID int) error {
 	return c.do(ctx, http.MethodDelete, fmt.Sprintf("/v1/resource/%d", resourceID), nil, nil)
+}
+
+// ---- idempotent ensure helpers (the expose path runs on every re-apply) ----
+
+// ListSites returns the org's tunnel sites.
+func (c *Client) ListSites(ctx context.Context, orgID string) ([]Site, error) {
+	var out struct {
+		Sites []Site `json:"sites"`
+	}
+	if err := c.do(ctx, http.MethodGet, "/v1/org/"+orgID+"/sites", nil, &out); err != nil {
+		return nil, err
+	}
+	return out.Sites, nil
+}
+
+// EnsureSite finds the org's site by name, creating it (a Newt site — the
+// gateway's dial-out identity) when absent. The Newt secret is only ever
+// returned at creation; the caller must persist it then.
+func (c *Client) EnsureSite(ctx context.Context, orgID, name string) (Site, bool, error) {
+	sites, err := c.ListSites(ctx, orgID)
+	if err != nil {
+		return Site{}, false, err
+	}
+	for _, s := range sites {
+		if s.Name == name {
+			return s, false, nil
+		}
+	}
+	s, err := c.CreateSite(ctx, orgID, name)
+	return s, true, err
+}
+
+// ListResources returns the org's resources.
+func (c *Client) ListResources(ctx context.Context, orgID string) ([]Resource, error) {
+	var out struct {
+		Resources []Resource `json:"resources"`
+	}
+	if err := c.do(ctx, http.MethodGet, "/v1/org/"+orgID+"/resources", nil, &out); err != nil {
+		return nil, err
+	}
+	return out.Resources, nil
+}
+
+// EnsureDomain resolves the base domain's id (the config-declared namespace
+// Pangolin serves), refusing an unverified one — a vhost on it would 500.
+func (c *Client) EnsureDomain(ctx context.Context, orgID, baseDomain string) (string, error) {
+	domains, err := c.ListDomains(ctx, orgID)
+	if err != nil {
+		return "", err
+	}
+	for _, d := range domains {
+		if d.BaseDomain == baseDomain {
+			if !d.Verified {
+				return "", fmt.Errorf("pangolin: base domain %s is not verified on the instance", baseDomain)
+			}
+			return d.DomainID, nil
+		}
+	}
+	return "", fmt.Errorf("pangolin: base domain %s is not configured on the instance", baseDomain)
+}
+
+// EnsureResource finds the resource whose fullDomain is
+// subdomain.<the base domain>, creating it (mode http, on the site) when
+// absent. Returns the resource and whether it was created now.
+func (c *Client) EnsureResource(ctx context.Context, orgID string, siteID int, subdomain, domainID, baseDomain string) (Resource, bool, error) {
+	resources, err := c.ListResources(ctx, orgID)
+	if err != nil {
+		return Resource{}, false, err
+	}
+	want := subdomain + "." + baseDomain
+	for _, r := range resources {
+		if r.FullDomain == want {
+			// Re-assert the SSO gate idempotently: a create whose gate
+			// POST failed must not stay publicly open on later ensures.
+			return r, false, c.requireSSO(ctx, r.ResourceID)
+		}
+	}
+	r, err := c.CreateResource(ctx, orgID, siteID, subdomain, subdomain, domainID)
+	return r, true, err
+}
+
+// SetTargetIfDiffers points the resource at ip:port, skipping the write when
+// the target already matches (re-apply convergence, no churn).
+func (c *Client) SetTargetIfDiffers(ctx context.Context, resourceID, siteID int, ip string, port int) error {
+	var out struct {
+		Targets []struct {
+			SiteID int    `json:"siteId"`
+			IP     string `json:"ip"`
+			Port   int    `json:"port"`
+			Method string `json:"method"`
+		} `json:"targets"`
+	}
+	if err := c.do(ctx, http.MethodGet, fmt.Sprintf("/v1/resource/%d/targets", resourceID), nil, &out); err != nil {
+		return err
+	}
+	for _, t := range out.Targets {
+		if t.SiteID == siteID && t.IP == ip && t.Port == port && t.Method == "http" {
+			return nil
+		}
+	}
+	return c.SetTarget(ctx, resourceID, siteID, ip, port)
 }

@@ -59,6 +59,10 @@ type Config struct {
 	Gateway          GatewaySpec `toml:"gateway,omitempty"`
 	HostProvider     HostSpec    `toml:"host_provider,omitempty"`
 	CPAName          string      `toml:"cpa_name,omitempty"`
+	// Pangolin is the world's optional public path (docs/NETWORK.md): when
+	// set, exposed apps ride the Pangolin VPS's tunnel. The non-secret shape
+	// only — the instance address + root key seal to the console identity.
+	Pangolin *PangolinCoords `toml:"pangolin,omitempty"`
 	// OperatorName is the operator's display name in Buzz (asked at install);
 	// published as the operator's kind:0 profile at build.
 	OperatorName     string      `toml:"operator_name,omitempty"`
