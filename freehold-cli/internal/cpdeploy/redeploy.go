@@ -120,12 +120,42 @@ func Redeploy(t Transport, spec *DeployCpSpec) error {
 		if err := startRunnerUnit(t, spec, spec.runnerDir()); err != nil {
 			return err
 		}
+		// The doors' captured argvs replay against the NEW runner binary the
+		// same way — drop flags it no longer defines, loudly.
+		if usage := probeServeUsage(t, spec, "freehold-runner"); usage != "" {
+			for i, line := range doorArgvs {
+				unit, argv, ok := strings.Cut(line, " ")
+				if !ok {
+					continue
+				}
+				filtered, dropped := filterArgvToFlags(argv, usage)
+				for _, f := range dropped {
+					fmt.Fprintf(os.Stderr, "  note: %s flag -%s dropped from the captured unit argv — the new binary does not define it (the world build re-stages the door from coords)\n", unit, f)
+				}
+				doorArgvs[i] = unit + " " + filtered
+			}
+		} else if len(doorArgvs) > 0 {
+			fmt.Fprintln(os.Stderr, "  note: could not probe the runner flag set — the revive script carries the captured door argvs unfiltered")
+		}
 	}
 	// Restart whenever the binary shipped — a CAPTURE MISS must not skip it
 	// (a stopped unit captures empty too, and the enabled unit would sit
 	// inactive through world_migrate). The function no-ops via the
 	// unit-absent check when agent-tools genuinely never ran.
 	if spec.AgentToolsBinary != nil && *spec.AgentToolsBinary != "" {
+		// The captured argv replays against the NEW binary: a flag it no
+		// longer defines would flag-parse-exit into a systemd crash-loop and
+		// fail the update. Probe the shipped binary's flag set and drop the
+		// dead ones loudly.
+		if usage := probeServeUsage(t, spec, "freehold-agent-tools"); usage != "" {
+			filtered, dropped := filterArgvToFlags(atArgv, usage)
+			for _, f := range dropped {
+				fmt.Fprintf(os.Stderr, "  note: agent-tools flag -%s dropped from the captured unit argv — the new binary does not define it (the world build re-stages the unit from coords)\n", f)
+			}
+			atArgv = filtered
+		} else {
+			fmt.Fprintln(os.Stderr, "  note: could not probe the agent-tools flag set — relaunching the captured argv unfiltered")
+		}
 		if err := restartAgentTools(t, spec, atArgv); err != nil {
 			return err
 		}
@@ -214,6 +244,58 @@ func captureServeArgv(t Transport, spec *DeployCpSpec) string {
 		return ""
 	}
 	return strings.TrimSpace(out.Stdout)
+}
+
+// probeServeUsage asks the JUST-SHIPPED binary for its serve flag set: the
+// flag package's usage dump (a -h prints it and exits — no hang, ExitOnError)
+// lines every defined flag as `  -name type`. Returns the flag NAMES,
+// newline-joined. An empty result on error (the caller treats the probe as
+// best-effort: no filter rather than a new failure mode).
+func probeServeUsage(t Transport, spec *DeployCpSpec, binary string) string {
+	// Double quotes INSIDE (LxcExec single-quotes the whole payload — no
+	// single quote may appear here; the capture commands above are the
+	// pattern): the grep/sed programs ride double quotes.
+	cmd := fmt.Sprintf("timeout 10 %s/%s serve -h 2>&1 | grep -oE \"^ +-[a-z0-9-]+\" | sed \"s/^ *-*//\" | sort -u; true", spec.BinDir, binary)
+	out, err := execToOK(t, proxmox.LxcCmd(spec.LXc, cmd), "probe "+binary+" serve flags", 30)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(out.Stdout)
+}
+
+// filterArgvToFlags drops captured argv tokens the new binary no longer
+// defines: the unit argv outlives flag renames/removals, and relaunching with
+// an undefined flag is a flag-parse exit (systemd crash-loop) — the exact
+// failure an update must never hand the world. Every drop is reported (the
+// caller prints it LOUDLY): a dropped flag is a feature the transient serve
+// boots without; the world build's unit regeneration (coords-driven)
+// re-stages the real flags minutes later. The argv shape is safe to walk
+// token-wise: agent-tools/runner flags are paths/URLs/IPs/numbers — no flag's
+// VALUE starts with a dash.
+func filterArgvToFlags(argv, definedUsage string) (filtered string, dropped []string) {
+	defined := map[string]bool{}
+	for _, name := range strings.Fields(definedUsage) {
+		defined[strings.TrimLeft(name, "-")] = true
+	}
+	fields := strings.Fields(argv)
+	kept := make([]string, 0, len(fields))
+	for i := 0; i < len(fields); i++ {
+		f := fields[i]
+		if strings.HasPrefix(f, "-") {
+			name := strings.TrimLeft(f, "-")
+			if !defined[name] {
+				dropped = append(dropped, name)
+				// Swallow the value too (all these flags take one) unless the
+				// next token is itself a flag.
+				if i+1 < len(fields) && !strings.HasPrefix(fields[i+1], "-") {
+					i++
+				}
+				continue
+			}
+		}
+		kept = append(kept, f)
+	}
+	return strings.Join(kept, " "), dropped
 }
 
 // RefreshReviveScript re-ships the guest-local revival script from the
