@@ -59,10 +59,17 @@ The gateway has TWO shapes, one per substrate:
     service up (a homelab agent deploying a family calendar), reaching it is a Network
     capability: the **exposure verbs** (`expose_app` / `unexpose_app` on the agent toolset)
     turn {name, target, group} into a public TLS vhost on the edge — DNS pointed
-    (`<name>.<world domain>` — a SIBLING of the cp host: yuvomi.librem.freehold.technology; the member cookie scopes to the zone — → the proxy), a cert — ONE SHARED wildcard for the cp host's domain, issued once through the same
+    (`<name>.<the world's own domain>` — a child of the world root: the CP host with a
+    literal `cp.`/`admin.` label stripped — but only when a world label remains below
+    the zone, so `cp.example.com` keeps its name — else the CP host itself:
+    `cp.librem.freehold.technology` → `litellm.librem.freehold.technology`;
+    `sandbox.freehold.technology` → `litellm.sandbox.freehold.technology`; the member
+    cookie scopes to the same world domain — the world's boundary, never the shared zone), a cert — ONE SHARED wildcard for the world domain, issued once through the same
     in-process lego chain (an expose after that is DNS + config only — no per-app LE order), the Caddy config rendered + applied live — and the record lands
     in the **apps registry** (`apps.json`, the toolset's durable dir), which the build tail
-    re-ensures so teardown/rebuild restores the apps. Two invariants: **cert before
+    re-ensures so teardown/rebuild restores the apps (a row written by an older naming
+    shape re-derives to the world-domain shape and its stale public record is removed on
+    the next ensure). Two invariants: **cert before
     config** (a vhost whose cert is missing crash-loops the whole edge — an app's block
     enters the rendered Caddyfile only once its cert is installed) and **access narrows to
     groups the requester belongs to** (below). The gate is the console's **member identity
@@ -73,13 +80,18 @@ The gateway has TWO shapes, one per substrate:
     department's identity or the operator may call the verbs; a custom agent that asks
     directly is refused (`-32003`) and routes through Network in conversation — and
     widening (`visibility: public`, `auth: none`) is refused from agents outright.
-    The console at `cp.<domain>` is the **portal**: the console's session-aware
+    The console is the **portal**: the console's session-aware
     launcher (`/api/my/apps`) answers what the asking session can open — the operator
     sees every exposed app, a member sees what their channel roster admits, a device
     session exactly its bound list — and the console renders it as launcher tiles
     (names + FQDNs only, no targets or owners) above the member's own scheduled jobs.
     One login (`/auth`) serves everyone: a whitelisted key lands the operator session,
     any other relay member key lands the member session — the role falls out of the key.
+    The portal takes the world root (`<world>.<zone>` — the launcher lives there today,
+    on the CP host); the operator face gets its own `admin.<world>` child and the relay a
+    `chat.<world>` child as the member surface grows (the operator surface is the TUI +
+    the console's admin routes; the portal is the member surface — two front doors over
+    one backend).
 *   **Groups are relay channels.** Every exposed app rides a relay channel as its ACL —
     the record stores the channel ID (names change; the display layer resolves the current
     name), `#general` is the everyone-channel and the default, and the expose validates

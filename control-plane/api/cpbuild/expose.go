@@ -28,6 +28,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -39,29 +40,38 @@ import (
 	caddydeploy "freehold/platform/services/webproxy/caddy"
 )
 
-// appDomainBase strips the CP host's FIRST label: cp.librem.freehold.technology
-// → librem.freehold.technology (control.example.com → example.com — the rule
-// is the label, not a "cp." prefix) — the WORLD DOMAIN apps compose onto.
-// A two-label cp host (the host IS the zone) has no world domain below it:
-// returned unchanged, and BuildExposeAppFn refuses (a sibling wildcard's
-// challenge would collide with the cp cert's challenge at the same name).
-func appDomainBase(cpHost string) string {
+// WorldDomain derives a world's own domain — the per-world subtree of the
+// zone every world name hangs off. It is the CP host with a literal "cp." or
+// "admin." label stripped (the prefixed house shapes, and only when at least
+// one world label remains below the zone — stripping cp.example.com would
+// land on a zone this world doesn't own); a host that already IS its world
+// domain (sandbox.freehold.technology) comes back unchanged. The world's
+// tree hangs off that root: the portal at the root, chat./admin. and every
+// exposed app (<name>) as children — so a CP-host rename never moves an app.
+func WorldDomain(cpHost string) string {
 	labels := strings.Split(cpHost, ".")
-	if len(labels) >= 3 {
+	if len(labels) >= 4 && (labels[0] == "cp" || labels[0] == "admin") {
 		return strings.Join(labels[1:], ".")
 	}
 	return cpHost
 }
 
-// appFQDN is an app's public hostname: a SIBLING of the relay/cp hosts
-// (yuvomi.librem.freehold.technology). The member cookie scopes to the
-// appliance's own zone (memberDomain — the same world domain), so the cookie
-// reaches every sibling app AND the shared wildcard's challenge name
-// (_acme-challenge.<world-domain>) collides with NOTHING — the relay/cp
-// certs challenge at their own label names. Both ends of the gate agree on
-// this shape.
+// appDomainIsZone reports whether the cp host IS a zone apex (two labels) —
+// the one shape where the apps' shared wildcard (*.host) would cover the
+// whole zone rather than one world's subtree.
+func appDomainIsZone(cpHost string) bool {
+	return len(strings.Split(cpHost, ".")) < 3
+}
+
+// appFQDN is an app's public hostname: a CHILD of the world's own domain
+// (litellm.sandbox.freehold.technology, litellm.librem.freehold.technology) —
+// never a shared-zone-level name, which is where cross-world record
+// confusion comes from. The member cookie scopes to the same world domain,
+// so the cookie reaches every child app AND the shared wildcard's challenge
+// name (_acme-challenge.<world-domain>) stays inside the world. Both ends of
+// the gate agree on this shape.
 func appFQDN(cpHost, name string) string {
-	return name + "." + appDomainBase(cpHost)
+	return name + "." + WorldDomain(cpHost)
 }
 
 // looksLikeChannelID reports whether g is already a dashed-uuid channel id
@@ -153,15 +163,16 @@ func shortHex(s string) string {
 const appsCertSlot = "apps"
 
 // appWildcardHost is the wildcard the apps' shared cert covers — the WORLD
-// DOMAIN's wildcard (its challenge name is unique in the zone; the relay/cp
-// certs' challenges live at their own label names and can never collide).
-func appWildcardHost(cpHost string) string { return "*." + appDomainBase(cpHost) }
+// DOMAIN's wildcard (one cert covers every app the world will ever expose;
+// its challenge name is unique inside the world).
+func appWildcardHost(cpHost string) string { return "*." + WorldDomain(cpHost) }
 
 // appRecordFQDN derives the row's hostname FROM ITS NAME at consume time —
-// rows written by the released per-app shape (<name>.<cpHost>) re-derive to
-// the sibling shape (<name>.<world domain>) the shared wildcard covers,
-// instead of re-serving a name the wildcard's one-label coverage misses
-// (a silent TLS mismatch). The stored FQDN is informational.
+// rows written by an older shape re-derive to the current world-domain shape
+// the shared wildcard covers, instead of re-serving a name the wildcard's
+// one-label coverage misses (a silent TLS mismatch). The stored FQDN is
+// informational; appDNSEnsure migrates the public record when the two
+// differ.
 func (s *Spec) appRecordFQDN(rec agenttools.AppRecord) string {
 	return appFQDN(s.CpHost, rec.Name)
 }
@@ -182,11 +193,11 @@ func (s *Spec) appVhost(rec agenttools.AppRecord) caddydeploy.AppVhost {
 	}
 }
 
-// appsCertEnsure runs the SHARED wildcard cert's chain (*.cp-host): the
+// appsCertEnsure runs the SHARED wildcard cert's chain (*.world-domain): the
 // durable-reuse gate (a valid mirror cert seeds the PVC — no LE order), the
 // box seed cache, then the in-process resumable DNS-01 issue. Returns
 // whether a cert was installed NOW (vs already present). ONE order covers
-// every app under the cp host; the zone credential comes from the relay
+// every app under the world domain; the zone credential comes from the relay
 // slot's sealed store — one token, one zone, every slot.
 // certCovers reports whether the fullchain's leaf cert's SANs carry the
 // wanted host EXACTLY (the wildcard form included) — the durable-reuse gate
@@ -209,9 +220,28 @@ func certCovers(fullchain []byte, host string) bool {
 	return false
 }
 
+// certPending reports whether a relay/cp order is still un-resolved: the
+// state file exists until its Resolve succeeds (DiscardState). When the cp
+// host IS the world domain, those orders' challenge name
+// (_acme-challenge.<world-domain>) is the SAME name the apps wildcard
+// challenges at — a fresh apps order would purge the pending order's
+// challenge TXT out from under it (the blast radius is one failed build that
+// self-heals, but the check turns that race into a clean refusal).
+func (s *Spec) certPending() bool {
+	for _, sl := range []string{"relay", "cp"} {
+		if _, err := os.Stat(filepath.Join(s.consoleStateRoot(), "world-secrets", "cert-pending-"+sl+".json")); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
 func (s *Spec) appsCertEnsure() (bool, error) {
 	slot := appsCertSlot
 	host := appWildcardHost(s.CpHost)
+	if s.certPending() {
+		return false, fmt.Errorf("cert %s: a relay/cp cert order is still pending (shared challenge name) — the next build re-ensures", slot)
+	}
 	if fc, err := s.durableFullchain(s.K3sVmid, slot); err == nil && s.durableKeyPresent(s.K3sVmid, slot) {
 		if _, ok := cert.ReuseIfValidBytes(fc, time.Now(), 30*24*time.Hour); ok && certCovers(fc, host) {
 			if err := s.seedCaddyCertFromDurable(s.K3sVmid, slot); err != nil {
@@ -276,6 +306,15 @@ func (s *Spec) appDNSEnsure(rec agenttools.AppRecord) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("app dns %s: %w", fqdn, err)
 	}
+	// Shape migration: a row written by an older naming shape (its stored
+	// FQDN differs from the derived one — e.g. a shared-zone-level name from
+	// before apps hung off the world domain) repoints to the derived name and
+	// best-effort removes the STALE public record, so the old name never
+	// lingers pointing at the edge. DeleteA of a missing record is a no-op,
+	// so this stays idempotent across builds.
+	if rec.FQDN != "" && rec.FQDN != fqdn {
+		_ = mgr.DeleteA(rec.FQDN)
+	}
 	if err := mgr.UpsertA(fqdn, s.ProxyIP); err != nil {
 		return false, fmt.Errorf("app dns %s: %w", fqdn, err)
 	}
@@ -295,11 +334,14 @@ func (s *Spec) renderCaddyfile() string {
 	var apps []caddydeploy.AppVhost
 	if s.Apps != nil {
 		// Cert-before-config: the apps' blocks ride only when the SHARED
-		// wildcard cert exists (one check covers every app under the cp
-		// host — that is the point of the shared cert).
+		// wildcard cert exists AND covers the world domain's wildcard — the
+		// same gate appsCertEnsure's reuse path applies. A mirror cert for a
+		// stale shape (the world domain moved; the fresh issue failed) is
+		// VALID but covers the wrong name — rendering vhosts behind it would
+		// TLS-mismatch every app the DNS step already repointed.
 		wc, err := s.durableFullchain(s.K3sVmid, appsCertSlot)
 		if err == nil {
-			if _, ok := cert.ReuseIfValidBytes(wc, time.Now(), 0); ok {
+			if _, ok := cert.ReuseIfValidBytes(wc, time.Now(), 0); ok && certCovers(wc, appWildcardHost(s.CpHost)) {
 				for _, rec := range s.Apps.List() {
 					apps = append(apps, s.appVhost(rec))
 				}
@@ -416,8 +458,8 @@ func BuildExposeAppFn(spec *Spec, apps *agenttools.AppsStore, consoleSecret []by
 		if apps == nil {
 			return "", fmt.Errorf("expose: the apps registry is not bound")
 		}
-		if appDomainBase(spec.CpHost) == spec.CpHost {
-			return "", fmt.Errorf("expose: the cp host %q has no world domain below it (want a <label>.<domain> host) — the apps' shared wildcard would collide with the cp cert's challenge", spec.CpHost)
+		if appDomainIsZone(spec.CpHost) {
+			return "", fmt.Errorf("expose: the cp host %q is the zone itself — its app wildcard would cover the whole shared zone (and collide with the cp cert's challenge)", spec.CpHost)
 		}
 		fqdn := appFQDN(spec.CpHost, args.Name)
 		if fqdn == spec.RelayHost || fqdn == spec.CpHost {

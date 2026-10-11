@@ -9,8 +9,14 @@ metadata:
 # Mint a LiteLLM UI user
 
 The LiteLLM gateway serves its admin UI at `/ui` on the gateway itself
-(`http://<litellm-ip>:4000/ui`; the public edge fronts it at
-`https://litellm.<world domain>/ui` (a sibling of the cp host — an app named `litellm` lands at `<name>.<world domain>`) once the app is exposed). The UI logs in
+(`http://<litellm-ip>:4000/ui`; once the app is exposed, the public edge
+fronts it at `https://litellm.<the world's own domain>/ui`). The world's own
+domain derives from YOUR world's cp host: `cp.librem.freehold.technology` →
+`librem.freehold.technology`, `sandbox.freehold.technology` → itself — an app
+named `litellm` lands at `litellm.sandbox.freehold.technology` on a sandbox
+world. NEVER compose the URL from the DNS zone, another world's records, or a
+guess — derive it from your own world's cp host, or use the raw
+`$LITELLM_API_ADMIN_URL` host:port when the app is not exposed. The UI logs in
 with LiteLLM USER accounts (not the master key).
 
 ## Create the user

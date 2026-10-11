@@ -1379,6 +1379,12 @@ func (s *Spec) worldCert() error {
 				if err := s.seedCaddyCertFromDurable(s.K3sVmid, sl.slot); err != nil {
 					return fmt.Errorf("cert %s durable seed: %w", sl.slot, err)
 				}
+				// A pending order for an already-valid cert is moot — but its
+				// state file outlives this path, and certPending reads it to
+				// hold the apps wildcard off (shared challenge name when the
+				// cp host IS the world domain). Nothing here resumes the
+				// order, so discard it.
+				_ = os.Remove(filepath.Join(s.consoleStateRoot(), "world-secrets", "cert-pending-"+sl.slot+".json"))
 				continue
 			}
 		}
