@@ -589,7 +589,7 @@ func TestExposeRidesThePangolinPath(t *testing.T) {
 			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"domains":[{"domainId":"domain1","baseDomain":"librem.example","verified":true}]}}`))
 		case "/v1/org/freehold/resources":
 			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"resources":[]}}`))
-		case "/v1/org/freehold/site/3/resource":
+		case "/v1/org/freehold/resource":
 			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"resourceId":7,"name":"yuvomi","subdomain":"yuvomi","fullDomain":"yuvomi.librem.example","domainId":"domain1","ssl":true,"enabled":true}}`))
 		case "/v1/resource/7":
 			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":null}`))
@@ -622,7 +622,7 @@ func TestExposeRidesThePangolinPath(t *testing.T) {
 		"GET /v1/org/freehold/sites",
 		"GET /v1/org/freehold/domains",
 		"GET /v1/org/freehold/resources",
-		"PUT /v1/org/freehold/site/3/resource",
+		"PUT /v1/org/freehold/resource",
 		"POST /v1/resource/7", // the sso gate — created resources are never open
 		"GET /v1/resource/7/targets",
 		"PUT /v1/resource/7/target",

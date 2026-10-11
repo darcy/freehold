@@ -163,7 +163,7 @@ func (c *Client) CreateSite(ctx context.Context, orgID, name string) (Site, erro
 // of a login.
 func (c *Client) CreateResource(ctx context.Context, orgID string, siteID int, name, subdomain, domainID string) (Resource, error) {
 	var r Resource
-	if err := c.do(ctx, http.MethodPut, fmt.Sprintf("/v1/org/%s/site/%d/resource", orgID, siteID), map[string]interface{}{
+	if err := c.do(ctx, http.MethodPut, "/v1/org/"+orgID+"/resource", map[string]interface{}{
 		"name": name, "subdomain": subdomain, "mode": "http", "domainId": domainID,
 	}, &r); err != nil {
 		return Resource{}, err
