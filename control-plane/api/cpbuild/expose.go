@@ -485,14 +485,17 @@ func (s *Spec) ensureNewtGateway(endpoint string) error {
 	// install path itself.
 	var binEnsure string
 	if s.HostedGateway {
-		binEnsure = fmt.Sprintf(`if [ ! -x /usr/local/bin/newt ]; then
-  curl -sL -o /usr/local/bin/newt %s && chmod +x /usr/local/bin/newt
+		binEnsure = fmt.Sprintf(`set -e
+if [ ! -x /usr/local/bin/newt ]; then
+  curl -fsSL -o /usr/local/bin/newt %s
+  chmod 755 /usr/local/bin/newt
 fi
 [ -x /usr/local/bin/newt ] || { echo "newt download failed and no copy installed"; exit 1; }
 `, newtURL)
 	} else {
-		binEnsure = fmt.Sprintf(`if ! pct exec %d -- test -x /usr/local/bin/newt; then
-  curl -sL -o /tmp/fh-newt %s
+		binEnsure = fmt.Sprintf(`set -e
+if ! pct exec %d -- test -x /usr/local/bin/newt; then
+  curl -fsSL -o /tmp/fh-newt %s
   pct push %d /tmp/fh-newt /usr/local/bin/newt
   pct exec %d -- chmod 755 /usr/local/bin/newt
 fi
@@ -730,6 +733,7 @@ rm -f /tmp/fh-caddyfile
 // on — the other apps still come up, and the failure is loud in the report,
 // never silent.
 func (s *Spec) worldApps() (string, error) {
+	s.newtAsserted = false // a fresh build re-asserts the dial-out leg
 	if s.Apps == nil {
 		return "", nil
 	}
@@ -782,6 +786,7 @@ func (s *Spec) worldApps() (string, error) {
 // re-ensure, and the report names which legs landed — never a silent half.
 func BuildExposeAppFn(spec *Spec, apps *agenttools.AppsStore, consoleSecret []byte) func(agent.ExposeArgs) (string, error) {
 	return func(args agent.ExposeArgs) (string, error) {
+		spec.newtAsserted = false // a fresh expose re-asserts the dial-out leg
 		if spec.CpHost == "" || spec.CpIP == "" || spec.RelayHost == "" || spec.RelayIP == "" || spec.ProxyIP == "" || spec.K3sVmid == 0 {
 			return "", fmt.Errorf("expose: the world coords are missing (relay/cp host+ip, proxy ip, k3s vmid) — exposure is world machinery")
 		}

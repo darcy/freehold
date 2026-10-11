@@ -1100,7 +1100,7 @@ func TestPangolinHostedGatewayAssertsBareNewt(t *testing.T) {
 		t.Fatal(err)
 	}
 	joined := strings.Join(te.cmds, "\n")
-	if !strings.Contains(joined, "curl -sL -o /usr/local/bin/newt") {
+	if !strings.Contains(joined, "curl -fsSL -o /usr/local/bin/newt") {
 		t.Fatal("the hosted gateway downloads the binary straight onto the host: " + joined)
 	}
 	for _, cmd := range te.cmds {
