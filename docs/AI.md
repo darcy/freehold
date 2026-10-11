@@ -193,7 +193,10 @@ action it causes is signed, authorized, and audited by machinery that cannot rea
     audited leg, never the CPA's — and the CP then reads the SA token from the slot and
     seals it CP-side, so the door is live with no console fill; the record re-creates the
     slot and re-seals the token on every rebuild, the same role `doors.tf` plays for the
-    static kube doors. Confirmation is governed by
+    static kube doors. The grant surface itself is the CPA's identity alone,
+    server-enforced: a created agent (or department) calling
+    `provision_runner`/`revoke_runner` is refused — capability asks route
+    through freehold in conversation. Confirmation is governed by
     `agent_grants` on the CP state —
     `confirm` (default: in-thread yes, or a DM), `auto`, or `off` (the server-side kill
     switch, `freehold-console grants-mode`) — but the discipline itself is the granting

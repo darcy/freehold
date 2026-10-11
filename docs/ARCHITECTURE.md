@@ -160,8 +160,9 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
      `control-plane/api/cmd/freehold-agent-tools` (`serve`, HTTP `/mcp`),
      authorized per call against the server's own relay roster (NIP-29 channel
      + 39002, fail-closed) **and scoped by caller class**: a pubkey in the CP's
-     agent registry is an AGENT (create/manage + the `provision_runner` and
-     `revoke_runner` carve-outs — the world_* actions AND `grant_agent` are denied server-side,
+     agent registry is an AGENT (create/manage — the `provision_runner` and
+     `revoke_runner` carve-outs are the CPA's identity alone, operators
+     excepted, and the world_* actions AND `grant_agent` are denied server-side,
      so the CPA's boundary cannot be bypassed by calling the server directly);
      a roster
      member not in the registry is an OPERATOR (full toolset incl. world_* and
