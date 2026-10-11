@@ -19,6 +19,8 @@ import (
 	"sync"
 	"time"
 
+	"freehold/contract/config"
+
 	"freehold/contract/wire"
 )
 
@@ -388,6 +390,15 @@ func checkOrigin(r *http.Request, publicOrigin *string) error {
 			pub = pub[:i]
 		}
 		if host == pub {
+			return nil
+		}
+		// The world tree: the console fronts BOTH faces — the operator host
+		// (its own origin, above) and the portal (the world root the edge
+		// points at the same backend). Any origin inside the world's own
+		// domain is the appliance's own surface — the same boundary the
+		// member cookie scopes to (config.WorldDomain).
+		world := config.WorldDomain(pub)
+		if host == world || strings.HasSuffix(host, "."+world) {
 			return nil
 		}
 	}

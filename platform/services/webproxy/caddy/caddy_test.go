@@ -7,7 +7,7 @@ import (
 
 func TestRenderCaddyfile(t *testing.T) {
 	out := RenderCaddyfile("relay.example.test", "192.168.30.8:3000", "192.168.30.250:5000",
-		"cp.example.test", "192.168.30.9:8080", "192.168.30.9:8089")
+		"cp.example.test", "192.168.30.9:8080", "192.168.30.9:8089", "")
 	for _, want := range []string{
 		"auto_https off",
 		"relay.example.test {",
@@ -36,7 +36,7 @@ func TestRenderCaddyfile(t *testing.T) {
 
 func TestRenderCaddyfileOmitsPairRouteWithoutUpstream(t *testing.T) {
 	out := RenderCaddyfile("relay.example.test", "192.168.30.8:3000", "",
-		"cp.example.test", "192.168.30.9:8080", "192.168.30.9:8089")
+		"cp.example.test", "192.168.30.9:8080", "192.168.30.9:8089", "")
 	if strings.Contains(out, "/pair") {
 		t.Errorf("no pair upstream — the /pair route must be omitted:\n%s", out)
 	}
@@ -76,7 +76,10 @@ func TestRenderAppVhosts(t *testing.T) {
 	}
 	// The compose: the base file plus the apps' blocks, one render for both
 	// appliers.
-	full := RenderCaddyfileApps("relay.example", "10.0.0.11:3000", "", "cp.example", "10.0.0.12:8080", "10.0.0.12:8089", apps)
+	full := RenderCaddyfileApps("relay.example", "10.0.0.11:3000", "", "cp.example", "10.0.0.12:8080", "10.0.0.12:8089", "example", apps)
+	if !strings.Contains(full, "example {") || !strings.Contains(full, "tls /data/tls/portal/") {
+		t.Fatal("the portal vhost rides the shared backend with its own cert slot")
+	}
 	if !strings.Contains(full, "relay.example {") || !strings.Contains(full, "cp.example {") || !strings.Contains(full, "zeta.example {") {
 		t.Fatal("the composed render must carry base + apps")
 	}

@@ -15,12 +15,13 @@ import (
 
 	"freehold/contract/version"
 	addrelaymember "freehold/freehold-cli/add-relay-member"
+	"freehold/freehold-cli/backup"
 	"freehold/freehold-cli/build"
 	dnscred "freehold/freehold-cli/dns-cred"
 	"freehold/freehold-cli/door"
 	"freehold/freehold-cli/exec"
-	"freehold/freehold-cli/backup"
 	"freehold/freehold-cli/export"
+	"freehold/freehold-cli/hosts"
 	"freehold/freehold-cli/install"
 	"freehold/freehold-cli/internal/stages"
 	"freehold/freehold-cli/profiles"
@@ -55,6 +56,7 @@ func init() {
 		export.Command(),
 		backup.Command(),
 		uninstall.Command(),
+		hosts.Command(),
 		install.InstallCommand(),
 		// The box's self-staged stages: the freehold binary re-invokes ITSELF
 		// for these low-level commands (provision/storage/deploy-cp).

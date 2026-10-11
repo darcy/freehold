@@ -64,6 +64,17 @@ func TestAppFQDNPinsDerivation(t *testing.T) {
 	if !appDomainIsZone("example.com") || appDomainIsZone("sandbox.freehold.technology") {
 		t.Fatal("appDomainIsZone: only a two-label host is the zone itself")
 	}
+	// The portal host: the world root when the console moved off it (the
+	// re-org's admin.<root> shape); empty while the console IS the root.
+	if got := appsPortalHost("admin.librem.example.test"); got != "librem.example.test" {
+		t.Fatalf("appsPortalHost (renamed console): %q", got)
+	}
+	if got := appsPortalHost("cp.librem.example.test"); got != "librem.example.test" {
+		t.Fatalf("appsPortalHost (prefixed console): %q", got)
+	}
+	if got := appsPortalHost("sandbox.freehold.technology"); got != "" {
+		t.Fatalf("appsPortalHost (console at the root) must be empty: %q", got)
+	}
 	if !looksLikeChannelID("3fa85f64-5717-4562-b3fc-2c963f66afa6") {
 		t.Fatal("a dashed-uuid channel id must pass through")
 	}
@@ -612,6 +623,31 @@ func TestAppsCertWaitsOutPendingOrders(t *testing.T) {
 	}
 	if !strings.Contains(rep, "still pending") {
 		t.Fatalf("a pending relay/cp order must hold the apps cert off (in the report): %q", rep)
+	}
+}
+
+// TestAppsCertWaitsOutThePortalOrder pins the guard's portal leg: the portal
+// cert challenges at the world root's OWN name (_acme-challenge.<root>) — the
+// same name the apps wildcard challenges at — so a pending portal order holds
+// the apps cert off too. (The fixture's console sits at cp.librem…, so the
+// portal host is librem.example.test and the slot exists.)
+func TestAppsCertWaitsOutThePortalOrder(t *testing.T) {
+	family := "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+	te := newTestExposer(t, []relayChannel{{family, "family"}}, nil)
+	if err := te.apps.Expose(agenttools.AppRecord{
+		Name: "yuvomi", FQDN: appFQDN(te.spec.CpHost, "yuvomi"), Target: "10.78.0.13:3000",
+		Visibility: agenttools.VisibilityFamily, Auth: agenttools.AuthGate,
+		Group: family, Owner: "op", Requester: strings.Repeat("b", 64), CreatedAt: 7,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	write(t, filepath.Join(te.spec.consoleStateRoot(), "world-secrets", "cert-pending-portal.json"), []byte("{}"))
+	rep, err := te.spec.worldApps()
+	if err != nil {
+		t.Fatalf("worldApps: %v", err)
+	}
+	if !strings.Contains(rep, "still pending") {
+		t.Fatalf("a pending portal order must hold the apps cert off: %q", rep)
 	}
 }
 

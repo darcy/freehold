@@ -1367,7 +1367,7 @@ func (s *Spec) worldCert() error {
 
 	// Phase A — durable-reuse seed, or open + PLACE each slot's order (no pause).
 	for _, sl := range []struct{ slot, host string }{
-		{"relay", s.RelayHost}, {"cp", s.CpHost},
+		{"relay", s.RelayHost}, {"cp", s.CpHost}, {"portal", appsPortalHost(s.CpHost)},
 	} {
 		if sl.host == "" {
 			continue

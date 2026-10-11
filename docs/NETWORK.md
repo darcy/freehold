@@ -87,11 +87,14 @@ The gateway has TWO shapes, one per substrate:
     (names + FQDNs only, no targets or owners) above the member's own scheduled jobs.
     One login (`/auth`) serves everyone: a whitelisted key lands the operator session,
     any other relay member key lands the member session — the role falls out of the key.
-    The portal takes the world root (`<world>.<zone>` — the launcher lives there today,
-    on the CP host); the operator face gets its own `admin.<world>` child and the relay a
-    `chat.<world>` child as the member surface grows (the operator surface is the TUI +
-    the console's admin routes; the portal is the member surface — two front doors over
-    one backend).
+    The world's tree is the layout — the portal at the world root (`<world>.<zone>`), the
+    operator face at `admin.<world>`, the relay at `chat.<world>` — and `freehold hosts`
+    renames a world onto it (it rewrites the profile's relay/cp URLs and refuses a rename
+    that would move the world's own domain: every exposed app's name anchors there).
+    Until a world renames, its console serves the root itself and no portal vhost exists.
+    The operator surface is the TUI + the console's admin routes; the portal is the
+    member surface — two front doors over one backend, and the origin guard accepts the
+    whole world tree (the same boundary the member cookie scopes to).
 *   **Groups are relay channels.** Every exposed app rides a relay channel as its ACL —
     the record stores the channel ID (names change; the display layer resolves the current
     name), `#general` is the everyone-channel and the default, and the expose validates

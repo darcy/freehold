@@ -478,7 +478,7 @@ func (s *Spec) manageDomainDNS() (string, error) {
 		return "", err
 	}
 	ip := s.ProxyIP
-	for _, host := range []string{s.RelayHost, s.CpHost} {
+	for _, host := range []string{s.RelayHost, s.CpHost, appsPortalHost(s.CpHost)} {
 		if host == "" {
 			continue
 		}
