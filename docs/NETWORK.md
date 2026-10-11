@@ -60,7 +60,8 @@ The gateway has TWO shapes, one per substrate:
     capability: the **exposure verbs** (`expose_app` / `unexpose_app` on the agent toolset)
     turn {name, target, group} into a public TLS vhost on the edge — DNS pointed
     (`<name>.<the world's own domain>` — a child of the world root: the CP host with a
-    literal `cp.`/`admin.` label stripped, else the CP host itself —
+    literal `cp.`/`admin.` label stripped — but only when a world label remains below
+    the zone, so `cp.example.com` keeps its name — else the CP host itself:
     `cp.librem.freehold.technology` → `litellm.librem.freehold.technology`;
     `sandbox.freehold.technology` → `litellm.sandbox.freehold.technology`; the member
     cookie scopes to the same world domain — the world's boundary, never the shared zone), a cert — ONE SHARED wildcard for the world domain, issued once through the same

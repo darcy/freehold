@@ -334,11 +334,14 @@ func (s *Spec) renderCaddyfile() string {
 	var apps []caddydeploy.AppVhost
 	if s.Apps != nil {
 		// Cert-before-config: the apps' blocks ride only when the SHARED
-		// wildcard cert exists (one check covers every app under the cp
-		// host — that is the point of the shared cert).
+		// wildcard cert exists AND covers the world domain's wildcard — the
+		// same gate appsCertEnsure's reuse path applies. A mirror cert for a
+		// stale shape (the world domain moved; the fresh issue failed) is
+		// VALID but covers the wrong name — rendering vhosts behind it would
+		// TLS-mismatch every app the DNS step already repointed.
 		wc, err := s.durableFullchain(s.K3sVmid, appsCertSlot)
 		if err == nil {
-			if _, ok := cert.ReuseIfValidBytes(wc, time.Now(), 0); ok {
+			if _, ok := cert.ReuseIfValidBytes(wc, time.Now(), 0); ok && certCovers(wc, appWildcardHost(s.CpHost)) {
 				for _, rec := range s.Apps.List() {
 					apps = append(apps, s.appVhost(rec))
 				}

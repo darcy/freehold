@@ -614,3 +614,68 @@ func TestAppsCertWaitsOutPendingOrders(t *testing.T) {
 		t.Fatalf("a pending relay/cp order must hold the apps cert off (in the report): %q", rep)
 	}
 }
+
+// TestRenderDropsAppsBehindAStaleShapeCert pins the render's half of
+// cert-before-config: a mirror cert that is VALID but covers the apps
+// wildcard only under an older shape (the world domain moved, the fresh
+// issue has not landed) must carry NO app vhosts — the DNS step already
+// repointed every app to the derived name, and a rendered vhost behind a
+// mismatched cert TLS-mismatches them all.
+func TestRenderDropsAppsBehindAStaleShapeCert(t *testing.T) {
+	te := newTestExposer(t, nil, nil)
+	if err := te.apps.Expose(agenttools.AppRecord{
+		Name: "yuvomi", FQDN: appFQDN(te.spec.CpHost, "yuvomi"), Target: "10.78.0.13:3000",
+		Visibility: agenttools.VisibilityFamily, Auth: agenttools.AuthGate,
+		Group: "3fa85f64-5717-4562-b3fc-2c963f66afa6", Owner: "op", Requester: strings.Repeat("b", 64), CreatedAt: 7,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	te.spec.execHook = func(cmd string, _ uint64, _ ...string) (string, error) {
+		if strings.Contains(cmd, "fullchain.pem") {
+			// The OLD shape's wildcard: valid, wrong name.
+			return base64.StdEncoding.EncodeToString(selfSigned(t, "*.cp.librem.example.test")), nil
+		}
+		return "OK", nil
+	}
+	if body := te.spec.renderCaddyfile(); strings.Contains(body, "yuvomi.librem.example.test {") {
+		t.Fatalf("a stale-shape cert must not carry app vhosts: %s", body)
+	}
+	// The control: the matching shape carries them.
+	te.spec.execHook = func(cmd string, _ uint64, _ ...string) (string, error) {
+		if strings.Contains(cmd, "fullchain.pem") {
+			return base64.StdEncoding.EncodeToString(selfSigned(t, "*.librem.example.test")), nil
+		}
+		return "OK", nil
+	}
+	if body := te.spec.renderCaddyfile(); !strings.Contains(body, "yuvomi.librem.example.test {") {
+		t.Fatalf("the matching wildcard must carry the app vhosts: %s", body)
+	}
+}
+
+// TestCertStageDiscardsAStalePendingOrder pins the pending-file lifecycle: a
+// relay/cp order whose state file survived a crash is MOOT once the durable
+// mirror holds a valid cert for that slot — the reuse path seeds the PVC and
+// must discard the state file, or certPending reads it forever and holds the
+// apps wildcard off (a deterministic refusal at every build tail).
+func TestCertStageDiscardsAStalePendingOrder(t *testing.T) {
+	te := newTestExposer(t, nil, nil)
+	pendingPath := filepath.Join(te.spec.consoleStateRoot(), "world-secrets", "cert-pending-cp.json")
+	write(t, pendingPath, []byte("{}"))
+	// The durable mirror answers VALID certs + keys for both slots; the seed
+	// and every other pct exec just succeed.
+	te.spec.execHook = func(cmd string, _ uint64, _ ...string) (string, error) {
+		if strings.Contains(cmd, "base64 -w0 <") {
+			return base64.StdEncoding.EncodeToString(selfSigned(t, "cp.librem.example.test")), nil
+		}
+		return "OK", nil
+	}
+	if err := te.spec.worldCert(); err != nil {
+		t.Fatalf("worldCert (full reuse): %v", err)
+	}
+	if _, err := os.Stat(pendingPath); !os.IsNotExist(err) {
+		t.Fatal("the reuse path must discard a stale pending order's state file")
+	}
+	if te.spec.certPending() {
+		t.Fatal("certPending must read false once the stale order is discarded")
+	}
+}
