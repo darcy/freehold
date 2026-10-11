@@ -781,8 +781,8 @@ func (s *Server) dispatch(w http.ResponseWriter, id json.RawMessage, params json
 			s.rpcError(w, id, -32602, "expose_app arguments: "+err.Error())
 			return
 		}
-		if s.IsAgent != nil && s.IsAgent(caller) && (a.Visibility == "public" || a.Auth == "none") {
-			s.rpcError(w, id, -32003, "unauthorized: widening access (visibility public / auth none) is an operator-level act — ask the operator")
+		if s.IsAgent != nil && s.IsAgent(caller) && (a.Visibility == "public" || a.Auth == "none" || a.Auth == "app") {
+			s.rpcError(w, id, -32003, "unauthorized: gate-off (visibility public / auth app / auth none) is an operator-level act — ask the operator")
 			return
 		}
 		// The requester is the VERIFIED caller when not named — the dispatch

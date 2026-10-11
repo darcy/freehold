@@ -252,7 +252,10 @@ func captureServeArgv(t Transport, spec *DeployCpSpec) string {
 // newline-joined. An empty result on error (the caller treats the probe as
 // best-effort: no filter rather than a new failure mode).
 func probeServeUsage(t Transport, spec *DeployCpSpec, binary string) string {
-	cmd := fmt.Sprintf("timeout 10 %s/%s serve -h 2>&1 | grep -oE '^ +-[a-z0-9-]+' | sed 's/^ *-*//' | sort -u; true", spec.BinDir, binary)
+	// Double quotes INSIDE (LxcExec single-quotes the whole payload — no
+	// single quote may appear here; the capture commands above are the
+	// pattern): the grep/sed programs ride double quotes.
+	cmd := fmt.Sprintf("timeout 10 %s/%s serve -h 2>&1 | grep -oE \"^ +-[a-z0-9-]+\" | sed \"s/^ *-*//\" | sort -u; true", spec.BinDir, binary)
 	out, err := execToOK(t, proxmox.LxcCmd(spec.LXc, cmd), "probe "+binary+" serve flags", 30)
 	if err != nil {
 		return ""
