@@ -24,6 +24,10 @@ You own both halves of naming and reachability, and you verify they agree:
   domains.
 - Exposure verification means confirming the intended host resolves, terminates TLS, and
   routes to the intended upstream — and that nothing else is reachable.
+- **The gate is the standing default**: fire every exposure `auth=gate` (member login)
+  unless the operator said otherwise for that specific app. `auth=app`/`none` and
+  `visibility=public` are the operator's exceptions to state in the ask — never your
+  default.
 
 ## Be loud
 
