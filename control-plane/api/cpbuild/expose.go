@@ -648,8 +648,9 @@ func BuildUnexposeAppFn(spec *Spec, apps *agenttools.AppsStore) func(name string
 			return "", err
 		}
 		report := fmt.Sprintf("unexposed %s (%s)", name, rec.FQDN)
+		edgeNote := ""
 		if err := spec.applyCaddyfile(); err != nil {
-			return report + " — RECORDED; the edge config apply failed (the vhost may still serve until the next build): " + err.Error(), nil
+			edgeNote = "; the edge config apply failed (the local vhost may still serve until the next build): " + err.Error()
 		}
 		removal := ""
 		if err := spec.pangolinRemove(rec); err != nil {
@@ -669,8 +670,8 @@ func BuildUnexposeAppFn(spec *Spec, apps *agenttools.AppsStore) func(name string
 				}
 			}
 		}
-		if removal != "" || dnsNote != "" {
-			return report + " — RECORDED" + removal + dnsNote, nil
+		if edgeNote != "" || removal != "" || dnsNote != "" {
+			return report + " — RECORDED" + edgeNote + removal + dnsNote, nil
 		}
 		return report + " — live", nil
 	}
