@@ -302,6 +302,25 @@ action it causes is signed, authorized, and audited by machinery that cannot rea
 *   **Console jobs management is read-only**: pause/delete run through agents
     (`pause_job`/`delete_job`), since jobs.json is the agent-tools process's own store.
 *   Agents read the repo but can't write it.
+*   **An agent's reply can be silently dropped by the relay**: buzz-acp's turn
+    delivery publishes over the relay's HTTP bridge (`POST /events`), and one
+    publish in a turn is intermittently refused with a non-retriable 403 —
+    the harness gives up on it, the agent's other publishes in the same turn
+    (and seconds around it) succeed, and the channel never sees the reply.
+    The operator-visible shape: an agent that answered but nothing landed —
+    a nudge (a second message) re-publishes and lands. Confirmed clean while
+    the refusal fired: the pubkey's relay membership, the channel membership,
+    no bans, no archived identity — and the same identity's neighboring
+    publishes (the same route, seconds apart) were accepted. The relay's own
+    error path logs only the HTTP status (no reason, no event kind/id), and
+    buzz-acp logs the status but not the response body, so the discriminating
+    datum is dropped on both sides; the suspects are the ingest's
+    channel-write auth or the NIP-FI admission state, both inside
+    buzz-relay/buzz-acp (external OSS this appliance pins — not patchable
+    freehold-side). Diagnose from the pod's log
+    (`buzz_acp::relay: POST /events returned non-retriable HTTP 403
+    Forbidden`) and the relay's (`HTTP bridge request … status:403,
+    accepted:false`); the fix is filing upstream with that evidence.
 *   AI hardware, local AI, optimization dashboards, and eval harnesses are prompt claims
     with no tooling. No resource baseline per agent exists.
 
