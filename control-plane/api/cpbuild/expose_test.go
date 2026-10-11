@@ -806,7 +806,9 @@ func TestExposePangolinSealsTheNewtSecret(t *testing.T) {
 	}
 	if env["NEWT_ID"] != "noo9" || env["NEWT_SECRET"] != "one-time-sek" {
 		t.Fatalf("the identity must land verbatim: %v", env)
-=======
+	}
+}
+
 // TestWorldAppsMigratesStaleShapeRecords pins the DNS migration: a row whose
 // stored FQDN was written by an older naming shape (the released per-app
 // shape, <name>.<cpHost> — a name the shared wildcard never covered)
