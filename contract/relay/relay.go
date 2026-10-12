@@ -211,10 +211,12 @@ func QueryEventsAuth(dialURL, authURL string, authSecret []byte, filters interfa
 		return nil, fmt.Errorf("query request failed: %w", err)
 	}
 	// Buzz keys the community to the REQUEST HOST and does NOT strip a port.
-	// A LAN relay URL (http://<domain>:3000, pre-Caddy) must present the bare
-	// domain as the Host header or ingest 404s "no community is configured";
-	// the public URL (https://<domain>) is already portless and unchanged.
-	req.Host = req.URL.Hostname()
+	// The Host presented is the CANONICAL (auth) URL's bare host — the
+	// community's own name — even when the DIAL goes elsewhere (the relay
+	// guest's raw IP, escaping the resolver's edge answer that only serves
+	// 443); a LAN dial (http://<domain>:3000, pre-Caddy) presents the same
+	// bare domain either way.
+	req.Host = hostFromAuthURL(authURL, req.URL.Hostname())
 	req.Header.Set("Authorization", auth)
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := agent().Do(req)
@@ -257,7 +259,7 @@ func PublishEventJSONAuth(dialURL, authURL string, authSecret []byte, eventJSON 
 	if err != nil {
 		return fmt.Errorf("event publish request failed: %w", err)
 	}
-	req.Host = req.URL.Hostname()
+	req.Host = hostFromAuthURL(authURL, req.URL.Hostname())
 	req.Header.Set("Authorization", auth)
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := agent().Do(req)
@@ -275,6 +277,28 @@ func PublishEventJSONAuth(dialURL, authURL string, authSecret []byte, eventJSON 
 // publishEvent builds a signed NIP-01 event and publishes it.
 func publishEvent(relayURL string, secret []byte, kind uint32, tags [][]string, content string) error {
 	return publishEventAuth(relayURL, relayURL, secret, kind, tags, content)
+}
+
+// hostFromAuthURL is the Host header a relay call presents: the CANONICAL
+// (auth) URL's bare host — the community buzz keys on — falling back to the
+// dial URL's own host when no canonical URL was given.
+func hostFromAuthURL(authURL, fallback string) string {
+	if authURL != "" {
+		h := authURL
+		if i := strings.Index(h, "://"); i >= 0 {
+			h = h[i+3:]
+		}
+		if i := strings.IndexAny(h, "/"); i >= 0 {
+			h = h[:i]
+		}
+		if i := strings.Index(h, ":"); i >= 0 {
+			h = h[:i]
+		}
+		if h != "" {
+			return h
+		}
+	}
+	return fallback
 }
 
 func publishEventAuth(dialURL, authURL string, secret []byte, kind uint32, tags [][]string, content string) error {
