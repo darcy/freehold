@@ -124,6 +124,7 @@
     <p class="muted" id="fill-note"></p>
     <div id="fill-fields"></div>
     <div class="row" style="margin-top:.8rem">
+      <button id="fill-confirm" style="display:none">confirm enroll</button>
       <button id="fill-submit">seal + restart door</button>
       <button id="fill-cancel">cancel</button>
     </div>
@@ -265,6 +266,12 @@ async function act(kind, payload) {
   await refresh();
 }
 
+function confirmEnroll(name) {
+  const r = RUNNERS.find((x) => x.name === name);
+  const msg = "confirm the enrollment of " + name + "?\n\nVerify these pubkeys against the guest's own `runner enroll` output (Compute's report in the thread) FIRST — confirming binds the credential fill to the key this box actually holds:\n\nnostr: " + (r ? r.nostr_pubkey : "?") + "\nenc:   " + (r ? r.enc_pubkey : "?");
+  return confirm(msg);
+}
+
 function bindActions() {
   $("#rows").querySelectorAll("button").forEach((b) => {
     b.onclick = async () => {
@@ -272,9 +279,7 @@ function bindActions() {
         const name = b.dataset.name;
         if (b.dataset.act === "revoke" && !confirm("revoke " + name + "? removes its credential capability")) return;
         if (b.dataset.act === "confirm-enroll") {
-          const r = RUNNERS.find((x) => x.name === name);
-          const msg = "confirm the enrollment of " + name + "?\n\nVerify these pubkeys against the guest's own `runner enroll` output (Compute's report in the thread) FIRST — confirming binds the credential fill to the key this box actually holds:\n\nnostr: " + (r ? r.nostr_pubkey : "?") + "\nenc:   " + (r ? r.enc_pubkey : "?");
-          if (!confirm(msg)) return;
+          if (!confirmEnroll(name)) return;
           await act("confirm-enroll", { name });
         } else if (b.dataset.act === "grant") {
           const pk = prompt("agent pubkey to grant (64 hex)");
@@ -380,26 +385,42 @@ function openFill(name) {
   const fields = $("#fill-fields");
   fields.innerHTML = "";
   if (row && row.self_hosted && !row.enroll_confirmed) {
-    $("#fill-note").textContent = "This is a SELF-HOSTED door and its enrollment is not confirmed yet: verify the presented pubkeys (the row above, or Compute's report in the thread) against the guest's own `runner enroll` output, then press \"confirm enroll\" — the fill unlocks after that. Confirming is what binds the credential to the key the guest actually holds.";
+    $("#fill-note").textContent = "This is a SELF-HOSTED door and its enrollment is not confirmed yet: verify the pubkeys below against the guest's own `runner enroll` output (or Compute's report in the thread), then press \"confirm enroll\" — the fill unlocks after that. Confirming is what binds the credential to the key the guest actually holds.";
+    fields.innerHTML = '<div class="small" style="margin-bottom:8px">nostr: ' + esc(row.nostr_pubkey) +
+      '<br>enc: ' + esc(row.enc_pubkey) + "</div>";
     $("#fill-submit").style.display = "none";
+    $("#fill-confirm").style.display = "";
   } else if (kind === "ssh") {
     $("#fill-note").textContent = "ssh doors carry their own minted keypair — no credential to fill. Install the runner's public key on the target (it rode the provisioning report); the door's self-check goes green after that.";
     $("#fill-submit").style.display = "none";
+    $("#fill-confirm").style.display = "none";
   } else {
     $("#fill-note").textContent = kind === "unifi"
       ? "The UniFi Network application account for this door (an Admin role). Sealed to the door's key; the agent never sees it. The door restarts and verifies itself."
       : "Credential for this door, pasted once — sealed to the door's key, never stored. The door restarts and picks it up.";
     $("#fill-submit").style.display = "";
+    $("#fill-confirm").style.display = "none";
+    const skip = row && row.self_hosted
+      ? '<div class="small">Re-provisioning an existing door and the credential didn\'t change? Skip this — the guest still holds its sealed credential; ask the granted agent to restart the unit (a no-op if it is running).</div>'
+      : "";
     fields.innerHTML = kind === "unifi"
       ? '<input id="fill-user" placeholder="username" autocomplete="off">' +
-        '<input id="fill-pass" type="password" placeholder="password" autocomplete="new-password">'
-      : '<input id="fill-cred" placeholder="credential" autocomplete="off">';
+        '<input id="fill-pass" type="password" placeholder="password" autocomplete="new-password">' + skip
+      : '<input id="fill-cred" placeholder="credential" autocomplete="off">' + skip;
   }
   $("#fill-err").textContent = "";
   $("#fill-overlay").style.display = "flex";
 }
 
 $("#fill-cancel").onclick = () => { $("#fill-overlay").style.display = "none"; };
+$("#fill-confirm").onclick = async () => {
+  if (!confirmEnroll(fillName)) return;
+  try {
+    await api("/api/enroll-confirm", { name: fillName });
+    await refresh();
+    openFill(fillName);
+  } catch (e) { $("#fill-err").textContent = "error: " + e.message; }
+};
 $("#fill-submit").onclick = async () => {
   const kind = runnerKind(fillName);
   let secret = "";
@@ -419,7 +440,7 @@ $("#fill-submit").onclick = async () => {
       // runner's own key but cannot restart anything. The GRANTEE (it holds
       // exec on that guest through this very door) carries the package JSON
       // over: secrets.json beside identity.json, then a unit restart there.
-      $("#err").textContent = "sealed for a self-hosted door — hand this package JSON to the granted agent (it writes it on the guest and restarts the unit): " + res.package_json;
+      $("#err").innerHTML = 'sealed for a self-hosted door — hand this package JSON to the granted agent (it writes it on the guest and restarts the unit): <input readonly value="' + esc(res.package_json) + '" onclick="this.select()">';
     }
     $("#fill-overlay").style.display = "none";
     await refresh();
