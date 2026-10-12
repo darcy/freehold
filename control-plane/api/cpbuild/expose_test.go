@@ -1032,11 +1032,11 @@ func TestPangolinEnsureAssertsTheGatewayNewt(t *testing.T) {
 		case "/v1/org/freehold/sites":
 			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"sites":[{"siteId":3,"name":"librem","type":"newt"}]}}`))
 		case "/v1/org/freehold/domains":
-			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"domains":[{"domainId":"domain1","baseDomain":"librem.example","verified":true}]}}`))
+			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"domains":[{"domainId":"domain1","baseDomain":"librem.example.test","verified":true}]}}`))
 		case "/v1/org/freehold/resources":
 			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"resources":[]}}`))
 		case "/v1/org/freehold/resource":
-			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"resourceId":7,"name":"yuvomi","subdomain":"yuvomi","fullDomain":"yuvomi.librem.example","domainId":"domain1"}}`))
+			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"resourceId":7,"name":"yuvomi","subdomain":"yuvomi","fullDomain":"yuvomi.librem.example.test","domainId":"domain1"}}`))
 		case "/v1/resource/7":
 			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":null}`))
 		case "/v1/resource/7/targets":
@@ -1052,7 +1052,7 @@ func TestPangolinEnsureAssertsTheGatewayNewt(t *testing.T) {
 
 	te := newTestExposer(t, []relayChannel{{family, "family"}},
 		[]memberEvent{{channelID: family, pubkey: homelab, kind: wire.PutUser, ts: 100}})
-	te.spec.Pangolin = &config.PangolinCoords{Org: "freehold", Site: "librem", Domain: "librem.example"}
+	te.spec.Pangolin = &config.PangolinCoords{Org: "freehold", Site: "librem", Domain: "librem.example.test"}
 	te.sealPangolinCreds(t, pang.URL, "yi5o.thesecret")
 	te.sealNewtIdentity(t, "noo1", "thesek")
 
@@ -1099,9 +1099,9 @@ func TestPangolinHostedGatewayAssertsBareNewt(t *testing.T) {
 		case "/v1/org/freehold/sites":
 			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"sites":[{"siteId":3,"name":"librem","type":"newt"}]}}`))
 		case "/v1/org/freehold/domains":
-			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"domains":[{"domainId":"domain1","baseDomain":"librem.example","verified":true}]}}`))
+			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"domains":[{"domainId":"domain1","baseDomain":"librem.example.test","verified":true}]}}`))
 		case "/v1/org/freehold/resources":
-			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"resources":[{"resourceId":9,"name":"yuvomi","subdomain":"yuvomi","fullDomain":"yuvomi.librem.example","domainId":"domain1"}]}}`))
+			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"resources":[{"resourceId":9,"name":"yuvomi","subdomain":"yuvomi","fullDomain":"yuvomi.librem.example.test","domainId":"domain1"}]}}`))
 		case "/v1/resource/9":
 			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":null}`))
 		case "/v1/resource/9/targets":
@@ -1117,7 +1117,7 @@ func TestPangolinHostedGatewayAssertsBareNewt(t *testing.T) {
 
 	te := newTestExposer(t, []relayChannel{{family, "family"}},
 		[]memberEvent{{channelID: family, pubkey: homelab, kind: wire.PutUser, ts: 100}})
-	te.spec.Pangolin = &config.PangolinCoords{Org: "freehold", Site: "librem", Domain: "librem.example"}
+	te.spec.Pangolin = &config.PangolinCoords{Org: "freehold", Site: "librem", Domain: "librem.example.test"}
 	te.spec.HostedGateway = true
 	te.sealPangolinCreds(t, pang.URL, "k")
 	te.sealNewtIdentity(t, "noo1", "thesek")
@@ -1153,7 +1153,7 @@ func TestPangolinAbsentNewtIdentityRefusesLoudly(t *testing.T) {
 		case "/v1/org/freehold/sites":
 			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"sites":[{"siteId":3,"name":"librem","type":"newt"}]}}`))
 		case "/v1/org/freehold/domains":
-			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"domains":[{"domainId":"domain1","baseDomain":"librem.example","verified":true}]}}`))
+			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"domains":[{"domainId":"domain1","baseDomain":"librem.example.test","verified":true}]}}`))
 		default:
 			w.WriteHeader(404)
 			_, _ = w.Write([]byte(`{"success":false,"error":true,"message":"no such route"}`))
@@ -1163,7 +1163,7 @@ func TestPangolinAbsentNewtIdentityRefusesLoudly(t *testing.T) {
 
 	te := newTestExposer(t, []relayChannel{{family, "family"}},
 		[]memberEvent{{channelID: family, pubkey: homelab, kind: wire.PutUser, ts: 100}})
-	te.spec.Pangolin = &config.PangolinCoords{Org: "freehold", Site: "librem", Domain: "librem.example"}
+	te.spec.Pangolin = &config.PangolinCoords{Org: "freehold", Site: "librem", Domain: "librem.example.test"}
 	te.sealPangolinCreds(t, pang.URL, "k")
 
 	report, err := te.exposeFn(consoleSec)(agent.ExposeArgs{
@@ -1192,9 +1192,9 @@ func TestPangolinStageReAssertsPerExpose(t *testing.T) {
 		case "/v1/org/freehold/sites":
 			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"sites":[{"siteId":3,"name":"librem","type":"newt"}]}}`))
 		case "/v1/org/freehold/domains":
-			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"domains":[{"domainId":"domain1","baseDomain":"librem.example","verified":true}]}}`))
+			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"domains":[{"domainId":"domain1","baseDomain":"librem.example.test","verified":true}]}}`))
 		case "/v1/org/freehold/resources":
-			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"resources":[{"resourceId":9,"name":"yuvomi","subdomain":"yuvomi","fullDomain":"yuvomi.librem.example","domainId":"domain1"}]}}`))
+			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"resources":[{"resourceId":9,"name":"yuvomi","subdomain":"yuvomi","fullDomain":"yuvomi.librem.example.test","domainId":"domain1"}]}}`))
 		case "/v1/resource/9":
 			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":null}`))
 		case "/v1/resource/9/targets":
@@ -1210,7 +1210,7 @@ func TestPangolinStageReAssertsPerExpose(t *testing.T) {
 
 	te := newTestExposer(t, []relayChannel{{family, "family"}},
 		[]memberEvent{{channelID: family, pubkey: homelab, kind: wire.PutUser, ts: 100}})
-	te.spec.Pangolin = &config.PangolinCoords{Org: "freehold", Site: "librem", Domain: "librem.example"}
+	te.spec.Pangolin = &config.PangolinCoords{Org: "freehold", Site: "librem", Domain: "librem.example.test"}
 	te.sealPangolinCreds(t, pang.URL, "k")
 	te.sealNewtIdentity(t, "noo1", "thesek")
 	fn := te.exposeFn(consoleSec)
