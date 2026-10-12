@@ -157,6 +157,10 @@ The gateway has TWO shapes, one per substrate:
 
 ## Known gaps
 
+*   The relay's image updates only when someone runs the bundle's `run.sh pull` on the relay
+    guest — the converge's `compose up -d --wait` re-runs the locally cached image and never
+    pulls, so a relay fix upstream does not reach a world until a human pulls (a bounce is
+    not an update).
 *   The gateway's host route isn't persisted — it is asserted by the box's gateway stage
     (`ip route replace`), lost on a PVE host reboot until the next install/re-adopt. A switch
     reboot lost it once and the world kept serving — only the box-side verbs went dark until
