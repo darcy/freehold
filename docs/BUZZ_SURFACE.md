@@ -126,7 +126,8 @@ must be a CURRENT state (grants; later, scope bookkeeping) uses the addressable 
 ## 8. Audit
 
 - The relay runs its own **hash-chain tamper-evident audit log** (`buzz-audit`) for every
-  stored event — so anything we publish is relay-audited by construction.
+  event it stores — anything the relay STORES is hash-chained by construction; exec-audit
+  is the exception (below): rejected at ingest, never stored.
 - Runner exec-audit publishes as **kind 48001 (AUDIT_ENTRY)**; the Chunk-1 local spool
   stays the authoritative log, relay publish is best-effort and degrades to spool-only on
   failure (D5 stands). **The running relay rejects 48001 ingest** (`restricted: unknown
