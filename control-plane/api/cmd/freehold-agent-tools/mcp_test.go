@@ -393,6 +393,40 @@ func TestGateFetchSignsAsTheAgent(t *testing.T) {
 	}
 }
 
+// TestGateFetchNormalizesQueryOnlyURLs pins the query-only edge: a URL with
+// no path but a query ("https://host?x=1") must gain its "/" in the PATH
+// (https://host/?x=1) — appending it to the string puts it in the query and
+// the gate's u check would 401 forever.
+func TestGateFetchNormalizesQueryOnlyURLs(t *testing.T) {
+	var gotU string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h := r.Header.Get("Authorization")
+		raw, _ := base64.StdEncoding.DecodeString(strings.TrimPrefix(h, "Nostr "))
+		var ev struct {
+			Tags [][]string `json:"tags"`
+		}
+		_ = json.Unmarshal(raw, &ev)
+		for _, tg := range ev.Tags {
+			if len(tg) >= 2 && tg[0] == "u" {
+				gotU = tg[1]
+			}
+		}
+	}))
+	defer ts.Close()
+
+	secret := [32]byte{}
+	secret[0] = 9 // a zero scalar cannot sign — any nonzero seed works
+	b := &mcpBridge{secret: secret, hc: ts.Client()}
+	input := `{"jsonrpc":"2.0","id":12,"method":"tools/call","params":{"name":"gate_fetch","arguments":{"url":"` + ts.URL + `?x=1"}}}` + "\n"
+	var out bytes.Buffer
+	if err := runBridge(strings.NewReader(input), &out, b); err != nil {
+		t.Fatal(err)
+	}
+	if gotU != ts.URL+"/?x=1" {
+		t.Fatalf("a query-only URL must normalize the slash into the path: u=%q", gotU)
+	}
+}
+
 // TestParseRunnerLists pins the aligned comma-list config: each column maps
 // 1:1 per runner, and a missing secrets column defaults each secret to its
 // target name (the provision convention).

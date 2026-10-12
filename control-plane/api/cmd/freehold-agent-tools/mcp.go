@@ -352,9 +352,12 @@ func (b *mcpBridge) gateFetch(raw []byte) ([]byte, error) {
 	body, _ := call.Arguments["body"].(string)
 	insecure, _ := call.Arguments["insecure"].(bool)
 	// NIP-98 signs the URL the gate reconstructs (https://host + uri) — a
-	// pathless URL gets the "/" the edge will see, or the u check 401s.
+	// pathless URL gets the "/" the edge will see (rebuilt through the parsed
+	// URL so a query-only form lands it in the path, not the query), or the
+	// u check 401s.
 	if u, perr := url.Parse(rawURL); perr == nil && u.Path == "" {
-		rawURL += "/"
+		u.Path = "/"
+		rawURL = u.String()
 	}
 	auth, err := wire.Nip98Auth(b.secret[:], method, rawURL, time.Now().Unix())
 	if err != nil {
