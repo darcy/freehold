@@ -1172,6 +1172,13 @@ func (s *Server) relayAuthFor() string {
 // sign-public split agent-tools and cpbuild use. The port is the relay's LAN
 // HTTP port (pre-Caddy), 3000 as everywhere else.
 func (s *Server) relayDialFor(snapURL *string) string {
+	// The relay guest's raw IP when the builder's coords know it: the NAME
+	// resolves — via the resolver's edge answer — to the k3s node, whose
+	// :3000 refuses. The Host presented stays the canonical community host
+	// (contract/relay takes it from the auth URL).
+	if s.Builder != nil && s.Builder.RelayIP != "" {
+		return "http://" + s.Builder.RelayIP + ":3000"
+	}
 	if d := config.RelayLanDial(s.RelayHost); d != "" {
 		return d
 	}
