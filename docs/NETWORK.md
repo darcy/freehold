@@ -143,8 +143,11 @@ The gateway has TWO shapes, one per substrate:
     pin in the guest's /etc/hosts reaches CP-side dials via the guest's own
     resolver chain and must never leak into the subnet's answers, where the
     edge record is the one every pod dial depends on; the addn-hosts deploys
-    to /etc/dnsmasq.d (world-readable) so dnsmasq never depends on the 0700
-    state dir's perms.
+    to /etc/freehold/dnsmasq.addn-hosts (world-readable, outside the
+    dnsmasq conf-dir — Debian's CONFIG_DIR parses every file in
+    /etc/dnsmasq.d as config, and a hosts-format file there keeps dnsmasq
+    from ever starting) so dnsmasq never depends on the 0700 state dir's
+    perms.
 *   **Network's runners:** the PVE host (shared), a `caddy`-scoped kube door, the resolver on
     the CP guest, a Cloudflare door per DNS zone, plus any door the CPA provisions on the fly
     (e.g. a UniFi controller).
