@@ -3,7 +3,6 @@ package console
 import (
 	"fmt"
 	"net"
-	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -85,15 +84,29 @@ func RemoveDNSRecord(store *state.StateStore, name string) error {
 	return store.Save()
 }
 
-// AddnHostsPath is the dnsmasq addn-hosts file the resolver watches.
+// AddnHostsPath is the addn-hosts SOURCE in the CP state dir; reloadDnsmasq
+// deploys it to DeployedAddnHostsPath (the state dir is 0700 — the store
+// re-tightens it on every open — and dnsmasq must never depend on its perms).
 func AddnHostsPath(stateDir string) string { return filepath.Join(stateDir, "dnsmasq.addn-hosts") }
+
+// DeployedAddnHostsPath is where reloadDnsmasq lands the addn-hosts next to
+// the deployed conf: root-owned 0644 in /etc/dnsmasq.d, readable by dnsmasq
+// regardless of the state dir's perms.
+const DeployedAddnHostsPath = "/etc/dnsmasq.d/freehold-names.hosts"
 
 // DnsmasqConfPath is the dnsmasq config file.
 func DnsmasqConfPath(stateDir string) string { return filepath.Join(stateDir, "dnsmasq.conf") }
 
-// RenderDnsmasqConf renders the full dnsmasq conf body.
+// RenderDnsmasqConf renders the full dnsmasq conf body. `no-hosts` keeps the
+// CP guest's own /etc/hosts OUT of the resolver's answers: the relay-host pin
+// written there (for CP-side dials, which resolve via glibc's files-first) is
+// the RELAY GUEST's LAN IP — if dnsmasq served it, every pod's wss:// relay
+// dial would land on the relay guest's :443 (where nothing listens) instead
+// of the edge answer, and the agent would sit in its connect backoff forever
+// while the pod shows Running. The pin stays CP-local; the subnet gets these
+// records only.
 func RenderDnsmasqConf(stateDir string, apex, ip *string) string {
-	body := fmt.Sprintf("addn-hosts=%s\nno-negcache\n", AddnHostsPath(stateDir))
+	body := fmt.Sprintf("addn-hosts=%s\nno-hosts\nno-negcache\n", DeployedAddnHostsPath)
 	if apex != nil && ip != nil && *apex != "" && *ip != "" {
 		return body + "address=/." + *apex + "/" + *ip + "\n"
 	}
@@ -111,33 +124,8 @@ func SyncResolver(stateDir string, records map[string]state.DnsRecord, domain *s
 	if err := write(DnsmasqConfPath(stateDir), RenderDnsmasqConf(stateDir, apex, ip)); err != nil {
 		return fmt.Errorf("resolver: %w", err)
 	}
-	if err := ensureResolverReadable(path); err != nil {
-		return fmt.Errorf("resolver: %w", err)
-	}
 	if err := reload(); err != nil {
 		return fmt.Errorf("resolver: %w", err)
-	}
-	return nil
-}
-
-// ensureResolverReadable grants dnsmasq traversal + read on the addn-hosts
-// path (deploy-created dirs can arrive 0700 — dnsmasq then fails silently).
-func ensureResolverReadable(path string) error {
-	for dir := filepath.Dir(path); dir != "/" && dir != "."; dir = filepath.Dir(dir) {
-		info, err := os.Stat(dir)
-		if err != nil {
-			return err
-		}
-		if info.Mode().Perm()&0o011 == 0 {
-			if err := os.Chmod(dir, info.Mode().Perm()|0o011); err != nil {
-				return err
-			}
-		}
-	}
-	if info, err := os.Stat(path); err == nil {
-		if info.Mode().Perm()&0o444 != 0o444 {
-			return os.Chmod(path, info.Mode().Perm()|0o444)
-		}
 	}
 	return nil
 }
