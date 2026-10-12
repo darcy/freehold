@@ -21,7 +21,7 @@ func (s *Server) appsList(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, statusFor(err), err.Error())
 		return
 	}
-	if err := checkOrigin(r, s.PublicOrigin); err != nil {
+	if err := checkOrigin(r, s.PublicOrigin, s.WorldDomain); err != nil {
 		writeErr(w, http.StatusForbidden, err.Error())
 		return
 	}
@@ -61,7 +61,7 @@ func (s *Server) appsList(w http.ResponseWriter, r *http.Request) {
 // a device session's static list binds it. Same redaction as the operator
 // feed's member boundary: names + URLs only — no targets, no owners.
 func (s *Server) myApps(w http.ResponseWriter, r *http.Request) {
-	if err := checkOrigin(r, s.PublicOrigin); err != nil {
+	if err := checkOrigin(r, s.PublicOrigin, s.WorldDomain); err != nil {
 		writeErr(w, http.StatusForbidden, err.Error())
 		return
 	}

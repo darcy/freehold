@@ -41,7 +41,7 @@ func newHostsCmd() *cobra.Command {
 				return fmt.Errorf("load config: %w", err)
 			}
 			oldRelay, oldCP := cfg.RelayHost(), cfg.CPHost()
-			root := config.WorldDomain(oldCP)
+			root := config.EffectiveWorldDomain(oldCP, cfg.WorldDomain)
 			newRelay, _ := cmd.Flags().GetString("relay")
 			newCP, _ := cmd.Flags().GetString("cp")
 			if newRelay == "" && newCP == "" {
@@ -56,7 +56,7 @@ func newHostsCmd() *cobra.Command {
 			if newCP == "" {
 				newCP = oldCP
 			}
-			if newRoot := config.WorldDomain(newCP); newRoot != root {
+			if newRoot := config.EffectiveWorldDomain(newCP, cfg.WorldDomain); newRoot != root {
 				return fmt.Errorf("the cp host %q would move the world's own domain (%s → %s) — refused: every exposed app's name anchors on it (rename within the tree, e.g. admin.%s)", newCP, root, newRoot, root)
 			}
 			if newRelay != oldRelay && !strings.HasSuffix(newRelay, "."+root) {

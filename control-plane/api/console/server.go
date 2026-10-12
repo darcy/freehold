@@ -45,6 +45,11 @@ type Server struct {
 	Members *Members
 	// PublicOrigin is the console's fronted public origin (DNS-rebinding guard).
 	PublicOrigin *string
+	// WorldDomain is the explicit world-root override (the coords' world_domain)
+	// — resolves through EffectiveWorldDomain against PublicOrigin's host; empty
+	// = the derived shape. Feeds the member domain + the cookie scope + the
+	// origin guard's portal exception.
+	WorldDomain string
 	// RelayHost is the relay community host (kind-9 reads send it explicitly).
 	RelayHost string
 	// StateDir is the console's own durable state dir (state.json), the same one
@@ -349,7 +354,7 @@ func (s *Server) world(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, statusFor(err), err.Error())
 		return
 	}
-	if err := checkOrigin(r, s.PublicOrigin); err != nil {
+	if err := checkOrigin(r, s.PublicOrigin, s.WorldDomain); err != nil {
 		writeErr(w, http.StatusForbidden, err.Error())
 		return
 	}
@@ -489,7 +494,7 @@ func (s *Server) worldBuild(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, statusFor(err), err.Error())
 		return
 	}
-	if err := checkOrigin(r, s.PublicOrigin); err != nil {
+	if err := checkOrigin(r, s.PublicOrigin, s.WorldDomain); err != nil {
 		writeErr(w, http.StatusForbidden, err.Error())
 		return
 	}
@@ -531,7 +536,7 @@ func (s *Server) worldTeardown(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, statusFor(err), err.Error())
 		return
 	}
-	if err := checkOrigin(r, s.PublicOrigin); err != nil {
+	if err := checkOrigin(r, s.PublicOrigin, s.WorldDomain); err != nil {
 		writeErr(w, http.StatusForbidden, err.Error())
 		return
 	}
@@ -569,7 +574,7 @@ func (s *Server) worldExec(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, statusFor(err), err.Error())
 		return
 	}
-	if err := checkOrigin(r, s.PublicOrigin); err != nil {
+	if err := checkOrigin(r, s.PublicOrigin, s.WorldDomain); err != nil {
 		writeErr(w, http.StatusForbidden, err.Error())
 		return
 	}
@@ -606,7 +611,7 @@ func (s *Server) worldMigrate(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, statusFor(err), err.Error())
 		return
 	}
-	if err := checkOrigin(r, s.PublicOrigin); err != nil {
+	if err := checkOrigin(r, s.PublicOrigin, s.WorldDomain); err != nil {
 		writeErr(w, http.StatusForbidden, err.Error())
 		return
 	}
@@ -661,7 +666,7 @@ func (s *Server) worldDoor(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, statusFor(err), err.Error())
 		return
 	}
-	if err := checkOrigin(r, s.PublicOrigin); err != nil {
+	if err := checkOrigin(r, s.PublicOrigin, s.WorldDomain); err != nil {
 		writeErr(w, http.StatusForbidden, err.Error())
 		return
 	}
@@ -731,7 +736,7 @@ func (s *Server) secretsList(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, statusFor(err), err.Error())
 		return
 	}
-	if err := checkOrigin(r, s.PublicOrigin); err != nil {
+	if err := checkOrigin(r, s.PublicOrigin, s.WorldDomain); err != nil {
 		writeErr(w, http.StatusForbidden, err.Error())
 		return
 	}
@@ -754,7 +759,7 @@ func (s *Server) secretsWrite(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, statusFor(err), err.Error())
 		return
 	}
-	if err := checkOrigin(r, s.PublicOrigin); err != nil {
+	if err := checkOrigin(r, s.PublicOrigin, s.WorldDomain); err != nil {
 		writeErr(w, http.StatusForbidden, err.Error())
 		return
 	}
@@ -804,7 +809,7 @@ func (s *Server) overview(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, statusFor(err), err.Error())
 		return
 	}
-	if err := checkOrigin(r, s.PublicOrigin); err != nil {
+	if err := checkOrigin(r, s.PublicOrigin, s.WorldDomain); err != nil {
 		writeErr(w, http.StatusForbidden, err.Error())
 		return
 	}
@@ -1030,7 +1035,7 @@ func (s *Server) teardown(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, statusFor(err), err.Error())
 		return
 	}
-	if err := checkOrigin(r, s.PublicOrigin); err != nil {
+	if err := checkOrigin(r, s.PublicOrigin, s.WorldDomain); err != nil {
 		writeErr(w, http.StatusForbidden, err.Error())
 		return
 	}
@@ -1181,7 +1186,7 @@ func (s *Server) provision(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, statusFor(err), err.Error())
 		return
 	}
-	if err := checkOrigin(r, s.PublicOrigin); err != nil {
+	if err := checkOrigin(r, s.PublicOrigin, s.WorldDomain); err != nil {
 		writeErr(w, http.StatusForbidden, err.Error())
 		return
 	}
@@ -1347,7 +1352,7 @@ func (s *Server) rotate(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, statusFor(err), err.Error())
 		return
 	}
-	if err := checkOrigin(r, s.PublicOrigin); err != nil {
+	if err := checkOrigin(r, s.PublicOrigin, s.WorldDomain); err != nil {
 		writeErr(w, http.StatusForbidden, err.Error())
 		return
 	}
@@ -1451,7 +1456,7 @@ func (s *Server) enrollConfirm(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, statusFor(err), err.Error())
 		return
 	}
-	if err := checkOrigin(r, s.PublicOrigin); err != nil {
+	if err := checkOrigin(r, s.PublicOrigin, s.WorldDomain); err != nil {
 		writeErr(w, http.StatusForbidden, err.Error())
 		return
 	}
@@ -1504,7 +1509,7 @@ func (s *Server) revoke(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, statusFor(err), err.Error())
 		return
 	}
-	if err := checkOrigin(r, s.PublicOrigin); err != nil {
+	if err := checkOrigin(r, s.PublicOrigin, s.WorldDomain); err != nil {
 		writeErr(w, http.StatusForbidden, err.Error())
 		return
 	}
@@ -1534,7 +1539,7 @@ func (s *Server) grant(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, statusFor(err), err.Error())
 		return
 	}
-	if err := checkOrigin(r, s.PublicOrigin); err != nil {
+	if err := checkOrigin(r, s.PublicOrigin, s.WorldDomain); err != nil {
 		writeErr(w, http.StatusForbidden, err.Error())
 		return
 	}
@@ -1621,7 +1626,7 @@ func (s *Server) revokeGrant(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, statusFor(err), err.Error())
 		return
 	}
-	if err := checkOrigin(r, s.PublicOrigin); err != nil {
+	if err := checkOrigin(r, s.PublicOrigin, s.WorldDomain); err != nil {
 		writeErr(w, http.StatusForbidden, err.Error())
 		return
 	}
@@ -1700,7 +1705,7 @@ func (s *Server) runnerAddr(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, statusFor(err), err.Error())
 		return
 	}
-	if err := checkOrigin(r, s.PublicOrigin); err != nil {
+	if err := checkOrigin(r, s.PublicOrigin, s.WorldDomain); err != nil {
 		writeErr(w, http.StatusForbidden, err.Error())
 		return
 	}
@@ -1727,7 +1732,7 @@ func (s *Server) dnsList(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, statusFor(err), err.Error())
 		return
 	}
-	if err := checkOrigin(r, s.PublicOrigin); err != nil {
+	if err := checkOrigin(r, s.PublicOrigin, s.WorldDomain); err != nil {
 		writeErr(w, http.StatusForbidden, err.Error())
 		return
 	}
@@ -1772,7 +1777,7 @@ func (s *Server) dnsUpsert(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, statusFor(err), err.Error())
 		return
 	}
-	if err := checkOrigin(r, s.PublicOrigin); err != nil {
+	if err := checkOrigin(r, s.PublicOrigin, s.WorldDomain); err != nil {
 		writeErr(w, http.StatusForbidden, err.Error())
 		return
 	}
@@ -1802,7 +1807,7 @@ func (s *Server) dnsRemove(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, statusFor(err), err.Error())
 		return
 	}
-	if err := checkOrigin(r, s.PublicOrigin); err != nil {
+	if err := checkOrigin(r, s.PublicOrigin, s.WorldDomain); err != nil {
 		writeErr(w, http.StatusForbidden, err.Error())
 		return
 	}
@@ -1842,7 +1847,7 @@ func (s *Server) runnerChannel(w http.ResponseWriter, r *http.Request, name stri
 		writeErr(w, statusFor(err), err.Error())
 		return
 	}
-	if err := checkOrigin(r, s.PublicOrigin); err != nil {
+	if err := checkOrigin(r, s.PublicOrigin, s.WorldDomain); err != nil {
 		writeErr(w, http.StatusForbidden, err.Error())
 		return
 	}
@@ -1943,7 +1948,7 @@ func (s *Server) jobsList(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, statusFor(err), err.Error())
 		return
 	}
-	if err := checkOrigin(r, s.PublicOrigin); err != nil {
+	if err := checkOrigin(r, s.PublicOrigin, s.WorldDomain); err != nil {
 		writeErr(w, http.StatusForbidden, err.Error())
 		return
 	}
@@ -1985,7 +1990,7 @@ func (s *Server) agentsList(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, statusFor(err), err.Error())
 		return
 	}
-	if err := checkOrigin(r, s.PublicOrigin); err != nil {
+	if err := checkOrigin(r, s.PublicOrigin, s.WorldDomain); err != nil {
 		writeErr(w, http.StatusForbidden, err.Error())
 		return
 	}
@@ -2051,7 +2056,7 @@ func (s *Server) agentsRegister(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, statusFor(err), err.Error())
 		return
 	}
-	if err := checkOrigin(r, s.PublicOrigin); err != nil {
+	if err := checkOrigin(r, s.PublicOrigin, s.WorldDomain); err != nil {
 		writeErr(w, http.StatusForbidden, err.Error())
 		return
 	}
@@ -2086,7 +2091,7 @@ func (s *Server) agentsRemove(w http.ResponseWriter, r *http.Request, name strin
 		writeErr(w, statusFor(err), err.Error())
 		return
 	}
-	if err := checkOrigin(r, s.PublicOrigin); err != nil {
+	if err := checkOrigin(r, s.PublicOrigin, s.WorldDomain); err != nil {
 		writeErr(w, http.StatusForbidden, err.Error())
 		return
 	}

@@ -143,6 +143,11 @@ type Spec struct {
 	// build publishes for them — what makes the desktop app skip its
 	// first-run onboarding). Empty renders "Operator".
 	OperatorName string
+	// WorldDomainOverride is the explicit world-root opt-in (the coords'
+	// world_domain): for an operator who owns the whole zone and wants the
+	// world AT the apex. Resolved through Spec.worldDomain() — consumed only
+	// when the CP host is actually its child. Empty = the derived shape.
+	WorldDomainOverride string
 	// RepoURL is the source repository the shared system-orientation block
 	// points agents at. Empty = the agents package's upstream default.
 	RepoURL string
@@ -1376,7 +1381,7 @@ func (s *Spec) worldCert() error {
 	// token, one zone, every slot (the apps cert's own rule), so no
 	// dns-portal secret ever exists to ship or allowlist.
 	for _, sl := range []struct{ slot, host, credSlot string }{
-		{"relay", s.RelayHost, "relay"}, {"cp", s.CpHost, "cp"}, {"portal", appsPortalHost(s.CpHost), "relay"},
+		{"relay", s.RelayHost, "relay"}, {"cp", s.CpHost, "cp"}, {"portal", s.portalHost(), "relay"},
 	} {
 		if sl.host == "" {
 			continue

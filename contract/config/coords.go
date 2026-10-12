@@ -26,6 +26,23 @@ func WorldDomain(cpHost string) string {
 	return cpHost
 }
 
+// EffectiveWorldDomain resolves a world's own domain from an explicit
+// operator override. WorldDomain's guard refuses to strip a prefixed label
+// when the strip would land on a zone apex (cp.example.com — a world must
+// not silently claim a zone it may not own). An operator WHO OWNS the zone
+// and wants the world AT the apex sets the override: when it is set and the
+// CP host is actually its child, the override IS the world root — the zone
+// apex — and every world name (admin., the portal at the root, <name>.)
+// hangs off it. Anything else (empty, or an override the CP host isn't a
+// child of) falls back to the derived shape, so a typo can never move the
+// tree onto names this world doesn't serve.
+func EffectiveWorldDomain(cpHost, override string) string {
+	if override != "" && strings.HasSuffix(cpHost, "."+override) {
+		return override
+	}
+	return WorldDomain(cpHost)
+}
+
 // Coords is the operator-supplied world configuration the CP needs to own the
 // build — the non-secret subset of the build Spec, serialized so a box can hand
 // it to the console (route: deploy --world-config) for the console to be the CP
@@ -85,6 +102,12 @@ type Coords struct {
 	// operator's kind:0 profile at build (which is what makes the Buzz desktop
 	// app skip its first-run onboarding). Empty renders "Operator".
 	OperatorName string `json:"operator_name,omitempty"`
+	// WorldDomain is the explicit world-root override (EffectiveWorldDomain):
+	// for an operator who owns the whole zone and wants the world AT the
+	// apex — the portal at the root, admin./<name>. as children. Validated at
+	// every consume (the CP host must be the override's child; anything else
+	// falls back to the derived shape). Empty = the derived WorldDomain.
+	WorldDomain string `json:"world_domain,omitempty"`
 	// Pangolin is the optional public path (docs/NETWORK.md): when set,
 	// exposed apps ride a Pangolin VPS's tunnel — the app A records point at
 	// the VPS and the app vhosts live on Pangolin's edge, so the home IP

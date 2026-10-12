@@ -222,6 +222,7 @@ func cmdServe(args []string) error {
 	// the runner at deploy). The world coords ride here so a thin box can
 	// trigger /api/world-build without a box-one or agent-tools dependency.
 	var builder *cpbuild.Spec
+	var worldDomainOverride string
 	if *worldConfig != "" {
 		raw, derr := base64.StdEncoding.DecodeString(*worldConfig)
 		if derr != nil {
@@ -240,6 +241,7 @@ func cmdServe(args []string) error {
 		if pubOrigin == nil && c.CpHost != "" {
 			pubOrigin = strPtr("https://" + c.CpHost)
 		}
+		worldDomainOverride = c.WorldDomain
 		builder = cpbuild.NewSpec(c, secret, consolePK)
 		// The Spec drives identity / migrations / world-secrets / the CP guest
 		// dirs, all relative to the CONSOLE's own state dir — the world-config
@@ -357,7 +359,8 @@ func cmdServe(args []string) error {
 	srv := &console.Server{
 		Store: store, ConsoleSecret: secret, ConsolePubkey: consolePK,
 		Auth: auth, Members: members, PublicOrigin: pubOrigin, RelayHost: *relayHost,
-		StateDir: *stateDir, AgentToolsDir: *agentToolsStateDir,
+		WorldDomain: worldDomainOverride,
+		StateDir:    *stateDir, AgentToolsDir: *agentToolsStateDir,
 		Builder: builder, Version: pin,
 	}
 	log.Printf("freehold-console (Go) serving on %s (console agent %s)", *addr, consolePK)

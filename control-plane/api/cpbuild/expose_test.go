@@ -54,28 +54,53 @@ func TestAppFQDNPinsDerivation(t *testing.T) {
 			t.Fatalf("WorldDomain(%q): %q, want %q", c.host, got, c.want)
 		}
 	}
-	if got := appWildcardHost("cp.librem.freehold.technology"); got != "*.librem.freehold.technology" {
+	if got := appWildcardHost("cp.librem.freehold.technology", ""); got != "*.librem.freehold.technology" {
 		t.Fatalf("appWildcardHost: %q", got)
 	}
-	if got := appFQDN("sandbox.freehold.technology", "litellm"); got != "litellm.sandbox.freehold.technology" {
+	if got := appFQDN("sandbox.freehold.technology", "", "litellm"); got != "litellm.sandbox.freehold.technology" {
 		t.Fatalf("appFQDN: %q", got)
 	}
-	if got := appFQDN("cp.librem.freehold.technology", "litellm"); got != "litellm.librem.freehold.technology" {
+	if got := appFQDN("cp.librem.freehold.technology", "", "litellm"); got != "litellm.librem.freehold.technology" {
 		t.Fatalf("appFQDN (prefixed host): %q", got)
+	}
+	// The explicit override: an operator who owns the whole zone puts the
+	// world AT the apex — every name derives from the zone, not the CP host.
+	if got := config.EffectiveWorldDomain("admin.casaquerencia.net", "casaquerencia.net"); got != "casaquerencia.net" {
+		t.Fatalf("EffectiveWorldDomain (apex override): %q", got)
+	}
+	if got := config.EffectiveWorldDomain("admin.casaquerencia.net", ""); got != "admin.casaquerencia.net" {
+		t.Fatalf("EffectiveWorldDomain (no override, 3-label host stays): %q", got)
+	}
+	if got := config.EffectiveWorldDomain("admin.casaquerencia.net", "other.example"); got != "admin.casaquerencia.net" {
+		t.Fatalf("EffectiveWorldDomain (override the CP host is not a child of, ignored): %q", got)
+	}
+	if got := appFQDN("admin.casaquerencia.net", "casaquerencia.net", "sparkdash"); got != "sparkdash.casaquerencia.net" {
+		t.Fatalf("appFQDN (apex override): %q", got)
+	}
+	if got := appWildcardHost("casaquerencia.net", "casaquerencia.net"); got != "*.casaquerencia.net" {
+		t.Fatalf("appWildcardHost (apex override): %q", got)
 	}
 	if !appDomainIsZone("example.com") || appDomainIsZone("sandbox.freehold.technology") {
 		t.Fatal("appDomainIsZone: only a two-label host is the zone itself")
 	}
 	// The portal host: the world root when the console moved off it (the
 	// re-org's admin.<root> shape); empty while the console IS the root.
-	if got := appsPortalHost("admin.librem.example.test"); got != "librem.example.test" {
+	if got := appsPortalHost("admin.librem.example.test", ""); got != "librem.example.test" {
 		t.Fatalf("appsPortalHost (renamed console): %q", got)
 	}
-	if got := appsPortalHost("cp.librem.example.test"); got != "librem.example.test" {
+	if got := appsPortalHost("cp.librem.example.test", ""); got != "librem.example.test" {
 		t.Fatalf("appsPortalHost (prefixed console): %q", got)
 	}
-	if got := appsPortalHost("sandbox.freehold.technology"); got != "" {
+	if got := appsPortalHost("sandbox.freehold.technology", ""); got != "" {
 		t.Fatalf("appsPortalHost (console at the root) must be empty: %q", got)
+	}
+	// With the apex override the console moved off the root too — the portal
+	// IS the zone apex.
+	if got := appsPortalHost("admin.casaquerencia.net", "casaquerencia.net"); got != "casaquerencia.net" {
+		t.Fatalf("appsPortalHost (apex override): %q", got)
+	}
+	if got := appsPortalHost("admin.casaquerencia.net", ""); got != "" {
+		t.Fatalf("appsPortalHost (3-label host, no override — the console IS the root): %q", got)
 	}
 	if !looksLikeChannelID("3fa85f64-5717-4562-b3fc-2c963f66afa6") {
 		t.Fatal("a dashed-uuid channel id must pass through")
@@ -516,7 +541,7 @@ func TestWorldAppsReadsTheRegistryFresh(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := other.Expose(agenttools.AppRecord{
-		Name: "yuvomi", FQDN: appFQDN(te.spec.CpHost, "yuvomi"), Target: "10.78.0.13:3000",
+		Name: "yuvomi", FQDN: appFQDN(te.spec.CpHost, "", "yuvomi"), Target: "10.78.0.13:3000",
 		Visibility: agenttools.VisibilityFamily, Auth: agenttools.AuthGate,
 		Group: family, Owner: "op", Requester: strings.Repeat("b", 64), CreatedAt: 7,
 	}); err != nil {
@@ -854,7 +879,7 @@ func TestAppsCertWaitsOutPendingOrders(t *testing.T) {
 	family := "3fa85f64-5717-4562-b3fc-2c963f66afa6"
 	te := newTestExposer(t, []relayChannel{{family, "family"}}, nil)
 	if err := te.apps.Expose(agenttools.AppRecord{
-		Name: "yuvomi", FQDN: appFQDN(te.spec.CpHost, "yuvomi"), Target: "10.78.0.13:3000",
+		Name: "yuvomi", FQDN: appFQDN(te.spec.CpHost, "", "yuvomi"), Target: "10.78.0.13:3000",
 		Visibility: agenttools.VisibilityFamily, Auth: agenttools.AuthGate,
 		Group: family, Owner: "op", Requester: strings.Repeat("b", 64), CreatedAt: 7,
 	}); err != nil {
@@ -879,7 +904,7 @@ func TestAppsCertWaitsOutThePortalOrder(t *testing.T) {
 	family := "3fa85f64-5717-4562-b3fc-2c963f66afa6"
 	te := newTestExposer(t, []relayChannel{{family, "family"}}, nil)
 	if err := te.apps.Expose(agenttools.AppRecord{
-		Name: "yuvomi", FQDN: appFQDN(te.spec.CpHost, "yuvomi"), Target: "10.78.0.13:3000",
+		Name: "yuvomi", FQDN: appFQDN(te.spec.CpHost, "", "yuvomi"), Target: "10.78.0.13:3000",
 		Visibility: agenttools.VisibilityFamily, Auth: agenttools.AuthGate,
 		Group: family, Owner: "op", Requester: strings.Repeat("b", 64), CreatedAt: 7,
 	}); err != nil {
@@ -904,7 +929,7 @@ func TestAppsCertWaitsOutThePortalOrder(t *testing.T) {
 func TestRenderDropsAppsBehindAStaleShapeCert(t *testing.T) {
 	te := newTestExposer(t, nil, nil)
 	if err := te.apps.Expose(agenttools.AppRecord{
-		Name: "yuvomi", FQDN: appFQDN(te.spec.CpHost, "yuvomi"), Target: "10.78.0.13:3000",
+		Name: "yuvomi", FQDN: appFQDN(te.spec.CpHost, "", "yuvomi"), Target: "10.78.0.13:3000",
 		Visibility: agenttools.VisibilityFamily, Auth: agenttools.AuthGate,
 		Group: "3fa85f64-5717-4562-b3fc-2c963f66afa6", Owner: "op", Requester: strings.Repeat("b", 64), CreatedAt: 7,
 	}); err != nil {
