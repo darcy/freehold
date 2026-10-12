@@ -643,11 +643,11 @@ func TestExposeRidesThePangolinPath(t *testing.T) {
 		case "/v1/org/freehold/sites":
 			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"sites":[{"siteId":3,"name":"librem","type":"newt"}]}}`))
 		case "/v1/org/freehold/domains":
-			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"domains":[{"domainId":"domain1","baseDomain":"librem.example","verified":true}]}}`))
+			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"domains":[{"domainId":"domain1","baseDomain":"librem.example.test","verified":true}]}}`))
 		case "/v1/org/freehold/resources":
 			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"resources":[]}}`))
 		case "/v1/org/freehold/resource":
-			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"resourceId":7,"name":"yuvomi","subdomain":"yuvomi","fullDomain":"yuvomi.librem.example","domainId":"domain1","ssl":true,"enabled":true}}`))
+			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"resourceId":7,"name":"yuvomi","subdomain":"yuvomi","fullDomain":"yuvomi.librem.example.test","domainId":"domain1","ssl":true,"enabled":true}}`))
 		case "/v1/resource/7":
 			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":null}`))
 		case "/v1/resource/7/targets":
@@ -663,7 +663,7 @@ func TestExposeRidesThePangolinPath(t *testing.T) {
 
 	te := newTestExposer(t, []relayChannel{{family, "family"}},
 		[]memberEvent{{channelID: family, pubkey: homelab, kind: wire.PutUser, ts: 100}})
-	te.spec.Pangolin = &config.PangolinCoords{Org: "freehold", Site: "librem", Domain: "librem.example", DNSIP: "203.0.113.9"}
+	te.spec.Pangolin = &config.PangolinCoords{Org: "freehold", Site: "librem", Domain: "librem.example.test", DNSIP: "203.0.113.9"}
 	te.sealPangolinCreds(t, pang.URL, "yi5o.thesecret")
 
 	report, err := te.exposeFn(consoleSec)(agent.ExposeArgs{
@@ -713,9 +713,9 @@ func TestExposePangolinEmptyDNSKeepsTheProxyIP(t *testing.T) {
 		case "/v1/org/freehold/sites":
 			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"sites":[{"siteId":3,"name":"librem","type":"newt"}]}}`))
 		case "/v1/org/freehold/domains":
-			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"domains":[{"domainId":"domain1","baseDomain":"librem.example","verified":true}]}}`))
+			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"domains":[{"domainId":"domain1","baseDomain":"librem.example.test","verified":true}]}}`))
 		case "/v1/org/freehold/resources":
-			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"resources":[{"resourceId":9,"name":"yuvomi","subdomain":"yuvomi","fullDomain":"yuvomi.librem.example","domainId":"domain1"}]}}`))
+			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"resources":[{"resourceId":9,"name":"yuvomi","subdomain":"yuvomi","fullDomain":"yuvomi.librem.example.test","domainId":"domain1"}]}}`))
 		case "/v1/resource/9":
 			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":null}`)) // the sso re-assert
 		case "/v1/resource/9/targets":
@@ -731,7 +731,7 @@ func TestExposePangolinEmptyDNSKeepsTheProxyIP(t *testing.T) {
 
 	te := newTestExposer(t, []relayChannel{{family, "family"}},
 		[]memberEvent{{channelID: family, pubkey: homelab, kind: wire.PutUser, ts: 100}})
-	te.spec.Pangolin = &config.PangolinCoords{Org: "freehold", Site: "librem", Domain: "librem.example"}
+	te.spec.Pangolin = &config.PangolinCoords{Org: "freehold", Site: "librem", Domain: "librem.example.test"}
 	te.sealPangolinCreds(t, pang.URL, "yi5o.thesecret")
 
 	if _, err := te.exposeFn(consoleSec)(agent.ExposeArgs{
@@ -762,7 +762,7 @@ func TestExposePangolinSkipsLAN(t *testing.T) {
 
 	te := newTestExposer(t, []relayChannel{{family, "family"}},
 		[]memberEvent{{channelID: family, pubkey: homelab, kind: wire.PutUser, ts: 100}})
-	te.spec.Pangolin = &config.PangolinCoords{Org: "freehold", Site: "librem", Domain: "librem.example", DNSIP: "203.0.113.9"}
+	te.spec.Pangolin = &config.PangolinCoords{Org: "freehold", Site: "librem", Domain: "librem.example.test", DNSIP: "203.0.113.9"}
 	te.sealPangolinCreds(t, pang.URL, "k")
 
 	report, err := te.exposeFn(consoleSec)(agent.ExposeArgs{
@@ -797,11 +797,11 @@ func TestExposePangolinSealsTheNewtSecret(t *testing.T) {
 		case "/v1/org/freehold/site":
 			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"siteId":5,"name":"librem","type":"newt","newtId":"noo9","newtSecret":"one-time-sek","address":"100.90.0.0/16"}}`))
 		case "/v1/org/freehold/domains":
-			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"domains":[{"domainId":"domain1","baseDomain":"librem.example","verified":true}]}}`))
+			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"domains":[{"domainId":"domain1","baseDomain":"librem.example.test","verified":true}]}}`))
 		case "/v1/org/freehold/resources":
 			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"resources":[]}}`))
 		case "/v1/org/freehold/site/5/resource":
-			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"resourceId":8,"name":"yuvomi","subdomain":"yuvomi","fullDomain":"yuvomi.librem.example","domainId":"domain1"}}`))
+			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"resourceId":8,"name":"yuvomi","subdomain":"yuvomi","fullDomain":"yuvomi.librem.example.test","domainId":"domain1"}}`))
 		case "/v1/resource/8/targets":
 			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"targets":[]}}`))
 		case "/v1/resource/8/target":
@@ -815,7 +815,7 @@ func TestExposePangolinSealsTheNewtSecret(t *testing.T) {
 
 	te := newTestExposer(t, []relayChannel{{family, "family"}},
 		[]memberEvent{{channelID: family, pubkey: homelab, kind: wire.PutUser, ts: 100}})
-	te.spec.Pangolin = &config.PangolinCoords{Org: "freehold", Site: "librem", Domain: "librem.example"}
+	te.spec.Pangolin = &config.PangolinCoords{Org: "freehold", Site: "librem", Domain: "librem.example.test"}
 	te.sealPangolinCreds(t, pang.URL, "k")
 
 	if _, err := te.exposeFn(consoleSec)(agent.ExposeArgs{

@@ -394,6 +394,13 @@ func (s *Spec) pangolinEnsure(rec agenttools.AppRecord) error {
 	if p == nil || p.Org == "" || p.Site == "" || p.Domain == "" {
 		return fmt.Errorf("pangolin: the world coords lack the pangolin public path (org/site/domain)")
 	}
+	// The Pangolin base domain and the world's own domain MUST agree: the app
+	// A record (appDNSEnsure) points the effective-derived name at the VPS,
+	// and the resource must route that same name — a divergence is silent
+	// breakage (the visited name has no route on Pangolin's edge).
+	if base := config.EffectiveWorldDomain(s.CpHost, s.WorldDomainOverride); p.Domain != base {
+		return fmt.Errorf("pangolin: the recorded base domain %q does not match the world's own domain %q — update the pangolin coords to the override", p.Domain, base)
+	}
 	if rec.Visibility == agenttools.VisibilityLAN {
 		return nil
 	}
@@ -455,9 +462,20 @@ func (s *Spec) pangolinRemove(rec agenttools.AppRecord) error {
 		return err
 	}
 	want := rec.Name + "." + p.Domain
+	// The override may have moved the tree since the resource was created:
+	// remove BOTH shapes (the recorded base and the effective root), so a
+	// renamed world's old resource doesn't linger on the edge.
+	wants := []string{want}
+	if base := config.EffectiveWorldDomain(s.CpHost, s.WorldDomainOverride); base != p.Domain {
+		wants = append(wants, rec.Name+"."+base)
+	}
 	for _, r := range resources {
-		if r.FullDomain == want {
-			return cl.DeleteResource(context.Background(), r.ResourceID)
+		for _, w := range wants {
+			if r.FullDomain == w {
+				if err := cl.DeleteResource(context.Background(), r.ResourceID); err != nil {
+					return err
+				}
+			}
 		}
 	}
 	return nil // nothing on the path — already gone
