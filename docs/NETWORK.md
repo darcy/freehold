@@ -64,7 +64,10 @@ The gateway has TWO shapes, one per substrate:
     the zone, so `cp.example.com` keeps its name — else the CP host itself:
     `cp.librem.freehold.technology` → `litellm.librem.freehold.technology`;
     `sandbox.freehold.technology` → `litellm.sandbox.freehold.technology`; the member
-    cookie scopes to the same world domain — the world's boundary, never the shared zone), a cert — ONE SHARED wildcard for the world domain, issued once through the same
+    cookie scopes to the same world domain — the world's boundary, never the shared zone;
+    an operator who owns the whole zone pins the root explicitly with `world_domain` in
+    the profile config — `admin.casaquerencia.net` + `world_domain = 'casaquerencia.net'`
+    puts the world AT the zone apex: the portal at the root, every app a child), a cert — ONE SHARED wildcard for the world domain, issued once through the same
     in-process lego chain (an expose after that is DNS + config only — no per-app LE order), the Caddy config rendered + applied live — and the record lands
     in the **apps registry** (`apps.json`, the toolset's durable dir), which the build tail
     re-ensures so teardown/rebuild restores the apps (a row written by an older naming
