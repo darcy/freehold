@@ -287,6 +287,13 @@ action it causes is signed, authorized, and audited by machinery that cannot rea
     default set; managing an agent's choice beyond the registry row is not built.
 *   AI's prompt says the provider key rides each exec; the bridge doesn't inject it.
 *   The sprig image is a moving tag (no digest pin).
+*   The relay's ingest rejects the runner's kind-48001 audit events (`restricted: unknown
+    event kind`) — the kind is in no relay build, buzz-admin has no registration command,
+    and the free-range kinds (48200+) are rejected too, so exec-audit is spool-only and
+    the relay-side audit copy waits on an upstream buzz change (register 48001 ingest or
+    ship an allowlist config). Zero loss: the local spool stays authoritative (D5), and
+    every stored event is relay-hash-chained by construction. Verified against
+    ghcr.io/block/buzz:main digest df8772ac (built 2026-10-11) on casaq — both legs.
 *   The `buzz` CLI (the sprig image's relay client) panics on a closed stdout pipe:
     piping a large response into a reader that exits early
     (`buzz messages get --channel <busy> --since <wide> | head -c 1000`) aborts it
