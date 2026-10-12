@@ -65,8 +65,13 @@ type Config struct {
 	Pangolin *PangolinCoords `toml:"pangolin,omitempty"`
 	// OperatorName is the operator's display name in Buzz (asked at install);
 	// published as the operator's kind:0 profile at build.
-	OperatorName     string      `toml:"operator_name,omitempty"`
-	Managed          []string    `toml:"managed"`
+	OperatorName string `toml:"operator_name,omitempty"`
+	// WorldDomain is the explicit world-root override (contract's
+	// EffectiveWorldDomain): for an operator who owns the whole zone and
+	// wants the world AT the apex — the portal at the root, admin./<name>.
+	// as children. Empty = the derived WorldDomain(CPHost).
+	WorldDomain string   `toml:"world_domain,omitempty"`
+	Managed     []string `toml:"managed"`
 	// AgentTools is the CP's freehold-agent-tools MCP server (create/grant/
 	// manage-agent), recorded once deployed so the build (stageCpa + reconcile)
 	// and later the CPA call it over the shared signed-header MCP surface.
@@ -233,7 +238,7 @@ type PlaneSpec struct {
 	// only by the carve branch of the rebuild placement gate; a REUSED
 	// stock pool (pve/data) is never recorded here. Teardown --data removes
 	// exactly this pool and nothing else.
-	ThinPool *string `toml:"thin_pool,omitempty"`
+	ThinPool *string                 `toml:"thin_pool,omitempty"`
 	Mounts   map[string][]PlaneMount `toml:"mounts,omitempty"`
 	// Guest size/placement as the operator set them at install — persisted so
 	// a later world-config render (an UPDATE's) carries them: the update's

@@ -20,7 +20,7 @@ func (s *Server) settingsGet(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, statusFor(err), err.Error())
 		return
 	}
-	if err := checkOrigin(r, s.PublicOrigin); err != nil {
+	if err := checkOrigin(r, s.PublicOrigin, s.WorldDomain); err != nil {
 		writeErr(w, http.StatusForbidden, err.Error())
 		return
 	}
@@ -40,7 +40,7 @@ func (s *Server) settingsSet(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, statusFor(err), err.Error())
 		return
 	}
-	if err := checkOrigin(r, s.PublicOrigin); err != nil {
+	if err := checkOrigin(r, s.PublicOrigin, s.WorldDomain); err != nil {
 		writeErr(w, http.StatusForbidden, err.Error())
 		return
 	}

@@ -90,23 +90,23 @@ func TestCheckOrigin(t *testing.T) {
 		}
 		return r
 	}
-	if err := checkOrigin(req(""), nil); err != nil {
+	if err := checkOrigin(req(""), nil, ""); err != nil {
 		t.Fatal("missing origin must pass")
 	}
-	if err := checkOrigin(req("http://127.0.0.1:8080"), nil); err != nil {
+	if err := checkOrigin(req("http://127.0.0.1:8080"), nil, ""); err != nil {
 		t.Fatal("loopback origin must pass")
 	}
-	if err := checkOrigin(req("http://localhost"), nil); err != nil {
+	if err := checkOrigin(req("http://localhost"), nil, ""); err != nil {
 		t.Fatal("localhost origin must pass")
 	}
-	if err := checkOrigin(req("http://evil.example"), nil); err == nil {
+	if err := checkOrigin(req("http://evil.example"), nil, ""); err == nil {
 		t.Fatal("non-loopback origin must be refused")
 	}
 	pub := "https://cp.freehold.example"
-	if err := checkOrigin(req("https://cp.freehold.example"), &pub); err != nil {
+	if err := checkOrigin(req("https://cp.freehold.example"), &pub, ""); err != nil {
 		t.Fatal("configured public origin must pass")
 	}
-	if err := checkOrigin(req("https://cp.freehold.example.evil.io"), &pub); err == nil {
+	if err := checkOrigin(req("https://cp.freehold.example.evil.io"), &pub, ""); err == nil {
 		t.Fatal("a host that merely shares a prefix with the public origin must be refused")
 	}
 }

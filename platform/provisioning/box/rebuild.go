@@ -107,6 +107,10 @@ type Flags struct {
 	// OperatorName is the operator's display name in Buzz — published as their
 	// kind:0 profile at build. Empty renders "Operator".
 	OperatorName string
+	// WorldDomain is the explicit world-root override (the config's
+	// world_domain) — the coords render carries it so the console's
+	// derivations resolve the overridden tree. Empty = derived.
+	WorldDomain string
 	// Provider is the host-provisioner seam's registry key ("proxmox" |
 	// "vultr"; "" = the default). The provider owns every host-specific
 	// need — credentials, answers, defaults, the door UX — and the installer
@@ -254,6 +258,7 @@ func FlagsFromConfig(cfg *config.Config) Flags {
 		OperatorPubkey: cfg.OperatorPubkey,
 		AgentName:      cfg.CPAName,
 		OperatorName:   cfg.OperatorName,
+		WorldDomain:    cfg.WorldDomain,
 		ConfigPath:     config.ConfigPath(),
 		RelayDomain:    cfg.RelayHost(),
 		CpDomain:       cfg.CPHost(),
@@ -2709,6 +2714,7 @@ func (e *Engine) worldConfigJSON(cfg *config.Config) string {
 		CpaName:        cpaNameOrDefault(e.F.AgentName),
 		OwnerPub:       e.F.OperatorPubkey,
 		OperatorName:   firstNonBlank(e.F.OperatorName, cfg.OperatorName),
+		WorldDomain:    firstNonBlank(e.F.WorldDomain, cfg.WorldDomain),
 		Pangolin:       cfg.Pangolin,
 		LitellmBaseURL: cfg.Litellm.URL,
 		// The agent-tools server's reachable URL, NOT the console's: this is the
