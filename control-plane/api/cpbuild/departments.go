@@ -149,6 +149,14 @@ const dynamicRunnerPortBase = 8800
 // community hostname on :3000 (the CP resolver maps it to the relay guest), so
 // the request Host matches the community. Falls back to the recorded RelayURL.
 func (s *Spec) relayDialURL() string {
+	// The relay GUEST's raw IP when known: the runner dials it directly — no
+	// DNS dependency. The NAME resolves (via the resolver's edge answer) to
+	// the k3s node, whose :3000 refuses — the relay's raw port lives only on
+	// the relay guest (the edge fronts it on 443). The canonical URL the
+	// runner SIGNS rides --relay-auth-url regardless.
+	if s.RelayIP != "" {
+		return "http://" + s.RelayIP + ":3000"
+	}
 	if s.RelayHost != "" {
 		return "http://" + s.RelayHost + ":3000"
 	}
