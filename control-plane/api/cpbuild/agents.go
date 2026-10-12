@@ -97,7 +97,12 @@ func (s *Spec) relayDial() string {
 // (and reload it) without re-running the one-time seed/grant/pin steps.
 func (s *Spec) agentToolsServeFlags() string {
 	atState := s.agentToolsRoot()
-	relayDial := config.RelayLanDial(s.RelayHost)
+	// The relay DIAL prefers the relay guest's raw IP (relayDialURL): the
+	// name resolves — via the resolver's edge answer — to the k3s node,
+	// whose :3000 refuses; the relay's raw port lives on the relay guest.
+	// The Host presented stays the canonical community host (the auth URL —
+	// contract/relay's Host override), so the raw-IP dial ingests.
+	relayDial := s.relayDialURL()
 	serveFlags := fmt.Sprintf(
 		"--state-dir %s --addr 0.0.0.0:"+AgentToolsPort+" --relay-url %s --relay-lxc %d --relay-compose %s --k3s-vmid %d --runner-addr %s --runner-pubkey %s --runner-target %s --cpa-name %s --owner-pubkey %s --self-url %s",
 		atState, relayDial, s.RelayLxc, s.RelayCompose, s.K3sVmid,
