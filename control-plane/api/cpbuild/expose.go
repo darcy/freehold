@@ -59,16 +59,32 @@ func appDomainIsZone(cpHost string) bool {
 	return len(strings.Split(cpHost, ".")) < 3
 }
 
-// appsPortalHost is the PORTAL's public host — the world root itself, the
+// portalHost is the PORTAL's public host — the world root itself, the
 // member face the edge points at the same backend as the operator console.
 // Empty while the cp host IS the world root (the console hasn't moved off it:
 // its own vhost serves that name, no portal vhost exists).
-func appsPortalHost(cpHost string) string {
-	if root := WorldDomain(cpHost); root != cpHost {
+func (s *Spec) portalHost() string { return appsPortalHost(s.CpHost, s.WorldDomainOverride) }
+
+// appsPortalHost resolves the portal host from the CP host + the operator's
+// explicit world-domain override (EffectiveWorldDomain). Empty while the CP
+// host IS the world root.
+func appsPortalHost(cpHost, override string) string {
+	if root := config.EffectiveWorldDomain(cpHost, override); root != cpHost {
 		return root
 	}
 	return ""
 }
+
+// appWildcardHost resolves the apps' shared wildcard — the world domain's
+// wildcard under the same override.
+func appWildcardHost(cpHost, override string) string {
+	return "*." + config.EffectiveWorldDomain(cpHost, override)
+}
+
+// appWildcard is the wildcard the apps' shared cert covers — the world
+// domain's wildcard (one cert covers every app the world will ever expose;
+// its challenge name is unique inside the world).
+func (s *Spec) appWildcard() string { return appWildcardHost(s.CpHost, s.WorldDomainOverride) }
 
 // appFQDN is an app's public hostname: a CHILD of the world's own domain
 // (litellm.sandbox.freehold.technology, litellm.librem.freehold.technology) —
@@ -77,8 +93,8 @@ func appsPortalHost(cpHost string) string {
 // so the cookie reaches every child app AND the shared wildcard's challenge
 // name (_acme-challenge.<world-domain>) stays inside the world. Both ends of
 // the gate agree on this shape.
-func appFQDN(cpHost, name string) string {
-	return name + "." + WorldDomain(cpHost)
+func appFQDN(cpHost, override, name string) string {
+	return name + "." + config.EffectiveWorldDomain(cpHost, override)
 }
 
 // looksLikeChannelID reports whether g is already a dashed-uuid channel id
@@ -175,11 +191,6 @@ const appsCertSlot = "apps"
 // guard covers the overlap.
 const portalCertSlot = "portal"
 
-// appWildcardHost is the wildcard the apps' shared cert covers — the WORLD
-// DOMAIN's wildcard (one cert covers every app the world will ever expose;
-// its challenge name is unique inside the world).
-func appWildcardHost(cpHost string) string { return "*." + WorldDomain(cpHost) }
-
 // appRecordFQDN derives the row's hostname FROM ITS NAME at consume time —
 // rows written by an older shape re-derive to the current world-domain shape
 // the shared wildcard covers, instead of re-serving a name the wildcard's
@@ -187,7 +198,7 @@ func appWildcardHost(cpHost string) string { return "*." + WorldDomain(cpHost) }
 // informational; appDNSEnsure migrates the public record when the two
 // differ.
 func (s *Spec) appRecordFQDN(rec agenttools.AppRecord) string {
-	return appFQDN(s.CpHost, rec.Name)
+	return appFQDN(s.CpHost, s.WorldDomainOverride, rec.Name)
 }
 
 // appVhost builds one registry row's site block. Gated apps forward through
@@ -243,7 +254,7 @@ func certCovers(fullchain []byte, host string) bool {
 // race into a clean refusal).
 func (s *Spec) certPending() bool {
 	for _, sl := range []string{"relay", "cp", portalCertSlot} {
-		if sl == portalCertSlot && appsPortalHost(s.CpHost) == "" {
+		if sl == portalCertSlot && s.portalHost() == "" {
 			continue // no portal slot on this world
 		}
 		if _, err := os.Stat(filepath.Join(s.consoleStateRoot(), "world-secrets", "cert-pending-"+sl+".json")); err == nil {
@@ -255,7 +266,7 @@ func (s *Spec) certPending() bool {
 
 func (s *Spec) appsCertEnsure() (bool, error) {
 	slot := appsCertSlot
-	host := appWildcardHost(s.CpHost)
+	host := s.appWildcard()
 	if s.certPending() {
 		return false, fmt.Errorf("cert %s: a relay/cp/portal cert order is still pending (shared challenge name) — the next build re-ensures", slot)
 	}
@@ -383,6 +394,13 @@ func (s *Spec) pangolinEnsure(rec agenttools.AppRecord) error {
 	p := s.Pangolin
 	if p == nil || p.Org == "" || p.Site == "" || p.Domain == "" {
 		return fmt.Errorf("pangolin: the world coords lack the pangolin public path (org/site/domain)")
+	}
+	// The Pangolin base domain and the world's own domain MUST agree: the app
+	// A record (appDNSEnsure) points the effective-derived name at the VPS,
+	// and the resource must route that same name — a divergence is silent
+	// breakage (the visited name has no route on Pangolin's edge).
+	if base := config.EffectiveWorldDomain(s.CpHost, s.WorldDomainOverride); p.Domain != base {
+		return fmt.Errorf("pangolin: the recorded base domain %q does not match the world's own domain %q — update the pangolin coords to the override", p.Domain, base)
 	}
 	if rec.Visibility == agenttools.VisibilityLAN {
 		return nil
@@ -591,9 +609,20 @@ func (s *Spec) pangolinRemove(rec agenttools.AppRecord) error {
 		return err
 	}
 	want := rec.Name + "." + p.Domain
+	// The override may have moved the tree since the resource was created:
+	// remove BOTH shapes (the recorded base and the effective root), so a
+	// renamed world's old resource doesn't linger on the edge.
+	wants := []string{want}
+	if base := config.EffectiveWorldDomain(s.CpHost, s.WorldDomainOverride); base != p.Domain {
+		wants = append(wants, rec.Name+"."+base)
+	}
 	for _, r := range resources {
-		if r.FullDomain == want {
-			return cl.DeleteResource(context.Background(), r.ResourceID)
+		for _, w := range wants {
+			if r.FullDomain == w {
+				if err := cl.DeleteResource(context.Background(), r.ResourceID); err != nil {
+					return err
+				}
+			}
 		}
 	}
 	return nil // nothing on the path — already gone
@@ -641,7 +670,7 @@ func (s *Spec) renderCaddyfile() string {
 		// TLS-mismatch every app the DNS step already repointed.
 		wc, err := s.durableFullchain(s.K3sVmid, appsCertSlot)
 		if err == nil {
-			if _, ok := cert.ReuseIfValidBytes(wc, time.Now(), 0); ok && certCovers(wc, appWildcardHost(s.CpHost)) {
+			if _, ok := cert.ReuseIfValidBytes(wc, time.Now(), 0); ok && certCovers(wc, s.appWildcard()) {
 				for _, rec := range s.Apps.List() {
 					apps = append(apps, s.appVhost(rec))
 				}
@@ -663,7 +692,7 @@ func (s *Spec) renderCaddyfile() string {
 	// skipped, and the next build renders it (worldCert issued the cert by
 	// then). An ungated render would crash-loop the whole edge on the missing
 	// tls files.
-	portalHost := appsPortalHost(s.CpHost)
+	portalHost := s.portalHost()
 	if portalHost != "" {
 		if pc, err := s.durableFullchain(s.K3sVmid, portalCertSlot); err != nil {
 			portalHost = ""
@@ -796,7 +825,7 @@ func BuildExposeAppFn(spec *Spec, apps *agenttools.AppsStore, consoleSecret []by
 		if appDomainIsZone(spec.CpHost) {
 			return "", fmt.Errorf("expose: the cp host %q is the zone itself — its app wildcard would cover the whole shared zone (and collide with the cp cert's challenge)", spec.CpHost)
 		}
-		fqdn := appFQDN(spec.CpHost, args.Name)
+		fqdn := appFQDN(spec.CpHost, spec.WorldDomainOverride, args.Name)
 		if fqdn == spec.RelayHost || fqdn == spec.CpHost {
 			return "", fmt.Errorf("expose %q: %s is the edge's own host — pick another name", args.Name, fqdn)
 		}

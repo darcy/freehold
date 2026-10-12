@@ -351,7 +351,7 @@ var (
 // drive this loopback console. A missing Origin (curl, hand-rolled clients) is
 // allowed; a PRESENT non-loopback Origin is refused. The operator's configured
 // public domain (fronted by a proxy) is also allowed (C3.5).
-func checkOrigin(r *http.Request, publicOrigin *string) error {
+func checkOrigin(r *http.Request, publicOrigin *string, worldDomain string) error {
 	origin := r.Header.Get("Origin")
 	if origin == "" {
 		return nil
@@ -397,7 +397,7 @@ func checkOrigin(r *http.Request, publicOrigin *string) error {
 		// console accepts, EXACTLY (never its children: exposed apps are
 		// agent-built surfaces in a member's browser, and same-site subdomain
 		// requests would ride the SameSite=Strict operator session).
-		if host == config.WorldDomain(pub) {
+		if host == config.EffectiveWorldDomain(pub, worldDomain) {
 			return nil
 		}
 	}

@@ -112,6 +112,17 @@ func reloadDnsmasq(stateDir string) error {
 	if err := os.WriteFile("/etc/dnsmasq.d/freehold-names.conf", conf, 0o644); err != nil {
 		return err
 	}
+	// The addn-hosts deploys NEXT TO the conf: the state dir is 0700 (the
+	// store's ensurePrivateDir re-tightens it on every open) and dnsmasq must
+	// never depend on its perms — a failed addn load is silent and drops every
+	// explicit record from the resolver's answers.
+	addn, err := os.ReadFile(AddnHostsPath(stateDir))
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(DeployedAddnHostsPath, addn, 0o644); err != nil {
+		return err
+	}
 	if _, err := runShell("systemctl enable dnsmasq >/dev/null 2>&1; systemctl restart dnsmasq >/dev/null 2>&1 || killall -HUP dnsmasq >/dev/null 2>&1; true"); err != nil {
 		return err
 	}

@@ -411,17 +411,20 @@ func hostOf(origin string) string {
 	return rest
 }
 
-// memberDomain is the appliance's own WORLD DOMAIN (config.WorldDomain): the
-// per-world subtree of the zone — the CP host with a literal "cp."/"admin."
-// label stripped, else the CP host itself. Apps are CHILDREN of that domain
-// (litellm.sandbox.freehold.technology), so the member cookie and the
-// post-login targets scope to the world — the appliance's own boundary, not
-// the shared zone (one world's cookie never rides to another world's names).
+// memberDomain is the appliance's own WORLD DOMAIN: the per-world subtree of
+// the zone the world's names hang off. Resolved through EffectiveWorldDomain
+// against the console's public host — the operator's explicit override wins
+// when it is set (and the public host is actually its child), else the CP
+// host's literal "cp."/"admin." label strips, else the host itself. Apps are
+// CHILDREN of that domain (litellm.sandbox.freehold.technology), so the
+// member cookie and the post-login targets scope to the world — the
+// appliance's own boundary, not the shared zone (one world's cookie never
+// rides to another world's names).
 func (s *Server) memberDomain() string {
 	if s.PublicOrigin == nil || *s.PublicOrigin == "" {
 		return ""
 	}
-	return config.WorldDomain(hostOf(*s.PublicOrigin))
+	return config.EffectiveWorldDomain(hostOf(*s.PublicOrigin), s.WorldDomain)
 }
 
 // memberCookieDomain scopes the member cookie to the appliance's zone —
@@ -691,7 +694,7 @@ func (s *Server) memberPortalMint(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, statusFor(err), err.Error())
 		return
 	}
-	if err := checkOrigin(r, s.PublicOrigin); err != nil {
+	if err := checkOrigin(r, s.PublicOrigin, s.WorldDomain); err != nil {
 		writeErr(w, http.StatusForbidden, err.Error())
 		return
 	}
@@ -947,7 +950,7 @@ func (s *Server) membersList(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, statusFor(err), err.Error())
 		return
 	}
-	if err := checkOrigin(r, s.PublicOrigin); err != nil {
+	if err := checkOrigin(r, s.PublicOrigin, s.WorldDomain); err != nil {
 		writeErr(w, http.StatusForbidden, err.Error())
 		return
 	}
@@ -970,7 +973,7 @@ func (s *Server) memberInviteMint(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, statusFor(err), err.Error())
 		return
 	}
-	if err := checkOrigin(r, s.PublicOrigin); err != nil {
+	if err := checkOrigin(r, s.PublicOrigin, s.WorldDomain); err != nil {
 		writeErr(w, http.StatusForbidden, err.Error())
 		return
 	}
@@ -1021,7 +1024,7 @@ func (s *Server) memberInviteRevoke(w http.ResponseWriter, r *http.Request, hash
 		writeErr(w, statusFor(err), err.Error())
 		return
 	}
-	if err := checkOrigin(r, s.PublicOrigin); err != nil {
+	if err := checkOrigin(r, s.PublicOrigin, s.WorldDomain); err != nil {
 		writeErr(w, http.StatusForbidden, err.Error())
 		return
 	}
@@ -1046,7 +1049,7 @@ func (s *Server) memberDrop(w http.ResponseWriter, r *http.Request, name string)
 		writeErr(w, statusFor(err), err.Error())
 		return
 	}
-	if err := checkOrigin(r, s.PublicOrigin); err != nil {
+	if err := checkOrigin(r, s.PublicOrigin, s.WorldDomain); err != nil {
 		writeErr(w, http.StatusForbidden, err.Error())
 		return
 	}
