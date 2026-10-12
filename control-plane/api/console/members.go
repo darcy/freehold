@@ -19,8 +19,10 @@ package console
 import (
 	"crypto/sha256"
 	_ "embed"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/url"
 	"os"
@@ -32,6 +34,7 @@ import (
 
 	"freehold/contract/config"
 	"freehold/contract/relay"
+	"freehold/contract/wire"
 	"freehold/control-plane/api/agenttools"
 )
 
@@ -791,6 +794,33 @@ func (s *Server) forwardAuthVerify(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	// The MACHINE identity: a NIP-98-signed request (an agent verifying its
+	// own exposure — no session exists to carry). The signing key runs the
+	// SAME channel check a member session does — the roster is the ACL for
+	// humans and agents alike; an admin key passes outright, like the
+	// operator cookie.
+	if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Nostr ") {
+		pk, verr := s.gateNip98Pubkey(auth, r)
+		if verr != nil {
+			writeErr(w, http.StatusUnauthorized, "invalid Nostr authorization: "+verr.Error())
+			return
+		}
+		if s.Auth != nil && s.Auth.isAdmin(pk) {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		admitted, err := s.memberAdmits(MemberInfo{Pubkey: pk, Name: pk}, r)
+		if err != nil {
+			writeErr(w, http.StatusServiceUnavailable, "membership unavailable: "+err.Error())
+			return
+		}
+		if admitted {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		writeErr(w, http.StatusForbidden, "the signing key is not in this app's group")
+		return
+	}
 	// A denied BROWSER gets the login page: the redirect must be ABSOLUTE —
 	// Caddy copies this response (status + Location) back to the client, and
 	// the client is on the APP's origin, where no login page is served.
@@ -816,6 +846,69 @@ func ofStr(s *string) string {
 		return ""
 	}
 	return *s
+}
+
+// gateNip98Pubkey validates the machine path's Authorization: Nostr header
+// (NIP-98, kind 27235) against the request the GATE saw: signature, a
+// login-freshness window, and a `u` tag naming the app URL Caddy forwarded
+// (https:// + X-Original-Host + X-Original-Uri) — the replay binding that
+// keeps one app's header from opening another; a pathless signature is
+// accepted against "/" (the normalized form of the same URL). The method tag
+// is not checked: the forward_auth subrequest may not carry the original
+// method, and the URL is the binding that matters. The community check is
+// deliberately absent — the channel IS the app's ACL (the login's gate is
+// the community; the app gate is the channel), so the signing key is judged
+// exactly as a member session would be. "" with the reason on any failure.
+func (s *Server) gateNip98Pubkey(header string, r *http.Request) (string, error) {
+	raw, err := base64.StdEncoding.DecodeString(strings.TrimSpace(strings.TrimPrefix(header, "Nostr ")))
+	if err != nil {
+		return "", fmt.Errorf("not base64")
+	}
+	var ev struct {
+		Pubkey    string     `json:"pubkey"`
+		CreatedAt int64      `json:"created_at"`
+		Kind      uint32     `json:"kind"`
+		Tags      [][]string `json:"tags"`
+		Content   string     `json:"content"`
+		Sig       string     `json:"sig"`
+	}
+	if json.Unmarshal(raw, &ev) != nil {
+		return "", fmt.Errorf("not an event")
+	}
+	if ev.Kind != wire.KINDHTTPAuth {
+		return "", fmt.Errorf("not a kind-27235 auth event")
+	}
+	delta := nowSecs() - ev.CreatedAt
+	if delta < 0 {
+		delta = -delta
+	}
+	if delta > authFreshnessSec {
+		return "", fmt.Errorf("stale signature timestamp")
+	}
+	if _, err := wire.VerifyEvent(ev.Pubkey, ev.CreatedAt, ev.Kind, ev.Tags, ev.Content, ev.Sig); err != nil {
+		return "", fmt.Errorf("signature verification failed")
+	}
+	host := r.Header.Get("X-Original-Host")
+	if host == "" {
+		host = r.Header.Get("X-Forwarded-Host")
+	}
+	uri := r.Header.Get("X-Original-Uri")
+	if uri == "" {
+		uri = r.Header.Get("X-Forwarded-Uri")
+	}
+	if host == "" {
+		return "", fmt.Errorf("no forwarded host to bind the signature to")
+	}
+	want := "https://" + host + uri
+	for _, t := range ev.Tags {
+		if len(t) >= 2 && t[0] == "u" {
+			if t[1] == want || (uri == "/" && t[1] == "https://"+host) {
+				return ev.Pubkey, nil
+			}
+			return "", fmt.Errorf("the signature names a different URL")
+		}
+	}
+	return "", fmt.Errorf("the auth event carries no u tag")
 }
 
 // memberAdmits is the app-aware gate: WHICH app did this request hit, and
