@@ -81,11 +81,14 @@ func (s *Spec) agentToolsAudience() (string, error) {
 
 // relayDial is the relay DIAL URL for event publishes/queries: the relay's
 // own hostname on the LAN HTTP port when known (buzz keys the community to
-// the HOST header, and the relay client presents the dial URL's hostname — a
-// raw-IP dial presents the IP and reads "no community is configured for this
-// host"), the recorded RelayURL otherwise. The NIP-98 signature covers the
+// the HOST header, which contract/relay now takes from the CANONICAL auth
+// URL — so a raw-IP dial (below) still presents the community's own name —
+// the recorded RelayURL otherwise. The NIP-98 signature covers the same
 // CANONICAL public origin (RelayAuthURL) — the dial-LAN / sign-public split.
 func (s *Spec) relayDial() string {
+	if s.RelayIP != "" {
+		return "http://" + s.RelayIP + ":3000"
+	}
 	if d := config.RelayLanDial(s.RelayHost); d != "" {
 		return d
 	}
