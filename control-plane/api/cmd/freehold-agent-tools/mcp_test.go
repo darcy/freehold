@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -12,6 +13,8 @@ import (
 	"strings"
 	"testing"
 
+	"freehold/contract/crypto"
+	"freehold/contract/wire"
 	"freehold/control-plane/api/agenttools"
 )
 
@@ -231,6 +234,11 @@ func TestMergeToolsListPreservesEnvelope(t *testing.T) {
 			t.Fatalf("merged tools/list missing %q:\n%s", want, merged)
 		}
 	}
+	// gate_fetch is the bridge-LOCAL tool — every pod gets it (runnerless
+	// included); it is how an agent verifies an exposure it made.
+	if !nameSet["gate_fetch"] {
+		t.Fatalf("merged tools/list missing the bridge-local gate_fetch:\n%s", merged)
+	}
 	if nameSet["exec"] || nameSet["list"] {
 		t.Fatalf("no-runner pod must not advertise exec/list:\n%s", merged)
 	}
@@ -309,6 +317,79 @@ func TestMergeToolsListRunnerGated(t *testing.T) {
 		if !nameSet[want] {
 			t.Fatalf("runner pod tools/list missing %q:\n%s", want, merged)
 		}
+	}
+}
+
+// TestGateFetchSignsAsTheAgent pins the bridge-local tool: the request goes
+// out with an Authorization: Nostr header that verifies AS THIS AGENT'S KEY
+// for the requested URL (the console gate reconstructs the URL and compares
+// the u tag), and the app's own response (status + body) rides back into the
+// agent's context. A pathless URL is normalized to "/" before signing.
+func TestGateFetchSignsAsTheAgent(t *testing.T) {
+	var gotAuth string
+	var gotMethod string
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		gotMethod = r.Method
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("app-body"))
+	}))
+	defer ts.Close()
+
+	secret := [32]byte{}
+	secret[0] = 7
+	b := &mcpBridge{secret: secret, hc: ts.Client()}
+
+	input := `{"jsonrpc":"2.0","id":11,"method":"tools/call","params":{"name":"gate_fetch","arguments":{"url":"` + ts.URL + `"}}}` + "\n"
+	var out bytes.Buffer
+	if err := runBridge(strings.NewReader(input), &out, b); err != nil {
+		t.Fatalf("runBridge: %v", err)
+	}
+	if !strings.Contains(out.String(), "status: 200") || !strings.Contains(out.String(), "app-body") {
+		t.Fatalf("gate_fetch must return the app's own response: %s", out.String())
+	}
+	if gotMethod != http.MethodGet {
+		t.Fatalf("the fetch must be a GET, got %s", gotMethod)
+	}
+
+	// The header verifies as this agent's key over the URL the gate sees.
+	pk, err := crypto.PubkeyFromSecret(secret[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(gotAuth, "Nostr "))
+	if err != nil {
+		t.Fatalf("header is not the Nostr b64 shape: %v (%q)", err, gotAuth)
+	}
+	var ev struct {
+		Pubkey    string     `json:"pubkey"`
+		CreatedAt int64      `json:"created_at"`
+		Kind      uint32     `json:"kind"`
+		Tags      [][]string `json:"tags"`
+		Content   string     `json:"content"`
+		Sig       string     `json:"sig"`
+	}
+	if err := json.Unmarshal(raw, &ev); err != nil {
+		t.Fatal(err)
+	}
+	if ev.Kind != wire.KINDHTTPAuth {
+		t.Fatalf("not a kind-27235 event: %d", ev.Kind)
+	}
+	if ev.Pubkey != pk {
+		t.Fatalf("signed as %q, want the agent's key %q", ev.Pubkey, pk)
+	}
+	if _, err := wire.VerifyEvent(ev.Pubkey, ev.CreatedAt, ev.Kind, ev.Tags, ev.Content, ev.Sig); err != nil {
+		t.Fatalf("the header's signature does not verify: %v", err)
+	}
+	wantU := ts.URL + "/" // the pathless input normalized
+	found := false
+	for _, tg := range ev.Tags {
+		if len(tg) >= 2 && tg[0] == "u" && tg[1] == wantU {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("no u tag naming %q in %v", wantU, ev.Tags)
 	}
 }
 

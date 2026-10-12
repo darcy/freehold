@@ -641,7 +641,9 @@ resident-runner mode, the retired-name guard — is in `docs/AI.md` ("Runners an
     and must
     present it) and
     validated on `/auth/verify` (the gate exposed apps point Caddy
-    `forward_auth` at — `docs/NETWORK.md`, the launch surface). It also
+    `forward_auth` at — `docs/NETWORK.md`, the launch surface; it also takes
+    a per-request NIP-98 header as the agents' machine path — the signing
+    key runs the same channel check a member session does). It also
     carries the box-side CP CLI verbs (`provision`/`grant`/`adopt`/`add-secret`/`identity`),
     so the deploy and the rebuild engine ship + drive a Go console end to end. The console
     is the CP's own identity (0600, minted on the box at first serve — never
