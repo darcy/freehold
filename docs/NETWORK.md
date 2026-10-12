@@ -80,8 +80,8 @@ The gateway has TWO shapes, one per substrate:
     single-use device-link invites (the no-Nostr path); gated apps verify through
     `/auth/verify` (a browser gets the 302 to the login page, an API client the 401, a
     NIP-98-signed request the same channel check with no session — the machine path
-    agents' `gate_fetch` tool rides: the expose validated the requester is in the group,
-    so the exposing agent can verify its own work), and the operator session passes the
+    agents' `gate_fetch` tool rides: the expose validated the requester is in the
+    group, so the requester (the exposing agent, by default) can verify its own work), and the operator session passes the
     same gate. The **gate is the standing default
     posture**: every exposed app is member-gated unless the OPERATOR says otherwise for
     that specific app — gate-off (`auth: app`/`none`, `visibility: public`) is an
