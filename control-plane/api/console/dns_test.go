@@ -26,4 +26,11 @@ func TestRenderDnsmasqConf(t *testing.T) {
 	if strings.Contains(conf, "dnsmasq.addn-hosts") {
 		t.Fatalf("conf must not point at the state-dir addn (0700 dir):\n%s", conf)
 	}
+	// The deployed addn must live OUTSIDE /etc/dnsmasq.d/: Debian's
+	// CONFIG_DIR points dnsmasq's conf load (and the unit's checkconfig) at
+	// that directory unfiltered — a hosts-format file there is parsed as
+	// config ("bad option at line 1") and dnsmasq can never start.
+	if !strings.HasPrefix(DeployedAddnHostsPath, "/etc/freehold/") {
+		t.Fatalf("the deployed addn must live under /etc/freehold/, not the conf-dir: %q", DeployedAddnHostsPath)
+	}
 }
