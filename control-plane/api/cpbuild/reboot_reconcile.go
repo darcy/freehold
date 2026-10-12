@@ -20,15 +20,17 @@ import (
 // revives them — the CP's delete-then-apply reconcile is the designed
 // recovery, but before this hook it only ran on an explicit
 // build/world_build, and the CPA that could ask for one is itself one of the
-// dead pods. The console serve calls ReviveRebootedAgents once at boot: pods
-// whose last container termination is a NON-CLEAN exit recorded at/after the
-// k3s guest's current boot time are re-asserted through the same
+// dead pods. The console serve calls ReviveRebootedAgents at boot and keeps
+// a slow periodic re-check for the process lifetime: pods whose last
+// container termination is a NON-CLEAN exit recorded at/after the k3s
+// guest's current boot time are re-asserted through the same
 // create-is-idempotent path every reconcile uses; clean exits (0) and
 // terminations predating the boot stay untouched.
 
 const (
-	rebootProbeEvery = 30 * time.Second
-	rebootGiveUp     = 10 * time.Minute
+	rebootProbeEvery   = 30 * time.Second
+	rebootGiveUp       = 10 * time.Minute
+	rebootRecheckEvery = 5 * time.Minute
 )
 
 type podTermination struct {
@@ -183,11 +185,16 @@ func (s *Spec) reconcileRebootedAgents() error {
 	return nil
 }
 
-// ReviveRebootedAgents waits for the k3s substrate to answer (the CP and k3s
-// guests usually stop/start together, and k3s takes minutes to serve), then
-// runs one revive pass. Retries until the probe succeeds or the give-up
-// window passes — a k3s guest that is down for good is the operator's next
-// build's problem, not a boot hook's.
+// ReviveRebootedAgents probes fast through the boot window, then keeps a slow
+// re-check ticker for the process lifetime. The boot pass alone is not enough
+// for two reasons: a pass that succeeds while the API still serves the STALE
+// pre-reboot pod statuses (the window between the apiserver answering and the
+// fresh kubelet writing the terminations — seconds, and the 30s probe can
+// land in it) sees zero dead agents and would never re-check; and a k3s-guest
+// stop/start that does NOT take the CP down (no boot hook runs at all) needs
+// a later pass to notice. The pass is idempotent and cheap (one boot-time
+// read + one pod list), and a build holding the engine lock just skips a
+// tick.
 func (s *Spec) ReviveRebootedAgents() {
 	deadline := time.Now().Add(rebootGiveUp)
 	for {
@@ -197,12 +204,17 @@ func (s *Spec) ReviveRebootedAgents() {
 				continue
 			}
 			if time.Now().After(deadline) {
-				log.Printf("reboot-reconcile: gave up after %v (%v) — the next build/world_build reconciles the agents", rebootGiveUp, err)
-				return
+				log.Printf("reboot-reconcile: gave up after %v (%v) — the periodic re-check keeps trying", rebootGiveUp, err)
+				break
 			}
 			time.Sleep(rebootProbeEvery)
 			continue
 		}
-		return
+		break
+	}
+	for range time.Tick(rebootRecheckEvery) {
+		if err := s.reconcileRebootedAgents(); err != nil && !errors.Is(err, errEngineBusy) {
+			log.Printf("reboot-reconcile: periodic pass failed (%v)", err)
+		}
 	}
 }
