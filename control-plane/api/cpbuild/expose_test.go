@@ -204,7 +204,7 @@ func newTestExposer(t *testing.T, channels []relayChannel, members []memberEvent
 		StateDir: toolsetState, AgentRegistry: testRegistryForExpose(t),
 		RelayURL: srv.URL, RelayAuthURL: srv.URL, RelayHost: "relay.librem.example.test",
 		RelayIP: "10.78.0.11", CpHost: "cp.librem.example.test", CpIP: "10.78.0.12",
-		ProxyIP: "192.168.30.5", K3sVmid: 105, K3sIP: "10.78.0.13",
+		ProxyIP: "192.168.30.5", K3sVmid: 105, K3sIP: "10.78.0.13", GatewayLxc: 101,
 		RunnerTarget: "proxmox-box", Sec: nostrSec, Audience: nostrSecPK,
 		OwnerPub: strings.Repeat("a", 64),
 	}
@@ -278,6 +278,20 @@ func newTestExposer(t *testing.T, channels []relayChannel, members []memberEvent
 // console identity (the same shape the box hand-off produces).
 func (te *testExposer) sealPangolinCreds(t *testing.T, base, key string) {
 	t.Helper()
+	te.sealCred(t, "pangolin.json", "pangolin", map[string]string{
+		"PANGOLIN_BASE": base, "PANGOLIN_KEY": key,
+		"PANGOLIN_ENDPOINT": "http://192.168.30.100:3000",
+	})
+}
+
+// sealNewtIdentity writes a Newt identity the way a site creation does.
+func (te *testExposer) sealNewtIdentity(t *testing.T, id, secret string) {
+	t.Helper()
+	te.sealCred(t, "pangolin-newt.json", "pangolin-newt", map[string]string{"NEWT_ID": id, "NEWT_SECRET": secret})
+}
+
+func (te *testExposer) sealCred(t *testing.T, name, aad string, env map[string]string) {
+	t.Helper()
 	secret, err := te.spec.consoleEncSecretAt(te.spec.consoleStateRoot())
 	if err != nil {
 		t.Fatal(err)
@@ -287,10 +301,10 @@ func (te *testExposer) sealPangolinCreds(t *testing.T, base, key string) {
 		t.Fatal(err)
 	}
 	if err := cert.SaveCreds(
-		filepath.Join(te.spec.consoleStateRoot(), "world-secrets", "pangolin.json"),
-		"pangolin", map[string]string{"PANGOLIN_BASE": base, "PANGOLIN_KEY": key},
+		filepath.Join(te.spec.consoleStateRoot(), "world-secrets", name),
+		aad, env,
 		func(recipientPub, aad, plain []byte) ([]byte, error) { return crypto.Seal(recipientPub, aad, plain) },
-		pub, "pangolin",
+		pub, aad,
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -665,6 +679,7 @@ func TestExposeRidesThePangolinPath(t *testing.T) {
 		[]memberEvent{{channelID: family, pubkey: homelab, kind: wire.PutUser, ts: 100}})
 	te.spec.Pangolin = &config.PangolinCoords{Org: "freehold", Site: "librem", Domain: "librem.example.test", DNSIP: "203.0.113.9"}
 	te.sealPangolinCreds(t, pang.URL, "yi5o.thesecret")
+	te.sealNewtIdentity(t, "noo1", "thesek")
 
 	report, err := te.exposeFn(consoleSec)(agent.ExposeArgs{
 		Name: "yuvomi", Target: "10.78.0.13:31400", Group: "family", Requester: homelab,
@@ -733,6 +748,7 @@ func TestExposePangolinEmptyDNSKeepsTheProxyIP(t *testing.T) {
 		[]memberEvent{{channelID: family, pubkey: homelab, kind: wire.PutUser, ts: 100}})
 	te.spec.Pangolin = &config.PangolinCoords{Org: "freehold", Site: "librem", Domain: "librem.example.test"}
 	te.sealPangolinCreds(t, pang.URL, "yi5o.thesecret")
+	te.sealNewtIdentity(t, "noo1", "thesek")
 
 	if _, err := te.exposeFn(consoleSec)(agent.ExposeArgs{
 		Name: "yuvomi", Target: "10.78.0.13:31400", Group: "family", Requester: homelab,
@@ -994,5 +1010,238 @@ func TestCertStageDiscardsAStalePendingOrder(t *testing.T) {
 	}
 	if te.spec.certPending() {
 		t.Fatal("certPending must read false once the stale order is discarded")
+	}
+}
+
+// TestPangolinEnsureAssertsTheGatewayNewt pins the dial-out leg: the ensure
+// re-asserts the gateway's newt every run — the binary ensured (present or
+// downloaded on the host, pushed to the guest) and the unit + env rewritten
+// with the sealed identity and the instance endpoint, wrapped in pct for a
+// gateway guest.
+func TestPangolinEnsureAssertsTheGatewayNewt(t *testing.T) {
+	consoleSec := make([]byte, 32)
+	consoleSec[0] = 0x42
+	family := "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+	homelab := strings.Repeat("b", 64)
+
+	var calls []string
+	pang := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls = append(calls, r.Method+" "+r.URL.Path)
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/v1/org/freehold/sites":
+			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"sites":[{"siteId":3,"name":"librem","type":"newt"}]}}`))
+		case "/v1/org/freehold/domains":
+			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"domains":[{"domainId":"domain1","baseDomain":"librem.example.test","verified":true}]}}`))
+		case "/v1/org/freehold/resources":
+			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"resources":[]}}`))
+		case "/v1/org/freehold/resource":
+			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"resourceId":7,"name":"yuvomi","subdomain":"yuvomi","fullDomain":"yuvomi.librem.example.test","domainId":"domain1"}}`))
+		case "/v1/resource/7":
+			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":null}`))
+		case "/v1/resource/7/targets":
+			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"targets":[]}}`))
+		case "/v1/resource/7/target":
+			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"targetId":1}}`))
+		default:
+			w.WriteHeader(404)
+			_, _ = w.Write([]byte(`{"success":false,"error":true,"message":"no such route"}`))
+		}
+	}))
+	defer pang.Close()
+
+	te := newTestExposer(t, []relayChannel{{family, "family"}},
+		[]memberEvent{{channelID: family, pubkey: homelab, kind: wire.PutUser, ts: 100}})
+	te.spec.Pangolin = &config.PangolinCoords{Org: "freehold", Site: "librem", Domain: "librem.example.test"}
+	te.sealPangolinCreds(t, pang.URL, "yi5o.thesecret")
+	te.sealNewtIdentity(t, "noo1", "thesek")
+
+	if _, err := te.exposeFn(consoleSec)(agent.ExposeArgs{
+		Name: "yuvomi", Target: "10.78.0.13:31400", Group: "family", Requester: homelab,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(te.cmds, "\n")
+	if !strings.Contains(joined, "test -x /usr/local/bin/newt") {
+		t.Fatal("the binary must be ensured on the gateway: " + joined)
+	}
+	if !strings.Contains(joined, "pct exec 101 -- sh -c '") {
+		t.Fatal("the gateway script must ride pct for a guest gateway")
+	}
+	if !strings.Contains(joined, "NEWT_ID=noo1") || !strings.Contains(joined, "NEWT_SECRET=thesek") {
+		t.Fatal("the unit env must carry the sealed identity")
+	}
+	if !strings.Contains(joined, "NEWT_ENDPOINT=http://192.168.30.100:3000") {
+		t.Fatal("the unit env must carry the instance endpoint")
+	}
+	if !strings.Contains(joined, "systemctl restart newt") {
+		t.Fatal("the unit must restart so a re-minted secret lands live")
+	}
+	if !strings.Contains(joined, "chmod 755 /usr/local/bin/newt") {
+		t.Fatal("the pushed binary must get its exec bit (pct push copies 0644)")
+	}
+	if !strings.Contains(joined, `--id \${NEWT_ID}`) {
+		t.Fatal("the unit heredoc must escape the dollars — the shell writing the unit must not expand them")
+	}
+}
+
+// TestPangolinHostedGatewayAssertsBareNewt pins the api-vultr shape: the
+// same stage runs bare on the host (no pct wrapper).
+func TestPangolinHostedGatewayAssertsBareNewt(t *testing.T) {
+	consoleSec := make([]byte, 32)
+	consoleSec[0] = 0x42
+	family := "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+	homelab := strings.Repeat("b", 64)
+
+	pang := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/v1/org/freehold/sites":
+			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"sites":[{"siteId":3,"name":"librem","type":"newt"}]}}`))
+		case "/v1/org/freehold/domains":
+			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"domains":[{"domainId":"domain1","baseDomain":"librem.example.test","verified":true}]}}`))
+		case "/v1/org/freehold/resources":
+			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"resources":[{"resourceId":9,"name":"yuvomi","subdomain":"yuvomi","fullDomain":"yuvomi.librem.example.test","domainId":"domain1"}]}}`))
+		case "/v1/resource/9":
+			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":null}`))
+		case "/v1/resource/9/targets":
+			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"targets":[]}}`))
+		case "/v1/resource/9/target":
+			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"targetId":2}}`))
+		default:
+			w.WriteHeader(404)
+			_, _ = w.Write([]byte(`{"success":false,"error":true,"message":"no such route"}`))
+		}
+	}))
+	defer pang.Close()
+
+	te := newTestExposer(t, []relayChannel{{family, "family"}},
+		[]memberEvent{{channelID: family, pubkey: homelab, kind: wire.PutUser, ts: 100}})
+	te.spec.Pangolin = &config.PangolinCoords{Org: "freehold", Site: "librem", Domain: "librem.example.test"}
+	te.spec.HostedGateway = true
+	te.sealPangolinCreds(t, pang.URL, "k")
+	te.sealNewtIdentity(t, "noo1", "thesek")
+
+	if _, err := te.exposeFn(consoleSec)(agent.ExposeArgs{
+		Name: "yuvomi", Target: "10.78.0.13:31400", Group: "family", Requester: homelab,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(te.cmds, "\n")
+	if !strings.Contains(joined, "curl -fsSL -o /usr/local/bin/newt") {
+		t.Fatal("the hosted gateway downloads the binary straight onto the host: " + joined)
+	}
+	for _, cmd := range te.cmds {
+		if strings.Contains(cmd, "NEWT_ID=noo1") && strings.HasPrefix(cmd, "pct exec") {
+			t.Fatal("a hosted gateway must not wrap the newt stage in pct")
+		}
+	}
+}
+
+// TestPangolinAbsentNewtIdentityRefusesLoudly pins the recovery path: a site
+// minted outside this world's first ensure left no sealed identity — the
+// expose refuses with the exact remediation instead of half-installing.
+func TestPangolinAbsentNewtIdentityRefusesLoudly(t *testing.T) {
+	consoleSec := make([]byte, 32)
+	consoleSec[0] = 0x42
+	family := "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+	homelab := strings.Repeat("b", 64)
+
+	pang := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/v1/org/freehold/sites":
+			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"sites":[{"siteId":3,"name":"librem","type":"newt"}]}}`))
+		case "/v1/org/freehold/domains":
+			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"domains":[{"domainId":"domain1","baseDomain":"librem.example.test","verified":true}]}}`))
+		default:
+			w.WriteHeader(404)
+			_, _ = w.Write([]byte(`{"success":false,"error":true,"message":"no such route"}`))
+		}
+	}))
+	defer pang.Close()
+
+	te := newTestExposer(t, []relayChannel{{family, "family"}},
+		[]memberEvent{{channelID: family, pubkey: homelab, kind: wire.PutUser, ts: 100}})
+	te.spec.Pangolin = &config.PangolinCoords{Org: "freehold", Site: "librem", Domain: "librem.example.test"}
+	te.sealPangolinCreds(t, pang.URL, "k")
+
+	report, err := te.exposeFn(consoleSec)(agent.ExposeArgs{
+		Name: "yuvomi", Target: "10.78.0.13:31400", Group: "family", Requester: homelab,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(report, "re-creates it and seals the one-time secret") {
+		t.Fatalf("the refusal must name the recovery: %s", report)
+	}
+}
+
+// TestPangolinStageReAssertsPerExpose pins the per-run reset: a second
+// expose on the same Spec re-asserts the stage (the once-per-build flag
+// resets per run — a re-minted secret must land without a rebuild).
+func TestPangolinStageReAssertsPerExpose(t *testing.T) {
+	consoleSec := make([]byte, 32)
+	consoleSec[0] = 0x42
+	family := "3fa85f64-5717-4562-b3fc-2c963f66afa6"
+	homelab := strings.Repeat("b", 64)
+
+	pang := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/v1/org/freehold/sites":
+			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"sites":[{"siteId":3,"name":"librem","type":"newt"}]}}`))
+		case "/v1/org/freehold/domains":
+			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"domains":[{"domainId":"domain1","baseDomain":"librem.example.test","verified":true}]}}`))
+		case "/v1/org/freehold/resources":
+			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"resources":[{"resourceId":9,"name":"yuvomi","subdomain":"yuvomi","fullDomain":"yuvomi.librem.example.test","domainId":"domain1"}]}}`))
+		case "/v1/resource/9":
+			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":null}`))
+		case "/v1/resource/9/targets":
+			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"targets":[]}}`))
+		case "/v1/resource/9/target":
+			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"targetId":2}}`))
+		default:
+			w.WriteHeader(404)
+			_, _ = w.Write([]byte(`{"success":false,"error":true,"message":"no such route"}`))
+		}
+	}))
+	defer pang.Close()
+
+	te := newTestExposer(t, []relayChannel{{family, "family"}},
+		[]memberEvent{{channelID: family, pubkey: homelab, kind: wire.PutUser, ts: 100}})
+	te.spec.Pangolin = &config.PangolinCoords{Org: "freehold", Site: "librem", Domain: "librem.example.test"}
+	te.sealPangolinCreds(t, pang.URL, "k")
+	te.sealNewtIdentity(t, "noo1", "thesek")
+	fn := te.exposeFn(consoleSec)
+	args := agent.ExposeArgs{Name: "yuvomi", Target: "10.78.0.13:31400", Group: "family", Requester: homelab}
+
+	// The registry refuses a name clobber — the second call unexposes first
+	// (the same round-trip the recovery path names).
+	unexpose := BuildUnexposeAppFn(te.spec, te.apps)
+
+	count := func() int {
+		n := 0
+		for _, cmd := range te.cmds {
+			if strings.Contains(cmd, "systemctl restart newt") {
+				n++
+			}
+		}
+		return n
+	}
+	if _, err := fn(args); err != nil {
+		t.Fatal(err)
+	}
+	if count() != 1 {
+		t.Fatalf("the first expose asserts the stage once, got %d", count())
+	}
+	if _, err := unexpose("yuvomi"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fn(args); err != nil {
+		t.Fatal(err)
+	}
+	if count() != 2 {
+		t.Fatalf("the second expose must re-assert the stage (the reset), got %d", count())
 	}
 }

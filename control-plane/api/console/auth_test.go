@@ -128,9 +128,10 @@ func TestLoginRoundtrip(t *testing.T) {
 	_ = json.Unmarshal(rec.Body.Bytes(), &chal)
 
 	// 2. login with a valid NIP-98 event over the nonce.
-	pk, sig, tags := signLoginEvent(t, sec, chal.Nonce, time.Now().Unix())
+	ts := time.Now().Unix()
+	pk, sig, tags := signLoginEvent(t, sec, chal.Nonce, ts)
 	body, _ := json.Marshal(map[string]interface{}{
-		"nonce": chal.Nonce, "pubkey": pk, "created_at": time.Now().Unix(),
+		"nonce": chal.Nonce, "pubkey": pk, "created_at": ts,
 		"tags": tags, "sig": sig,
 	})
 	rec = httptest.NewRecorder()
@@ -200,9 +201,10 @@ func TestWorldServesPublicRelayURL(t *testing.T) {
 		Nonce string `json:"nonce"`
 	}
 	_ = json.Unmarshal(rec.Body.Bytes(), &chal)
-	pk, sig, tags := signLoginEvent(t, sec, chal.Nonce, time.Now().Unix())
+	ts := time.Now().Unix()
+	pk, sig, tags := signLoginEvent(t, sec, chal.Nonce, ts)
 	body, _ := json.Marshal(map[string]interface{}{
-		"nonce": chal.Nonce, "pubkey": pk, "created_at": time.Now().Unix(), "tags": tags, "sig": sig,
+		"nonce": chal.Nonce, "pubkey": pk, "created_at": ts, "tags": tags, "sig": sig,
 	})
 	rec = httptest.NewRecorder()
 	s.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/auth/login", bytes.NewReader(body)))
@@ -273,9 +275,10 @@ func TestLoginRejects(t *testing.T) {
 	}
 	_ = json.Unmarshal(rec.Body.Bytes(), &chal)
 	nonce = chal.Nonce
-	pk, sig, tags = signLoginEvent(t, other, nonce, time.Now().Unix())
+	ts2 := time.Now().Unix()
+	pk, sig, tags = signLoginEvent(t, other, nonce, ts2)
 	body, _ = json.Marshal(map[string]interface{}{
-		"nonce": nonce, "pubkey": otherPK, "created_at": time.Now().Unix(), "tags": tags, "sig": sig,
+		"nonce": nonce, "pubkey": otherPK, "created_at": ts2, "tags": tags, "sig": sig,
 	})
 	rec = httptest.NewRecorder()
 	s.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/auth/login", bytes.NewReader(body)))
@@ -346,9 +349,10 @@ func TestMemberLoginAndJobRedaction(t *testing.T) {
 			Nonce string `json:"nonce"`
 		}
 		_ = json.Unmarshal(rec.Body.Bytes(), &chal)
-		pk, sig, tags := signLoginEvent(t, sec, chal.Nonce, time.Now().Unix())
+		ts3 := time.Now().Unix()
+		pk, sig, tags := signLoginEvent(t, sec, chal.Nonce, ts3)
 		body, _ := json.Marshal(map[string]interface{}{
-			"nonce": chal.Nonce, "pubkey": pk, "created_at": time.Now().Unix(), "tags": tags, "sig": sig,
+			"nonce": chal.Nonce, "pubkey": pk, "created_at": ts3, "tags": tags, "sig": sig,
 		})
 		rec = httptest.NewRecorder()
 		s.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/auth/login", bytes.NewReader(body)))
@@ -437,9 +441,10 @@ func TestPortalSingleUse(t *testing.T) {
 		Nonce string `json:"nonce"`
 	}
 	_ = json.Unmarshal(rec.Body.Bytes(), &chal)
-	pk, sig, tags := signLoginEvent(t, sec, chal.Nonce, time.Now().Unix())
+	ts := time.Now().Unix()
+	pk, sig, tags := signLoginEvent(t, sec, chal.Nonce, ts)
 	body, _ := json.Marshal(map[string]interface{}{
-		"nonce": chal.Nonce, "pubkey": pk, "created_at": time.Now().Unix(), "tags": tags, "sig": sig,
+		"nonce": chal.Nonce, "pubkey": pk, "created_at": ts, "tags": tags, "sig": sig,
 	})
 	rec = httptest.NewRecorder()
 	s.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/auth/login", bytes.NewReader(body)))
@@ -520,9 +525,10 @@ func TestOverviewListsRunners(t *testing.T) {
 		Nonce string `json:"nonce"`
 	}
 	_ = json.Unmarshal(rec.Body.Bytes(), &chal)
-	pk, sig, tags := signLoginEvent(t, sec, chal.Nonce, time.Now().Unix())
+	ts := time.Now().Unix()
+	pk, sig, tags := signLoginEvent(t, sec, chal.Nonce, ts)
 	body, _ := json.Marshal(map[string]interface{}{
-		"nonce": chal.Nonce, "pubkey": pk, "created_at": time.Now().Unix(), "tags": tags, "sig": sig,
+		"nonce": chal.Nonce, "pubkey": pk, "created_at": ts, "tags": tags, "sig": sig,
 	})
 	rec = httptest.NewRecorder()
 	s.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/auth/login", bytes.NewReader(body)))
@@ -590,9 +596,10 @@ func TestWorldBuildGating(t *testing.T) {
 		Nonce string `json:"nonce"`
 	}
 	_ = json.Unmarshal(rec.Body.Bytes(), &chal)
-	pk, sig, tags := signLoginEvent(t, sec, chal.Nonce, time.Now().Unix())
+	ts := time.Now().Unix()
+	pk, sig, tags := signLoginEvent(t, sec, chal.Nonce, ts)
 	body, _ := json.Marshal(map[string]interface{}{
-		"nonce": chal.Nonce, "pubkey": pk, "created_at": time.Now().Unix(), "tags": tags, "sig": sig,
+		"nonce": chal.Nonce, "pubkey": pk, "created_at": ts, "tags": tags, "sig": sig,
 	})
 	rec = httptest.NewRecorder()
 	s.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/api/auth/login", bytes.NewReader(body)))
