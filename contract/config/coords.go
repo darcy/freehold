@@ -30,14 +30,15 @@ func WorldDomain(cpHost string) string {
 // operator override. WorldDomain's guard refuses to strip a prefixed label
 // when the strip would land on a zone apex (cp.example.com — a world must
 // not silently claim a zone it may not own). An operator WHO OWNS the zone
-// and wants the world AT the apex sets the override: when it is set and the
-// CP host is actually its child, the override IS the world root — the zone
-// apex — and every world name (admin., the portal at the root, <name>.)
-// hangs off it. Anything else (empty, or an override the CP host isn't a
-// child of) falls back to the derived shape, so a typo can never move the
-// tree onto names this world doesn't serve.
+// and wants the world AT the apex sets the override: when it is a
+// registrable domain (≥2 labels) and the CP host is actually its child, the
+// override IS the world root — the zone apex — and every world name
+// (admin., the portal at the root, <name>.) hangs off it. Anything else
+// (empty, too short, or an override the CP host isn't a child of) falls
+// back to the derived shape, so a typo can never move the tree onto names
+// this world doesn't serve.
 func EffectiveWorldDomain(cpHost, override string) string {
-	if override != "" && strings.HasSuffix(cpHost, "."+override) {
+	if override != "" && len(strings.Split(override, ".")) >= 2 && strings.HasSuffix(cpHost, "."+override) {
 		return override
 	}
 	return WorldDomain(cpHost)

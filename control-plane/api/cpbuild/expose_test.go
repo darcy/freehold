@@ -74,6 +74,9 @@ func TestAppFQDNPinsDerivation(t *testing.T) {
 	if got := config.EffectiveWorldDomain("admin.casaquerencia.net", "other.example"); got != "admin.casaquerencia.net" {
 		t.Fatalf("EffectiveWorldDomain (override the CP host is not a child of, ignored): %q", got)
 	}
+	if got := config.EffectiveWorldDomain("admin.casaquerencia.net", "net"); got != "admin.casaquerencia.net" {
+		t.Fatalf("EffectiveWorldDomain (a TLD is not a registrable domain, ignored): %q", got)
+	}
 	if got := appFQDN("admin.casaquerencia.net", "casaquerencia.net", "sparkdash"); got != "sparkdash.casaquerencia.net" {
 		t.Fatalf("appFQDN (apex override): %q", got)
 	}
