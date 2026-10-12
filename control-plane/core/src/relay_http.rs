@@ -550,7 +550,7 @@ pub fn query_events_auth(
         nip98_auth(auth_secret, "POST", &canonical, now_secs()).map_err(|e| e.to_string())?;
     let mut resp = agent()
         .post(&url)
-        .header("Host", bare_host(&url))
+        .header("Host", bare_host(&canonical))
         .header("Authorization", &headers)
         .header("Content-Type", "application/json")
         .send(filters.to_string())
@@ -590,7 +590,7 @@ pub fn publish_event_json_auth(
         nip98_auth(auth_secret, "POST", &canonical, now_secs()).map_err(|e| e.to_string())?;
     let mut resp = agent()
         .post(&url)
-        .header("Host", bare_host(&url))
+        .header("Host", bare_host(&canonical))
         .header("Authorization", &auth)
         .header("Content-Type", "application/json")
         .send(event_json.to_string())
