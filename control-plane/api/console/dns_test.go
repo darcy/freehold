@@ -23,7 +23,7 @@ func TestRenderDnsmasqConf(t *testing.T) {
 			t.Fatalf("RenderDnsmasqConf missing %q:\n%s", want, conf)
 		}
 	}
-	if strings.Contains(conf, "dnsmasq.addn-hosts") {
+	if strings.Contains(conf, AddnHostsPath("/srv/data/cp/control-plane")) {
 		t.Fatalf("conf must not point at the state-dir addn (0700 dir):\n%s", conf)
 	}
 	// The deployed addn must live OUTSIDE /etc/dnsmasq.d/: Debian's
