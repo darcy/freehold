@@ -475,25 +475,10 @@ func (s *Spec) ensurePangolinTunnel() error {
 	if _, err := s.runOut("pct exec "+fmt.Sprint(s.CpLxc)+" -- test -f /srv/data/cp/pangolin-tunnel.key", 30); err != nil {
 		return fmt.Errorf("the tunnel key is not on the CP guest (/srv/data/cp/pangolin-tunnel.key) — run `freehold pangolin` (it mints the key and authorizes it on the VPS)")
 	}
-	unit := fmt.Sprintf(`set -e
-cat > /etc/systemd/system/pangolin-tunnel.service <<UNIT
-[Unit]
-Description=Pangolin integration tunnel (freehold public path)
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-ExecStart=/usr/bin/ssh -N -o ServerAliveInterval=30 -o ExitOnForwardFailure=yes -o StrictHostKeyChecking=accept-new -i /srv/data/cp/pangolin-tunnel.key -L 127.0.0.1:3003:127.0.0.1:3003 root@%s
-Restart=always
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-UNIT
-systemctl daemon-reload
-systemctl enable pangolin-tunnel >/dev/null 2>&1
-systemctl restart pangolin-tunnel
-`, vps)
+	// The unit lives ON THE CP GUEST — the stage's execs run on the world
+	// host (the runner's target), so the script rides pct exec (the
+	// deployAgentTools pattern). Single quotes only OUTSIDE the script.
+	unit := fmt.Sprintf("pct exec %d -- sh -c 'set -e\ncat > /etc/systemd/system/pangolin-tunnel.service <<UNIT\n[Unit]\nDescription=Pangolin integration tunnel (freehold public path)\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nExecStart=/usr/bin/ssh -N -o ServerAliveInterval=30 -o ExitOnForwardFailure=yes -o StrictHostKeyChecking=accept-new -i /srv/data/cp/pangolin-tunnel.key -L 127.0.0.1:3003:127.0.0.1:3003 root@%s\nRestart=always\nRestartSec=5\n\n[Install]\nWantedBy=multi-user.target\nUNIT\nsystemctl daemon-reload\nsystemctl enable pangolin-tunnel >/dev/null 2>&1\nsystemctl restart pangolin-tunnel'", s.CpLxc, vps)
 	return s.run(unit, 60)
 }
 

@@ -194,15 +194,16 @@ func run(cmd *cobra.Command, args []string) error {
   ╰────────────────────────────────────────────────────────╯
 
   instance:    %s (%s, %s)
-  integration: the CP's loopback through the door-key tunnel
+  integration: the CP's loopback through the tunnel (the CP-minted key)
   edge host:   pangolin.%s
   base domain: %s
-  root key:    sealed on the CP (secret "pangolin") — printed once at mint above
+  root key:    %s
+               (sealed on the CP as secret "pangolin"; stored 0600 on the VPS)
 
   Now run `+"`freehold build`"+`: the coords carry the pangolin path and the build
   tail asserts the tunnels (the CP's forward + the gateway's Newt). Exposed
   apps then point at the VPS instead of at home.
-`, host.ID, region, plan, worldDomain, worldDomain)
+`, host.ID, region, plan, worldDomain, worldDomain, keyLine)
 	return nil
 }
 
