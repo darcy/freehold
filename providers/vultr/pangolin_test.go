@@ -142,9 +142,13 @@ func TestPangolinInstallScriptParsesClean(t *testing.T) {
 	if err != nil {
 		t.Fatalf("the rendered payload must parse as shell: %v: %.200s", err, out)
 	}
-	// The key parse must produce BARE values: the JSON fragment's field name
-	// and the data envelope never survive the cut+tr chain.
-	if !strings.Contains(script, `| cut -d: -f2 | tr -dc "a-z0-9"`) {
-		t.Fatal("the key parse must strip to the value after the colon")
+	// The key parse happens GO-SIDE: the script prints the mint response
+	// RAW (the shell never parses JSON — the envelope's field names
+	// survive any shell chain).
+	if !strings.Contains(script, "PANGOLIN_KEY_JSON=$KEY_JSON") {
+		t.Fatal("the script must print the raw mint response for the Go-side parse")
+	}
+	if strings.Contains(script, "cut -d:") {
+		t.Fatal("the shell must not parse JSON at all")
 	}
 }
