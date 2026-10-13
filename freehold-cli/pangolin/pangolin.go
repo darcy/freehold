@@ -31,9 +31,42 @@ import (
 	"freehold/platform/provisioning/box"
 	cert "freehold/platform/services/certificates/letsencrypt"
 	dnsman "freehold/platform/services/externaldns/cloudflare"
+	"freehold/platform/services/pangolin"
 	"freehold/providers/proxmox"
 	"freehold/providers/vultr"
 )
+
+// pangolinActions = the root key's action set: exactly what the expose
+// verbs' ensure legs call (the org create rides the bootstrap; the rest =
+// the site/resource/target lifecycle + the domains read + the tokens).
+var pangolinActions = []string{
+	"createOrg", "createSite", "deleteSite", "createResource", "deleteResource",
+	"createTarget", "deleteTarget", "getSite", "getResource", "listSites",
+	"listResources", "listTargets", "getDomain", "listOrgDomains",
+	"generateAccessToken", "updateResource",
+}
+
+// execOnVPS runs one command on the VPS over the door SSH (the VPS was born
+// with the door's line).
+func execOnVPS(vpsIP, cmd string) (string, error) {
+	pem, err := box.DoorKeyPEM()
+	if err != nil {
+		return "", fmt.Errorf("door key: %w", err)
+	}
+	keyPath, cleanup, err := proxmox.WriteTempKey(pem)
+	if err != nil {
+		return "", err
+	}
+	defer cleanup()
+	out, err := proxmox.SSHExec("root@"+vpsIP, keyPath)(cmd, 60)
+	if err != nil {
+		return "", err
+	}
+	if out.ExitCode != nil && *out.ExitCode != 0 {
+		return "", fmt.Errorf("%.200s", out.Stderr)
+	}
+	return out.Stdout, nil
+}
 
 // emailRe bounds the ACME contact before it rides the install script (an
 // email with a quote or a shell metacharacter would break out of the
@@ -103,8 +136,9 @@ func run(cmd *cobra.Command, args []string) error {
 	if keyLine == "" {
 		return fmt.Errorf("the pangolin install printed no root key — the instance %s is LIVE AND BILLING; recover the key from /srv/pangolin/root-key.env on it (the door key reaches it)", host.ID)
 	}
-	if err := verifyOrgJSON(*captured); err != nil {
-		return err
+	keyID, _, ok := strings.Cut(keyLine, ".")
+	if !ok {
+		return fmt.Errorf("the pangolin root key is not apiKeyId.secret: %.24s…", keyLine)
 	}
 	// The APIs bind loopback on the VPS: the CP's client dials the SSH
 	// forward's loopback; Newt dials TLS via the edge's own hostname.
@@ -129,10 +163,10 @@ func run(cmd *cobra.Command, args []string) error {
 	// transits — the door private key never leaves the box), its pub line
 	// authorized on the VPS over the door SSH (the VPS was born with the
 	// door's line).
-	if err := mintTunnelKey(cfg); err != nil {
+	if err := mintTunnelKey(cfg, cfgPath); err != nil {
 		return fmt.Errorf("mint the tunnel key on the CP guest: %w", err)
 	}
-	pubLine, err := readTunnelPub(cfg)
+	pubLine, err := readTunnelPub(cfg, cfgPath)
 	if err != nil {
 		return err
 	}
@@ -143,9 +177,27 @@ func run(cmd *cobra.Command, args []string) error {
 	// Seal the integration credential to the console identity and store it
 	// CP-side (the same path the build's DNS-cred hand-off uses): the world's
 	// CP opens it to drive the expose verbs.
+	// The key file ships back to the VPS (root-only) — the next run
+	// re-prints instead of re-minting.
+	if _, err := execOnVPS(host.IP, fmt.Sprintf(
+		`printf "%%s\n" %s > /srv/pangolin/root-key.env && chmod 600 /srv/pangolin/root-key.env`, keyLine)); err != nil {
+		return fmt.Errorf("persist the root key on the VPS: %w", err)
+	}
+	// The world's org + the root key's action grant: the GO side (the
+	// pangolin client + the console session) — the shell never parses JSON.
+	pcl := &pangolin.Client{Base: "http://" + host.IP + ":3003", Key: keyLine}
+	if err := pcl.CreateOrg(context.Background(), cfg.Pangolin.Org, cfg.Pangolin.Org, "100.90.0.0/16", "100.91.0.0/24"); err != nil {
+		if !strings.Contains(err.Error(), "exist") && !strings.Contains(err.Error(), "409") {
+			return fmt.Errorf("the pangolin org create: %w", err)
+		}
+		fmt.Printf("  · the org %s already exists on the instance\n", cfg.Pangolin.Org)
+	}
 	client, err := consoleLogin(cfg)
 	if err != nil {
 		return err
+	}
+	if _, err := client.SetAPIKeyActions(keyID, pangolinActions); err != nil {
+		return fmt.Errorf("grant the root key its actions: %w", err)
 	}
 	pub, err := consoleEncPubkey(client)
 	if err != nil {
@@ -302,15 +354,15 @@ const tunnelKeyPath = "/srv/data/cp/pangolin-tunnel.key"
 
 // mintTunnelKey runs ssh-keygen ON the CP guest (through the world host's
 // runner): the private half is born there and never transits. Idempotent.
-func mintTunnelKey(cfg *config.Config) error {
+func mintTunnelKey(cfg *config.Config, cfgPath string) error {
 	vmid := cpVmid(cfg)
-	out, err := freeholdExec("exec", "proxmox-box", fmt.Sprintf(
+	out, err := freeholdExec(cfgPath, "exec", "proxmox-box", fmt.Sprintf(
 		"pct exec %d -- sh -c '[ -f %s ] || ssh-keygen -t ed25519 -N \"\" -f %s -C pangolin-tunnel >/dev/null && chmod 600 %s && test -f %s'",
 		vmid, tunnelKeyPath, tunnelKeyPath, tunnelKeyPath, tunnelKeyPath))
 	if err != nil || !strings.Contains(out, "tunnel.key") && !strings.Contains(out, "pangolin-tunnel") {
 		// ssh-keygen is quiet on success here; the file test's exit carries
 		// the truth — re-check.
-		out2, err2 := freeholdExec("exec", "proxmox-box", fmt.Sprintf(
+		out2, err2 := freeholdExec(cfgPath, "exec", "proxmox-box", fmt.Sprintf(
 			"pct exec %d -- test -f %s && echo key-present", vmid, tunnelKeyPath))
 		if err2 != nil || !strings.Contains(out2, "key-present") {
 			return fmt.Errorf("the key did not land: %.160s", out)
@@ -320,8 +372,8 @@ func mintTunnelKey(cfg *config.Config) error {
 }
 
 // readTunnelPub reads the minted key's PUBLIC line (non-secret; argv-safe).
-func readTunnelPub(cfg *config.Config) (string, error) {
-	out, err := freeholdExec("exec", "proxmox-box", fmt.Sprintf(
+func readTunnelPub(cfg *config.Config, cfgPath string) (string, error) {
+	out, err := freeholdExec(cfgPath, "exec", "proxmox-box", fmt.Sprintf(
 		"pct exec %d -- cat %s.pub", cpVmid(cfg), tunnelKeyPath))
 	if err != nil {
 		return "", err
@@ -365,9 +417,12 @@ func cpVmid(cfg *config.Config) int {
 	return 0
 }
 
-// freeholdExec runs the freehold CLI's own exec verb in-process.
-func freeholdExec(args ...string) (string, error) {
-	cmd := exec.Command("freehold", args...)
+// freeholdExec runs the freehold CLI's own exec verb in-process, carrying
+// this verb's --config so the profile context survives the shell-out.
+func freeholdExec(cfgPath string, args ...string) (string, error) {
+	full := append([]string{"exec"}, args...)
+	full = append(full, "--config", cfgPath)
+	cmd := exec.Command("freehold", full...)
 	out, err := cmd.CombinedOutput()
 	return string(out), err
 }

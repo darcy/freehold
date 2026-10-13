@@ -83,10 +83,6 @@ curl -s -X PUT http://localhost:3000/api/v1/auth/signup -H "Content-Type: applic
 curl -s -c /srv/pangolin/admin.cookies -X POST http://localhost:3000/api/v1/auth/login -H "Content-Type: application/json" -H "X-CSRF-Token: x-csrf-protection" -d "{\"email\":\"$ADMIN_EMAIL\",\"password\":\"$ADMIN_PW\"}" >/dev/null
 KEY_JSON=$(curl -s -b /srv/pangolin/admin.cookies -X PUT http://localhost:3000/api/v1/api-key -H "Content-Type: application/json" -H "X-CSRF-Token: x-csrf-protection" -d "{\"name\":\"freehold\"}")
 echo "PANGOLIN_KEY_JSON=$KEY_JSON"
-ORG_JSON=$(curl -s -X PUT http://localhost:3003/v1/org -H "Authorization: Bearer $(cat /srv/pangolin/root-key.env 2>/dev/null)" -H "Content-Type: application/json" -d "{\"orgId\":\"freehold\",\"name\":\"freehold\",\"subnet\":\"100.90.0.0/16\",\"utilitySubnet\":\"100.91.0.0/24\"}")
-echo "PANGOLIN_ORG_JSON=$ORG_JSON"
-AKEYID=$(echo "$KEY_JSON" | grep -o "apiKeyId\":\"[a-z0-9]*" | tr -dc "a-z0-9")
-curl -s -b /srv/pangolin/admin.cookies -X POST http://localhost:3000/api/v1/api-key/$AKEYID/actions -H "Content-Type: application/json" -H "X-CSRF-Token: x-csrf-protection" -d "{\"actionIds\":[\"createOrg\",\"createSite\",\"deleteSite\",\"createResource\",\"deleteResource\",\"createTarget\",\"deleteTarget\",\"getSite\",\"getResource\",\"listSites\",\"listResources\",\"listTargets\",\"getDomain\",\"listOrgDomains\",\"generateAccessToken\",\"updateResource\"]}" >/dev/null
 rm -f /srv/pangolin/admin.cookies
 echo pangolin-install-ok
 `, compose, conf, traefik, dynamic, email)
