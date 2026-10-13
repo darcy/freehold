@@ -299,13 +299,13 @@ const tunnelKeyPath = "/srv/data/cp/pangolin-tunnel.key"
 // runner): the private half is born there and never transits. Idempotent.
 func mintTunnelKey(cfg *config.Config, cfgPath string) error {
 	vmid := cpVmid(cfg)
-	out, err := freeholdExec(cfgPath, "proxmox-box", fmt.Sprintf(
+	out, err := freeholdExec(cfgPath, cfg.Runner.Target, fmt.Sprintf(
 		"pct exec %d -- sh -c '[ -f %s ] || ssh-keygen -t ed25519 -N \"\" -f %s -C pangolin-tunnel >/dev/null && chmod 600 %s && test -f %s'",
 		vmid, tunnelKeyPath, tunnelKeyPath, tunnelKeyPath, tunnelKeyPath))
 	if err != nil || !strings.Contains(out, "tunnel.key") && !strings.Contains(out, "pangolin-tunnel") {
 		// ssh-keygen is quiet on success here; the file test's exit carries
 		// the truth — re-check.
-		out2, err2 := freeholdExec(cfgPath, "proxmox-box", fmt.Sprintf(
+		out2, err2 := freeholdExec(cfgPath, cfg.Runner.Target, fmt.Sprintf(
 			"pct exec %d -- test -f %s && echo key-present", vmid, tunnelKeyPath))
 		if err2 != nil || !strings.Contains(out2, "key-present") {
 			return fmt.Errorf("the key did not land: %.160s", out)
@@ -316,7 +316,7 @@ func mintTunnelKey(cfg *config.Config, cfgPath string) error {
 
 // readTunnelPub reads the minted key's PUBLIC line (non-secret; argv-safe).
 func readTunnelPub(cfg *config.Config, cfgPath string) (string, error) {
-	out, err := freeholdExec(cfgPath, "proxmox-box", fmt.Sprintf(
+	out, err := freeholdExec(cfgPath, cfg.Runner.Target, fmt.Sprintf(
 		"pct exec %d -- cat %s.pub", cpVmid(cfg), tunnelKeyPath))
 	if err != nil {
 		return "", err
@@ -360,11 +360,11 @@ func cpVmid(cfg *config.Config) int {
 	return 0
 }
 
-// freeholdExec runs the freehold CLI's own exec verb in-process (the
-// target + the command ride args), carrying this verb's --config so the
-// profile context survives the shell-out.
-func freeholdExec(cfgPath string, args ...string) (string, error) {
-	full := append([]string{"exec"}, args...)
+// freeholdExec runs the freehold CLI's own exec verb in-process, carrying
+// this verb's --config so the profile context survives the shell-out.
+// target = the profile's runner target (the world host's runner).
+func freeholdExec(cfgPath, target string, args ...string) (string, error) {
+	full := append([]string{"exec", target}, args...)
 	full = append(full, "--config", cfgPath)
 	cmd := exec.Command("freehold", full...)
 	out, err := cmd.CombinedOutput()
