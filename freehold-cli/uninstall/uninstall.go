@@ -206,6 +206,9 @@ func destroyHostViaProvider(cfg *config.Config, yes, destroy bool) (bool, error)
 // bill: nothing on it is durable plane; the edge's config dies with it and
 // a re-provision re-mints).
 func destroyPangolinHost(cfg *config.Config, yes, destroy bool) error {
+	if cfg.PangolinHost == nil || cfg.PangolinHost.ID == "" {
+		return nil // no pangolin VPS on record — nothing to destroy
+	}
 	p := cfg.PangolinHost
 	prov, err := registry.ByName(p.Provider)
 	if err != nil {
