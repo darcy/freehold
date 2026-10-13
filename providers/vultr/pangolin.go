@@ -47,7 +47,7 @@ if [ -f /srv/pangolin/root-key.env ] && docker ps --format "{{.Names}}" 2>/dev/n
   exit 0
 fi
 apt-get update -qq >/dev/null 2>&1 || true
-apt-get install -y -qq docker.io openssl ca-certificates >/dev/null 2>&1
+apt-get install -y -qq docker.io docker-compose-plugin openssl ca-certificates >/dev/null 2>&1 || apt-get install -y -qq docker.io docker-compose openssl ca-certificates >/dev/null 2>&1
 systemctl enable --now docker >/dev/null 2>&1 || true
 mkdir -p /srv/pangolin/config/traefik /srv/pangolin/config/letsencrypt
 if [ ! -f /srv/pangolin/config/config.yml ]; then
@@ -60,7 +60,7 @@ cat > /srv/pangolin/config/traefik/traefik_config.yml <<TRK
 cat > /srv/pangolin/config/traefik/dynamic_config.yml <<DYN
 %sDYN
 fi
-cd /srv/pangolin && docker compose up -d
+cd /srv/pangolin && docker compose up -d 2>/dev/null || docker-compose up -d
 for i in $(seq 1 60); do
   curl -sf http://localhost:3000/api/v1/ >/dev/null 2>&1 && break
   sleep 2
