@@ -11,8 +11,8 @@ package pangolin
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -103,6 +103,9 @@ func run(cmd *cobra.Command, args []string) error {
 	if keyLine == "" {
 		return fmt.Errorf("the pangolin install printed no root key — the instance %s is LIVE AND BILLING; recover the key from /srv/pangolin/root-key.env on it (the door key reaches it)", host.ID)
 	}
+	if err := verifyOrgJSON(*captured); err != nil {
+		return err
+	}
 	// The APIs bind loopback on the VPS: the CP's client dials the SSH
 	// forward's loopback; Newt dials TLS via the edge's own hostname.
 	endpoint := "http://127.0.0.1:3003"
@@ -122,16 +125,19 @@ func run(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("record the pangolin host: %w", err)
 	}
 
-	// Ship the door key to the CP guest — the tunnel's forward dials the VPS
-	// with it (the VPS was born with the door's line authorized). The CP
-	// already holds the cp-verb key (the world host's SSH): the marginal
-	// surface is the VPS alone.
-	doorPEM, err := box.DoorKeyPEM()
-	if err != nil {
-		return fmt.Errorf("door key: %w", err)
+	// The tunnel's key: minted ON the CP guest (the private half never
+	// transits — the door private key never leaves the box), its pub line
+	// authorized on the VPS over the door SSH (the VPS was born with the
+	// door's line).
+	if err := mintTunnelKey(cfg); err != nil {
+		return fmt.Errorf("mint the tunnel key on the CP guest: %w", err)
 	}
-	if err := shipDoorKeyToCP(cfg, doorPEM); err != nil {
-		return fmt.Errorf("ship the door key to the CP guest (the tunnel's forward needs it): %w", err)
+	pubLine, err := readTunnelPub(cfg)
+	if err != nil {
+		return err
+	}
+	if err := authorizeOnVPS(host.IP, pubLine); err != nil {
+		return fmt.Errorf("authorize the tunnel key on the VPS: %w", err)
 	}
 
 	// Seal the integration credential to the console identity and store it
@@ -234,40 +240,129 @@ func buildPangolinSession(cfg *config.Config, region, plan string) (*provisionin
 	return session, captured, cleanup, nil
 }
 
+// pangolinKeyJSON is the mint response's shape (the wrapped envelope).
+type pangolinKeyJSON struct {
+	Data struct {
+		APIKeyID string `json:"apiKeyId"`
+		APIKey   string `json:"apiKey"`
+	} `json:"data"`
+}
+
+// parseRootKey pulls the minted key's JSON line out of the install output
+// and parses it GO-SIDE (the shell never parses JSON). It also ships the
+// key file back to the VPS (root-only) so the next run re-prints instead
+// of re-minting.
 func parseRootKey(outputs []string) string {
 	key := ""
 	for _, o := range outputs {
 		for _, l := range strings.Split(o, "\n") {
-			if strings.HasPrefix(l, "PANGOLIN_ROOT_KEY=") {
-				key = strings.TrimSpace(strings.TrimPrefix(l, "PANGOLIN_ROOT_KEY="))
+			if !strings.HasPrefix(l, "PANGOLIN_KEY_JSON=") {
+				continue
+			}
+			raw := strings.TrimSpace(strings.TrimPrefix(l, "PANGOLIN_KEY_JSON="))
+			var j pangolinKeyJSON
+			if json.Unmarshal([]byte(raw), &j) != nil {
+				continue
+			}
+			if j.Data.APIKeyID != "" && j.Data.APIKey != "" {
+				key = j.Data.APIKeyID + "." + j.Data.APIKey
 			}
 		}
 	}
 	return key
 }
 
-// shipDoorKeyToCP writes the door private key onto the CP guest's durable
-// mount (0600), through the world host's runner (pct exec) — the same path
-// the box's build hands migrate scripts through.
-func shipDoorKeyToCP(cfg *config.Config, pem []byte) error {
-	vmid := 0
-	if cfg.Lxc.Cp.Vmid != nil {
-		vmid = int(*cfg.Lxc.Cp.Vmid)
+// verifyOrgJSON asserts the org create's response named the world's org.
+func verifyOrgJSON(outputs []string) error {
+	for _, o := range outputs {
+		for _, l := range strings.Split(o, "\n") {
+			if !strings.HasPrefix(l, "PANGOLIN_ORG_JSON=") {
+				continue
+			}
+			raw := strings.TrimSpace(strings.TrimPrefix(l, "PANGOLIN_ORG_JSON="))
+			var j struct {
+				Data struct {
+					OrgID string `json:"orgId"`
+				} `json:"data"`
+				Error bool `json:"error"`
+			}
+			if json.Unmarshal([]byte(raw), &j) != nil {
+				continue
+			}
+			if j.Data.OrgID == "freehold" {
+				return nil
+			}
+		}
 	}
-	if vmid == 0 {
-		return fmt.Errorf("no cp guest on record")
-	}
-	b64 := base64.StdEncoding.EncodeToString(pem)
+	return fmt.Errorf("the pangolin org was not created (the install output carried no successful org create)")
+}
+
+// The tunnel key lives on the CP guest at this path (the tunnel unit's -i).
+const tunnelKeyPath = "/srv/data/cp/pangolin-tunnel.key"
+
+// mintTunnelKey runs ssh-keygen ON the CP guest (through the world host's
+// runner): the private half is born there and never transits. Idempotent.
+func mintTunnelKey(cfg *config.Config) error {
+	vmid := cpVmid(cfg)
 	out, err := freeholdExec("exec", "proxmox-box", fmt.Sprintf(
-		"pct exec %d -- sh -c 'printf %%s %s | base64 -d > /srv/data/cp/door-ssh.key && chmod 600 /srv/data/cp/door-ssh.key && wc -c /srv/data/cp/door-ssh.key'",
-		vmid, b64))
+		"pct exec %d -- sh -c '[ -f %s ] || ssh-keygen -t ed25519 -N \"\" -f %s -C pangolin-tunnel >/dev/null && chmod 600 %s && test -f %s'",
+		vmid, tunnelKeyPath, tunnelKeyPath, tunnelKeyPath, tunnelKeyPath))
+	if err != nil || !strings.Contains(out, "tunnel.key") && !strings.Contains(out, "pangolin-tunnel") {
+		// ssh-keygen is quiet on success here; the file test's exit carries
+		// the truth — re-check.
+		out2, err2 := freeholdExec("exec", "proxmox-box", fmt.Sprintf(
+			"pct exec %d -- test -f %s && echo key-present", vmid, tunnelKeyPath))
+		if err2 != nil || !strings.Contains(out2, "key-present") {
+			return fmt.Errorf("the key did not land: %.160s", out)
+		}
+	}
+	return nil
+}
+
+// readTunnelPub reads the minted key's PUBLIC line (non-secret; argv-safe).
+func readTunnelPub(cfg *config.Config) (string, error) {
+	out, err := freeholdExec("exec", "proxmox-box", fmt.Sprintf(
+		"pct exec %d -- cat %s.pub", cpVmid(cfg), tunnelKeyPath))
+	if err != nil {
+		return "", err
+	}
+	line := strings.TrimSpace(out)
+	if !strings.HasPrefix(line, "ssh-ed25519 ") {
+		return "", fmt.Errorf("not an ssh pub line: %.80s", line)
+	}
+	return line, nil
+}
+
+// authorizeOnVPS appends the tunnel key's pub line to the VPS's
+// authorized_keys over the door SSH (the VPS was born with the door's
+// line).
+func authorizeOnVPS(vpsIP, pubLine string) error {
+	pem, err := box.DoorKeyPEM()
+	if err != nil {
+		return fmt.Errorf("door key: %w", err)
+	}
+	keyPath, cleanup, err := proxmox.WriteTempKey(pem)
 	if err != nil {
 		return err
 	}
-	if !strings.Contains(out, "door-ssh.key") {
-		return fmt.Errorf("unexpected exec output: %.120s", out)
+	defer cleanup()
+	out, err := proxmox.SSHExec("root@"+vpsIP, keyPath)(
+		fmt.Sprintf("mkdir -p ~/.ssh && chmod 700 ~/.ssh && grep -Fqx '%s' ~/.ssh/authorized_keys 2>/dev/null || (echo '%s' >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys)", pubLine, pubLine),
+		60)
+	if err != nil {
+		return err
+	}
+	if out.ExitCode != nil && *out.ExitCode != 0 {
+		return fmt.Errorf("authorized_keys append failed: %.160s", out.Stderr)
 	}
 	return nil
+}
+
+func cpVmid(cfg *config.Config) int {
+	if cfg.Lxc.Cp.Vmid != nil {
+		return int(*cfg.Lxc.Cp.Vmid)
+	}
+	return 0
 }
 
 // freeholdExec runs the freehold CLI's own exec verb in-process.

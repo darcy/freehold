@@ -468,8 +468,11 @@ func (s *Spec) ensurePangolinTunnel() error {
 		return nil // no VPS address on record — nothing to forward to
 	}
 	vps := s.Pangolin.DNSIP
-	if _, err := s.runOut("pct exec "+fmt.Sprint(s.CpLxc)+" -- test -f /srv/data/cp/door-ssh.key", 30); err != nil {
-		return fmt.Errorf("the door key is not on the CP guest (/srv/data/cp/door-ssh.key) — run `freehold pangolin` to ship it (the tunnel forwards through it)")
+	// The tunnel key: minted ON the CP guest (its private half never
+	// transits — the door key never leaves the box), the pub line the
+	// operator's `freehold pangolin` authorized on the VPS.
+	if _, err := s.runOut("pct exec "+fmt.Sprint(s.CpLxc)+" -- test -f /srv/data/cp/pangolin-tunnel.key", 30); err != nil {
+		return fmt.Errorf("the tunnel key is not on the CP guest (/srv/data/cp/pangolin-tunnel.key) — run `freehold pangolin` (it mints the key and authorizes it on the VPS)")
 	}
 	unit := fmt.Sprintf(`set -e
 cat > /etc/systemd/system/pangolin-tunnel.service <<UNIT
@@ -479,7 +482,7 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-ExecStart=/usr/bin/ssh -N -o ServerAliveInterval=30 -o ExitOnForwardFailure=yes -o StrictHostKeyChecking=accept-new -i /srv/data/cp/door-ssh.key -L 127.0.0.1:3003:127.0.0.1:3003 root@%s
+ExecStart=/usr/bin/ssh -N -o ServerAliveInterval=30 -o ExitOnForwardFailure=yes -o StrictHostKeyChecking=accept-new -i /srv/data/cp/pangolin-tunnel.key -L 127.0.0.1:3003:127.0.0.1:3003 root@%s
 Restart=always
 RestartSec=5
 

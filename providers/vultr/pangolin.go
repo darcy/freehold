@@ -71,23 +71,22 @@ if [ -f /srv/pangolin/root-key.env ]; then
   echo pangolin-install-ok
   exit 0
 fi
-ADMIN_EMAIL=%s
-ADMIN_PW=$(openssl rand -hex 16)
-printf "ADMIN_EMAIL=%%s\nADMIN_PW=%%s\n" "$ADMIN_EMAIL" "$ADMIN_PW" > /srv/pangolin/admin.env
-chmod 600 /srv/pangolin/admin.env
+if [ -f /srv/pangolin/admin.env ]; then
+  . /srv/pangolin/admin.env
+else
+  ADMIN_EMAIL=%s
+  ADMIN_PW=$(openssl rand -hex 16)
+  printf "ADMIN_EMAIL=%%s\nADMIN_PW=%%s\n" "$ADMIN_EMAIL" "$ADMIN_PW" > /srv/pangolin/admin.env
+  chmod 600 /srv/pangolin/admin.env
+fi
 curl -s -X PUT http://localhost:3000/api/v1/auth/signup -H "Content-Type: application/json" -H "X-CSRF-Token: x-csrf-protection" -d "{\"email\":\"$ADMIN_EMAIL\",\"password\":\"$ADMIN_PW\"}" >/dev/null
 curl -s -c /srv/pangolin/admin.cookies -X POST http://localhost:3000/api/v1/auth/login -H "Content-Type: application/json" -H "X-CSRF-Token: x-csrf-protection" -d "{\"email\":\"$ADMIN_EMAIL\",\"password\":\"$ADMIN_PW\"}" >/dev/null
 KEY_JSON=$(curl -s -b /srv/pangolin/admin.cookies -X PUT http://localhost:3000/api/v1/api-key -H "Content-Type: application/json" -H "X-CSRF-Token: x-csrf-protection" -d "{\"name\":\"freehold\"}")
-	KEY_ID=$(echo "$KEY_JSON" | tr "," "\n" | grep -w apiKeyId | cut -d: -f2 | tr -dc "a-z0-9")
-	KEY_SECRET=$(echo "$KEY_JSON" | tr "," "\n" | grep -w apiKey | cut -d: -f2 | tr -dc "a-z0-9")
-if [ -z "$KEY_ID" ] || [ -z "$KEY_SECRET" ]; then echo pangolin-key-mint-failed; exit 1; fi
-ORG_JSON=$(curl -s -X PUT http://localhost:3003/v1/org -H "Authorization: Bearer $KEY_ID.$KEY_SECRET" -H "Content-Type: application/json" -d "{\"orgId\":\"freehold\",\"name\":\"freehold\",\"subnet\":\"100.90.0.0/16\",\"utilitySubnet\":\"100.91.0.0/24\"}")
-	echo "$ORG_JSON" | grep -q orgId || { echo pangolin-org-create-failed; exit 1; }
-
-curl -s -b /srv/pangolin/admin.cookies -X POST http://localhost:3000/api/v1/api-key/$KEY_ID/actions -H "Content-Type: application/json" -H "X-CSRF-Token: x-csrf-protection" -d "{\"actionIds\":[\"createOrg\",\"createSite\",\"deleteSite\",\"createResource\",\"deleteResource\",\"createTarget\",\"deleteTarget\",\"getSite\",\"getResource\",\"listSites\",\"listResources\",\"listTargets\",\"getDomain\",\"listOrgDomains\",\"generateAccessToken\",\"updateResource\"]}" >/dev/null
-printf "%%s\n" "$KEY_ID.$KEY_SECRET" > /srv/pangolin/root-key.env
-chmod 600 /srv/pangolin/root-key.env
-echo "PANGOLIN_ROOT_KEY=$KEY_ID.$KEY_SECRET"
+echo "PANGOLIN_KEY_JSON=$KEY_JSON"
+ORG_JSON=$(curl -s -X PUT http://localhost:3003/v1/org -H "Authorization: Bearer $(cat /srv/pangolin/root-key.env 2>/dev/null)" -H "Content-Type: application/json" -d "{\"orgId\":\"freehold\",\"name\":\"freehold\",\"subnet\":\"100.90.0.0/16\",\"utilitySubnet\":\"100.91.0.0/24\"}")
+echo "PANGOLIN_ORG_JSON=$ORG_JSON"
+AKEYID=$(echo "$KEY_JSON" | grep -o "apiKeyId\":\"[a-z0-9]*" | tr -dc "a-z0-9")
+curl -s -b /srv/pangolin/admin.cookies -X POST http://localhost:3000/api/v1/api-key/$AKEYID/actions -H "Content-Type: application/json" -H "X-CSRF-Token: x-csrf-protection" -d "{\"actionIds\":[\"createOrg\",\"createSite\",\"deleteSite\",\"createResource\",\"deleteResource\",\"createTarget\",\"deleteTarget\",\"getSite\",\"getResource\",\"listSites\",\"listResources\",\"listTargets\",\"getDomain\",\"listOrgDomains\",\"generateAccessToken\",\"updateResource\"]}" >/dev/null
 rm -f /srv/pangolin/admin.cookies
 echo pangolin-install-ok
 `, compose, conf, traefik, dynamic, email)
