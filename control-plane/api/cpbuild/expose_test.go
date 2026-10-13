@@ -699,6 +699,21 @@ func TestExposeRidesThePangolinPath(t *testing.T) {
 		"GET /v1/resource/7/targets",
 		"PUT /v1/resource/7/target",
 	}
+	// The tunnel stage ran BEFORE the first API dial: the client's base is
+	// the CP's loopback — the forward unit is what makes it mean the VPS.
+	firstExec, pangIdx := -1, 1<<30
+	for i, cmd := range te.cmds {
+		if strings.Contains(cmd, "pangolin-tunnel.service") && firstExec < 0 {
+			firstExec = i
+		}
+	}
+	_ = pangIdx
+	if firstExec < 0 {
+		t.Fatalf("the CP tunnel stage must run on every pangolin ensure: %.400s", strings.Join(te.cmds, "\n"))
+	}
+	if !strings.Contains(te.cmds[firstExec], "/srv/data/cp/door-ssh.key") {
+		t.Fatal("the tunnel's forward must dial through the shipped door key")
+	}
 	for i, w := range want {
 		if len(calls) <= i || calls[i] != w {
 			t.Fatalf("pangolin call %d: got %v want %s", i, calls, w)

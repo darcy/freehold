@@ -5,14 +5,17 @@
 // console identity (CP secret "pangolin"), and the profile recording the bill
 // (`[pangolin_host]`) that `freehold uninstall --destroy-host` destroys.
 // After this, `freehold build` carries the pangolin coords into the world and
-// the build tail re-asserts the Newt tunnel on the gateway.
+// the build tail asserts the Newt tunnel on the gateway + the integration
+// tunnel on the CP.
 package pangolin
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/hex"
 	"fmt"
 	"os"
+	"os/exec"
 	"regexp"
 	"strings"
 	"time"
@@ -100,7 +103,9 @@ func run(cmd *cobra.Command, args []string) error {
 	if keyLine == "" {
 		return fmt.Errorf("the pangolin install printed no root key — the instance %s is LIVE AND BILLING; recover the key from /srv/pangolin/root-key.env on it (the door key reaches it)", host.ID)
 	}
-	endpoint := "http://127.0.0.1:3003" // the CP's SSH-forward loopback — the tunnel stage makes it mean the VPS
+	// The APIs bind loopback on the VPS: the CP's client dials the SSH
+	// forward's loopback; Newt dials TLS via the edge's own hostname.
+	endpoint := "http://127.0.0.1:3003"
 	newtEndpoint := "https://pangolin." + worldDomain
 
 	// Record the bill + the public-path shape in the profile (uninstall's
@@ -117,6 +122,18 @@ func run(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("record the pangolin host: %w", err)
 	}
 
+	// Ship the door key to the CP guest — the tunnel's forward dials the VPS
+	// with it (the VPS was born with the door's line authorized). The CP
+	// already holds the cp-verb key (the world host's SSH): the marginal
+	// surface is the VPS alone.
+	doorPEM, err := box.DoorKeyPEM()
+	if err != nil {
+		return fmt.Errorf("door key: %w", err)
+	}
+	if err := shipDoorKeyToCP(cfg, doorPEM); err != nil {
+		return fmt.Errorf("ship the door key to the CP guest (the tunnel's forward needs it): %w", err)
+	}
+
 	// Seal the integration credential to the console identity and store it
 	// CP-side (the same path the build's DNS-cred hand-off uses): the world's
 	// CP opens it to drive the expose verbs.
@@ -131,7 +148,7 @@ func run(cmd *cobra.Command, args []string) error {
 	seal := func(recipient, aad, plain []byte) ([]byte, error) { return crypto.Seal(recipient, aad, plain) }
 	id, secret, ok := strings.Cut(keyLine, ".")
 	if !ok {
-		return fmt.Errorf("the pangolin root key is not apiKeyId.secret: %s", keyLine[:12]+"…")
+		return fmt.Errorf("the pangolin root key is not apiKeyId.secret: %.24s…", keyLine)
 	}
 	blob, err := certcred.CPSecretBlob("pangolin", "pangolin", map[string]string{
 		"PANGOLIN_BASE":     endpoint, // the CP's loopback — the tunnel stage's forward
@@ -150,18 +167,24 @@ func run(cmd *cobra.Command, args []string) error {
   ╰────────────────────────────────────────────────────────╯
 
   instance:    %s (%s, %s)
-  integration: %s
+  integration: the CP's loopback through the door-key tunnel
+  edge host:   pangolin.%s
   base domain: %s
   root key:    sealed on the CP (secret "pangolin") — printed once at mint above
 
   Now run `+"`freehold build`"+`: the coords carry the pangolin path and the build
-  tail asserts the Newt tunnel on the gateway. Exposed apps then point at
-  the VPS instead of at home.
-`, host.ID, region, plan, endpoint, worldDomain)
+  tail asserts the tunnels (the CP's forward + the gateway's Newt). Exposed
+  apps then point at the VPS instead of at home.
+`, host.ID, region, plan, worldDomain, worldDomain)
 	return nil
 }
 
 func buildPangolinSession(cfg *config.Config, region, plan string) (*provisioning.HostSession, *[]string, func(), error) {
+	// The env check BEFORE the key file exists — the most common user error
+	// must not leave the 0600 door PEM behind.
+	if strings.TrimSpace(os.Getenv("VULTR_API_KEY")) == "" {
+		return nil, nil, nil, fmt.Errorf("pangolin needs the Vultr API key (VULTR_API_KEY in the env; used for this mint, never stored)")
+	}
 	if err := box.EnsureIdentity(box.OpsDir()); err != nil {
 		return nil, nil, nil, fmt.Errorf("ops identity: %w", err)
 	}
@@ -186,9 +209,6 @@ func buildPangolinSession(cfg *config.Config, region, plan string) (*provisionin
 		},
 		DoorLine: line,
 		World:    cfg.Name,
-	}
-	if session.Answers["VULTR_API_KEY"] == "" {
-		return nil, nil, nil, fmt.Errorf("pangolin needs the Vultr API key (VULTR_API_KEY in the env; used for this mint, never stored)")
 	}
 	session.ExecOnHost = func(script string, timeoutSecs uint64) error {
 		out, err := proxmox.SSHExec(session.Host, keyPath)(script, timeoutSecs)
@@ -224,6 +244,37 @@ func parseRootKey(outputs []string) string {
 		}
 	}
 	return key
+}
+
+// shipDoorKeyToCP writes the door private key onto the CP guest's durable
+// mount (0600), through the world host's runner (pct exec) — the same path
+// the box's build hands migrate scripts through.
+func shipDoorKeyToCP(cfg *config.Config, pem []byte) error {
+	vmid := 0
+	if cfg.Lxc.Cp.Vmid != nil {
+		vmid = int(*cfg.Lxc.Cp.Vmid)
+	}
+	if vmid == 0 {
+		return fmt.Errorf("no cp guest on record")
+	}
+	b64 := base64.StdEncoding.EncodeToString(pem)
+	out, err := freeholdExec("exec", "proxmox-box", fmt.Sprintf(
+		"pct exec %d -- sh -c 'printf %%s %s | base64 -d > /srv/data/cp/door-ssh.key && chmod 600 /srv/data/cp/door-ssh.key && wc -c /srv/data/cp/door-ssh.key'",
+		vmid, b64))
+	if err != nil {
+		return err
+	}
+	if !strings.Contains(out, "door-ssh.key") {
+		return fmt.Errorf("unexpected exec output: %.120s", out)
+	}
+	return nil
+}
+
+// freeholdExec runs the freehold CLI's own exec verb in-process.
+func freeholdExec(args ...string) (string, error) {
+	cmd := exec.Command("freehold", args...)
+	out, err := cmd.CombinedOutput()
+	return string(out), err
 }
 
 // pointPangolinHost writes the edge's own hostname record

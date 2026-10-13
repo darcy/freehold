@@ -420,6 +420,12 @@ func (s *Spec) pangolinEnsure(rec agenttools.AppRecord) error {
 	if err != nil {
 		return fmt.Errorf("pangolin: target %q port: %w", rec.Target, err)
 	}
+	// The tunnel FIRST: the client's base is the CP's loopback — the
+	// forward unit is what makes that address mean the VPS. Dailing
+	// before the unit exists deadlocks every retry.
+	if err := s.ensurePangolinTunnel(); err != nil {
+		return fmt.Errorf("pangolin: the CP tunnel stage: %w", err)
+	}
 	cl := &pangolin.Client{Base: base, Key: key}
 	site, created, err := cl.EnsureSite(context.Background(), p.Org, p.Site)
 	if err != nil {
@@ -429,9 +435,6 @@ func (s *Spec) pangolinEnsure(rec agenttools.AppRecord) error {
 		if err := s.sealNewtIdentity(site); err != nil {
 			return fmt.Errorf("pangolin: site %q was CREATED and its one-time Newt secret could not be sealed — the identity is unusable until it is (remove the site on the instance and re-run): %w", p.Site, err)
 		}
-	}
-	if err := s.ensurePangolinTunnel(); err != nil {
-		return fmt.Errorf("pangolin: the CP tunnel stage: %w", err)
 	}
 	if err := s.ensureNewtGateway(endpoint); err != nil {
 		return fmt.Errorf("pangolin: the gateway's newt stage: %w", err)
@@ -465,6 +468,9 @@ func (s *Spec) ensurePangolinTunnel() error {
 		return nil // no VPS address on record — nothing to forward to
 	}
 	vps := s.Pangolin.DNSIP
+	if _, err := s.runOut("pct exec "+fmt.Sprint(s.CpLxc)+" -- test -f /srv/data/cp/door-ssh.key", 30); err != nil {
+		return fmt.Errorf("the door key is not on the CP guest (/srv/data/cp/door-ssh.key) — run `freehold pangolin` to ship it (the tunnel forwards through it)")
+	}
 	unit := fmt.Sprintf(`set -e
 cat > /etc/systemd/system/pangolin-tunnel.service <<UNIT
 [Unit]
@@ -473,7 +479,7 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-ExecStart=/usr/bin/ssh -N -o ServerAliveInterval=30 -o ExitOnForwardFailure=yes -o StrictHostKeyChecking=accept-new -i /srv/data/cp/verb-ssh.key -L 127.0.0.1:3003:127.0.0.1:3003 root@%s
+ExecStart=/usr/bin/ssh -N -o ServerAliveInterval=30 -o ExitOnForwardFailure=yes -o StrictHostKeyChecking=accept-new -i /srv/data/cp/door-ssh.key -L 127.0.0.1:3003:127.0.0.1:3003 root@%s
 Restart=always
 RestartSec=5
 

@@ -31,19 +31,18 @@ import (
 // traefik) rendered for the world domain, the integration API enabled, the
 // admin bootstrapped, and the ROOT INTEGRATION KEY printed once. No
 // apostrophes (the script rides a single-quoted sh -c). Idempotent: an
-// already-running stack short-circuits (a re-adopt re-ensures cheaply) and
-// a re-run WITHOUT an existing key file re-prints nothing — the key lives
-// only at first mint; losing it means re-minting the admin (the script
-// keeps the admin credentials in /root, so a lost key is recoverable by
-// re-running the bootstrap block by hand).
+// already-running stack short-circuits (a re-adopt re-ensures cheaply),
+// re-printing the persisted key. The admin credentials persist root-only
+// (/srv/pangolin/admin.env), so a lost key is recoverable: the re-run's
+// bootstrap re-logs in with the persisted admin and mints a fresh key.
 func PangolinInstallScript(worldDomain, email string) string {
 	compose := pangolinCompose(worldDomain, email)
 	conf := pangolinConfig(worldDomain)
 	traefik := pangolinTraefikConf(email)
 	dynamic := pangolinDynamicConf()
 	return fmt.Sprintf(`set -e
-if [ -f /srv/pangolin/config/config.yml ] && docker ps --format "{{.Names}}" 2>/dev/null | grep -q pangolin; then
-  echo "PANGOLIN_ROOT_KEY=$(cat /srv/pangolin/root-key.env 2>/dev/null)"
+if [ -f /srv/pangolin/root-key.env ] && docker ps --format "{{.Names}}" 2>/dev/null | grep -q pangolin; then
+  echo "PANGOLIN_ROOT_KEY=$(cat /srv/pangolin/root-key.env)"
   echo pangolin-install-ok
   exit 0
 fi
@@ -74,11 +73,13 @@ if [ -f /srv/pangolin/root-key.env ]; then
 fi
 ADMIN_EMAIL=%s
 ADMIN_PW=$(openssl rand -hex 16)
+printf "ADMIN_EMAIL=%%s\nADMIN_PW=%%s\n" "$ADMIN_EMAIL" "$ADMIN_PW" > /srv/pangolin/admin.env
+chmod 600 /srv/pangolin/admin.env
 curl -s -X PUT http://localhost:3000/api/v1/auth/signup -H "Content-Type: application/json" -H "X-CSRF-Token: x-csrf-protection" -d "{\"email\":\"$ADMIN_EMAIL\",\"password\":\"$ADMIN_PW\"}" >/dev/null
 curl -s -c /srv/pangolin/admin.cookies -X POST http://localhost:3000/api/v1/auth/login -H "Content-Type: application/json" -H "X-CSRF-Token: x-csrf-protection" -d "{\"email\":\"$ADMIN_EMAIL\",\"password\":\"$ADMIN_PW\"}" >/dev/null
 KEY_JSON=$(curl -s -b /srv/pangolin/admin.cookies -X PUT http://localhost:3000/api/v1/api-key -H "Content-Type: application/json" -H "X-CSRF-Token: x-csrf-protection" -d "{\"name\":\"freehold\"}")
-	KEY_ID=$(echo "$KEY_JSON" | tr "," "\n" | grep -w apiKeyId | tr -dc "a-z0-9")
-	KEY_SECRET=$(echo "$KEY_JSON" | tr "," "\n" | grep -w apiKey | tr -dc "a-z0-9")
+	KEY_ID=$(echo "$KEY_JSON" | tr "," "\n" | grep -w apiKeyId | cut -d: -f2 | tr -dc "a-z0-9")
+	KEY_SECRET=$(echo "$KEY_JSON" | tr "," "\n" | grep -w apiKey | cut -d: -f2 | tr -dc "a-z0-9")
 if [ -z "$KEY_ID" ] || [ -z "$KEY_SECRET" ]; then echo pangolin-key-mint-failed; exit 1; fi
 ORG_JSON=$(curl -s -X PUT http://localhost:3003/v1/org -H "Authorization: Bearer $KEY_ID.$KEY_SECRET" -H "Content-Type: application/json" -d "{\"orgId\":\"freehold\",\"name\":\"freehold\",\"subnet\":\"100.90.0.0/16\",\"utilitySubnet\":\"100.91.0.0/24\"}")
 	echo "$ORG_JSON" | grep -q orgId || { echo pangolin-org-create-failed; exit 1; }

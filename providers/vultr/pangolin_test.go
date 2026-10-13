@@ -4,6 +4,9 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -124,4 +127,24 @@ func TestPreparePangolinMintsAndInstalls(t *testing.T) {
 		t.Fatalf("a re-adopt re-ensures the payload (the script short-circuits on a live stack): %.200s", installed)
 	}
 	_ = host
+}
+
+// TestPangolinInstallScriptParsesClean pins the payload's SHELL validity:
+// the rendered script (the heredocs filled) must parse under sh -n — the
+// mint is a ROOT script on a billed host; a parse error strands everything.
+func TestPangolinInstallScriptParsesClean(t *testing.T) {
+	script := PangolinInstallScript("librem.example.test", "darcy@freehold.technology")
+	f := filepath.Join(t.TempDir(), "install.sh")
+	if err := os.WriteFile(f, []byte(script), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, err := exec.Command("sh", "-n", f).CombinedOutput()
+	if err != nil {
+		t.Fatalf("the rendered payload must parse as shell: %v: %.200s", err, out)
+	}
+	// The key parse must produce BARE values: the JSON fragment's field name
+	// and the data envelope never survive the cut+tr chain.
+	if !strings.Contains(script, `| cut -d: -f2 | tr -dc "a-z0-9"`) {
+		t.Fatal("the key parse must strip to the value after the colon")
+	}
 }
