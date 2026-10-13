@@ -169,6 +169,11 @@ func destroyHostViaProvider(cfg *config.Config, yes, destroy bool) (bool, error)
 			return true, nil
 		}
 	}
+	if cfg.PangolinHost != nil && cfg.PangolinHost.ID != "" {
+		if err := destroyPangolinHost(cfg, yes, destroy); err != nil {
+			return true, err
+		}
+	}
 	answers := map[string]string{}
 	for k, v := range cfg.HostProvider.Answers {
 		answers[k] = v
@@ -190,6 +195,41 @@ func destroyHostViaProvider(cfg *config.Config, yes, destroy bool) (bool, error)
 	}
 	fmt.Println("  ✓ instance destroyed")
 	return false, nil
+}
+
+// destroyPangolinHost destroys the recorded Pangolin VPS — the same
+// --destroy-host gate and the same confirm as the world's host (it is a
+// bill: nothing on it is durable plane; the edge's config dies with it and
+// a re-provision re-mints).
+func destroyPangolinHost(cfg *config.Config, yes, destroy bool) error {
+	p := cfg.PangolinHost
+	prov, err := registry.ByName(p.Provider)
+	if err != nil {
+		return fmt.Errorf("pangolin host: %w", err)
+	}
+	if !destroy {
+		fmt.Printf("  NOTE: the pangolin VPS %s (%s) is still RUNNING and billing — destroy it with:\n    %s freehold uninstall --destroy-host\n",
+			p.ID, p.IP, secretEnvHint(prov))
+		return nil
+	}
+	if !yes {
+		if err := common.ConfirmDestructive("destroy the pangolin VPS instance (its config dies with it)"); err != nil {
+			fmt.Println("  pangolin VPS left running — destroy it later with --destroy-host")
+			return nil
+		}
+	}
+	answers := map[string]string{}
+	for k, v := range cfg.HostProvider.Answers {
+		answers[k] = v
+	}
+	session := &provisioning.HostSession{Answers: answers}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	if err := prov.Destroy(ctx, session, p.ID); err != nil {
+		return fmt.Errorf("pangolin host destroy: %w", err)
+	}
+	fmt.Println("  ✓ pangolin VPS destroyed")
+	return nil
 }
 
 // secretEnvHint names the env vars the provider's secrets ride.

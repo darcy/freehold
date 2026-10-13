@@ -119,9 +119,15 @@ The gateway has TWO shapes, one per substrate:
     on the host, pushed to the guest; a hosted gateway installs bare), the identity and
     the instance endpoint riding a root-only env file, the unit restarted so a re-minted
     secret lands live. `unexpose` removes the resource; a failed removal names the
-    recovery (re-expose then unexpose). The coords carry no credential. Still open on
-    this path: the freehold member gate's exact shape (today Pangolin's own SSO gates
-    it), and the pangolin-compose VPS payload through the created-host lifecycle.
+    recovery (re-expose then unexpose). The coords carry no credential.
+    The VPS itself is provisioned through the created-host lifecycle
+    (`freehold pangolin` — the Vultr mint, the pangolin-compose payload
+    installed instead of PVE-on-Debian): the admin + the root integration key
+    bootstrap on the instance at install, the key prints ONCE and seals to
+    the console identity (the CP secret `pangolin`), and the profile records
+    the bill (`[pangolin_host]`) that `freehold uninstall --destroy-host`
+    destroys. Still open on this path: the freehold member gate's exact
+    shape (today Pangolin's own SSO gates it).
 *   **Groups are relay channels.** Every exposed app rides a relay channel as its ACL —
     the record stores the channel ID (names change; the display layer resolves the current
     name), `#general` is the everyone-channel and the default, and the expose validates

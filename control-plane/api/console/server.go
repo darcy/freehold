@@ -727,7 +727,7 @@ func (s *Server) worldInventory() (map[string]interface{}, error) {
 // cache shipped for the worldCert pre-seed gate — the box OVERWRITES it on
 // every build it ships (the box cache is that record's durable owner, unlike
 // the secrets above, which the CP owns).
-var stdSecrets = []string{"dns-relay", "dns-cp", "litellm", "operator", "cert-seed-relay", "cert-seed-cp"}
+var stdSecrets = []string{"dns-relay", "dns-cp", "litellm", "operator", "cert-seed-relay", "cert-seed-cp", "pangolin"}
 
 // secretsList reports which CP-owned secrets are present on disk (the idempotent
 // inventory `build` uses to ask the operator only for what's missing).

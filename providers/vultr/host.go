@@ -100,58 +100,9 @@ func (p HostProvider) Prepare(ctx context.Context, s *provisioning.HostSession, 
 		}
 	}
 	if hostID == "" {
-		// The image: derived from the API's own OS catalog (the newest Debian
-		// x64), ALWAYS — no answer path. The ids drift (1743 is Ubuntu 22.04
-		// on today's catalog) and a stale recorded answer would re-mint an
-		// Ubuntu host forever; the catalog is the only authority.
-		osID, derr := c.DebianOsID(ctx)
-		if derr != nil {
-			return nil, derr
-		}
-
-		// The ask is free-text — validate against the API's own catalog before
-		// spending anything: a continent group name ("AMER") or a typo'd plan
-		// is a 400 "Invalid datacenter." deep in the create otherwise.
-		region := strings.ToLower(strings.TrimSpace(s.Answers["region"]))
-		plan := strings.TrimSpace(s.Answers["plan"])
-		if bad := checkIn(ctx, c, "region", region, c.Regions); bad != "" {
-			return nil, fmt.Errorf("%s", bad)
-		}
-		if bad := checkIn(ctx, c, "plan", plan, c.Plans); bad != "" {
-			return nil, fmt.Errorf("%s", bad)
-		}
-		// The instance label derives from the world's name — an unlabelled
-		// instance is unfindable in the console when the stranded-handle
-		// recovery points the operator at it.
-		label := ""
-		if s.World != "" {
-			label = "freehold-" + s.World
-		}
-		key, kerr := c.EnsureSSHKey(ctx, "freehold-door", s.DoorLine)
-		if kerr != nil {
-			return nil, fmt.Errorf("vultr ssh-key: %w", kerr)
-		}
-		s.Print("  creating the vultr host (%s %s, Debian os_id %d)…\n", region, plan, osID)
-		body := map[string]any{"region": region, "plan": plan, "os_id": osID}
-		if label != "" {
-			body["label"] = label
-			body["hostname"] = label
-		}
-		id, cerr := c.CreateInstance(ctx, body, key)
-		if cerr != nil {
-			return nil, fmt.Errorf("vultr create: %w", cerr)
-		}
-		// The handle rides the session NOW — every later step can fail, and
-		// a billed instance with an unrecorded id is the one unrecoverable
-		// state. The callback persists it the same instant.
-		s.CreatedID = id
-		if s.OnCreated != nil {
-			s.OnCreated(id)
-		}
-		s.Print("  instance %s — waiting for an address…\n", id)
-		ip, werr := c.WaitActive(ctx, id, 8*time.Minute)
-		if werr != nil {
-			return nil, fmt.Errorf("instance %s: %w", id, werr)
+		id, ip, err := createInstance(ctx, s, c, "freehold-"+s.World)
+		if err != nil {
+			return nil, err
 		}
 		hostID, hostIP = id, ip
 		s.Host = "root@" + ip
@@ -168,6 +119,61 @@ func (p HostProvider) Prepare(ctx context.Context, s *provisioning.HostSession, 
 		return nil, fmt.Errorf("pve install on instance %s: %w", hostID, err)
 	}
 	return &provisioning.Host{ID: hostID, IP: hostIP}, nil
+}
+
+// createInstance is the mint both host shapes share (the world host's PVE
+// payload and the pangolin VPS's compose payload): the Debian image from the
+// API's own catalog, the ask validated against it, the door key born-with,
+// the billed handle recorded the instant the create succeeds.
+func createInstance(ctx context.Context, s *provisioning.HostSession, c *Client, label string) (string, string, error) {
+	// The image: derived from the API's own OS catalog (the newest Debian
+	// x64), ALWAYS — no answer path. The ids drift (1743 is Ubuntu 22.04
+	// on today's catalog) and a stale recorded answer would re-mint an
+	// Ubuntu host forever; the catalog is the only authority.
+	osID, derr := c.DebianOsID(ctx)
+	if derr != nil {
+		return "", "", derr
+	}
+
+	// The ask is free-text — validate against the API's own catalog before
+	// spending anything: a continent group name ("AMER") or a typo'd plan
+	// is a 400 "Invalid datacenter." deep in the create otherwise.
+	region := strings.ToLower(strings.TrimSpace(s.Answers["region"]))
+	plan := strings.TrimSpace(s.Answers["plan"])
+	if bad := checkIn(ctx, c, "region", region, c.Regions); bad != "" {
+		return "", "", fmt.Errorf("%s", bad)
+	}
+	if bad := checkIn(ctx, c, "plan", plan, c.Plans); bad != "" {
+		return "", "", fmt.Errorf("%s", bad)
+	}
+	key, kerr := c.EnsureSSHKey(ctx, "freehold-door", s.DoorLine)
+	if kerr != nil {
+		return "", "", fmt.Errorf("vultr ssh-key: %w", kerr)
+	}
+	s.Print("  creating the vultr host (%s %s, Debian os_id %d)…\n", region, plan, osID)
+	body := map[string]any{"region": region, "plan": plan, "os_id": osID}
+	if label != "" {
+		body["label"] = label
+		body["hostname"] = label
+	}
+	id, cerr := c.CreateInstance(ctx, body, key)
+	if cerr != nil {
+		return "", "", fmt.Errorf("vultr create: %w", cerr)
+	}
+	// The handle rides the session NOW — every later step can fail, and
+	// a billed instance with an unrecorded id is the one unrecoverable
+	// state. The callback persists it the same instant.
+	s.CreatedID = id
+	if s.OnCreated != nil {
+		s.OnCreated(id)
+	}
+	s.Print("  instance %s — waiting for an address…\n", id)
+	ip, werr := c.WaitActive(ctx, id, 8*time.Minute)
+	if werr != nil {
+		return "", "", fmt.Errorf("instance %s: %w", id, werr)
+	}
+	s.Host = "root@" + ip
+	return id, ip, nil
 }
 
 // sshdWaitTimeout is how long Prepare waits for the host's first sshd
