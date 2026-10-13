@@ -20,11 +20,11 @@ import (
 // signup → session login → root API key → the actions grant. The key prints
 // ONCE (PANGOLIN_ROOT_KEY=…) for the caller to seal CP-side.
 
-// The API ports bind LOOPBACK on the VPS: the world's CP reaches the
-// integration API through an SSH forward over the door key (the CP-side
-// tunnel stage), never through the public NIC — the Bearer key never rides
-// cleartext internet. Newt dials TLS via pangolin.<world-domain> (the
-// edge's own ACME cert).
+// The compose's API ports (3000/3001/3003) bind 127.0.0.1 on the VPS: the
+// world's CP reaches the integration API through an SSH forward (the
+// CP-minted tunnel key), never through the public NIC — the Bearer key
+// never rides cleartext internet. Only 80/443 (the edge) and 51820/udp
+// (the Newt WireGuard listener) publish.
 
 // PangolinInstallScript turns the fresh Debian instance into the world's
 // Pangolin edge: docker, the three-container stack (pangolin + gerbil +
