@@ -82,7 +82,15 @@ fi
 curl -s -X PUT http://localhost:3000/api/v1/auth/signup -H "Content-Type: application/json" -H "X-CSRF-Token: x-csrf-protection" -d "{\"email\":\"$ADMIN_EMAIL\",\"password\":\"$ADMIN_PW\"}" >/dev/null
 curl -s -c /srv/pangolin/admin.cookies -X POST http://localhost:3000/api/v1/auth/login -H "Content-Type: application/json" -H "X-CSRF-Token: x-csrf-protection" -d "{\"email\":\"$ADMIN_EMAIL\",\"password\":\"$ADMIN_PW\"}" >/dev/null
 KEY_JSON=$(curl -s -b /srv/pangolin/admin.cookies -X PUT http://localhost:3000/api/v1/api-key -H "Content-Type: application/json" -H "X-CSRF-Token: x-csrf-protection" -d "{\"name\":\"freehold\"}")
-echo "PANGOLIN_KEY_JSON=$KEY_JSON"
+KEY_ID=$(echo "$KEY_JSON" | tr ",{}" "\n" | grep apiKeyId | sed "s/.*://; s/\"//g")
+KEY_SECRET=$(echo "$KEY_JSON" | tr ",{}" "\n" | grep -w apiKey | sed "s/.*://; s/\"//g")
+if [ -z "$KEY_ID" ] || [ -z "$KEY_SECRET" ]; then echo "PANGOLIN_KEY_JSON=$KEY_JSON"; echo pangolin-key-mint-failed; exit 1; fi
+printf "%%s\n" "$KEY_ID.$KEY_SECRET" > /srv/pangolin/root-key.env
+chmod 600 /srv/pangolin/root-key.env
+ORG_JSON=$(curl -s -X PUT http://localhost:3003/v1/org -H "Authorization: Bearer $KEY_ID.$KEY_SECRET" -H "Content-Type: application/json" -d "{\"orgId\":\"freehold\",\"name\":\"freehold\",\"subnet\":\"100.90.0.0/16\",\"utilitySubnet\":\"100.91.0.0/24\"}")
+echo "$ORG_JSON" | grep -q orgId || { echo "PANGOLIN_ORG_JSON=$ORG_JSON"; echo pangolin-org-create-failed; exit 1; }
+curl -s -b /srv/pangolin/admin.cookies -X POST http://localhost:3000/api/v1/api-key/$KEY_ID/actions -H "Content-Type: application/json" -H "X-CSRF-Token: x-csrf-protection" -d "{\"actionIds\":[\"createOrg\",\"createSite\",\"deleteSite\",\"createResource\",\"deleteResource\",\"createTarget\",\"deleteTarget\",\"getSite\",\"getResource\",\"listSites\",\"listResources\",\"listTargets\",\"getDomain\",\"listOrgDomains\",\"generateAccessToken\",\"updateResource\"]}" >/dev/null
+echo "PANGOLIN_ROOT_KEY=$KEY_ID.$KEY_SECRET"
 rm -f /srv/pangolin/admin.cookies
 echo pangolin-install-ok
 `, compose, conf, traefik, dynamic, email)

@@ -31,20 +31,9 @@ import (
 	"freehold/platform/provisioning/box"
 	cert "freehold/platform/services/certificates/letsencrypt"
 	dnsman "freehold/platform/services/externaldns/cloudflare"
-	"freehold/platform/services/pangolin"
 	"freehold/providers/proxmox"
 	"freehold/providers/vultr"
 )
-
-// pangolinActions = the root key's action set: exactly what the expose
-// verbs' ensure legs call (the org create rides the bootstrap; the rest =
-// the site/resource/target lifecycle + the domains read + the tokens).
-var pangolinActions = []string{
-	"createOrg", "createSite", "deleteSite", "createResource", "deleteResource",
-	"createTarget", "deleteTarget", "getSite", "getResource", "listSites",
-	"listResources", "listTargets", "getDomain", "listOrgDomains",
-	"generateAccessToken", "updateResource",
-}
 
 // execOnVPS runs one command on the VPS over the door SSH (the VPS was born
 // with the door's line).
@@ -136,10 +125,6 @@ func run(cmd *cobra.Command, args []string) error {
 	if keyLine == "" {
 		return fmt.Errorf("the pangolin install printed no root key — the instance %s is LIVE AND BILLING; recover the key from /srv/pangolin/root-key.env on it (the door key reaches it)", host.ID)
 	}
-	keyID, _, ok := strings.Cut(keyLine, ".")
-	if !ok {
-		return fmt.Errorf("the pangolin root key is not apiKeyId.secret: %.24s…", keyLine)
-	}
 	// The APIs bind loopback on the VPS: the CP's client dials the SSH
 	// forward's loopback; Newt dials TLS via the edge's own hostname.
 	endpoint := "http://127.0.0.1:3003"
@@ -183,34 +168,18 @@ func run(cmd *cobra.Command, args []string) error {
 		`printf "%%s\n" %s > /srv/pangolin/root-key.env && chmod 600 /srv/pangolin/root-key.env`, keyLine)); err != nil {
 		return fmt.Errorf("persist the root key on the VPS: %w", err)
 	}
-	// The world's org + the root key's action grant: the GO side (the
-	// pangolin client + the console session) — the shell never parses JSON.
-	pcl := &pangolin.Client{Base: "http://" + host.IP + ":3003", Key: keyLine}
-	if err := pcl.CreateOrg(context.Background(), cfg.Pangolin.Org, cfg.Pangolin.Org, "100.90.0.0/16", "100.91.0.0/24"); err != nil {
-		if !strings.Contains(err.Error(), "exist") && !strings.Contains(err.Error(), "409") {
-			return fmt.Errorf("the pangolin org create: %w", err)
-		}
-		fmt.Printf("  · the org %s already exists on the instance\n", cfg.Pangolin.Org)
-	}
 	client, err := consoleLogin(cfg)
 	if err != nil {
 		return err
-	}
-	if _, err := client.SetAPIKeyActions(keyID, pangolinActions); err != nil {
-		return fmt.Errorf("grant the root key its actions: %w", err)
 	}
 	pub, err := consoleEncPubkey(client)
 	if err != nil {
 		return err
 	}
 	seal := func(recipient, aad, plain []byte) ([]byte, error) { return crypto.Seal(recipient, aad, plain) }
-	id, secret, ok := strings.Cut(keyLine, ".")
-	if !ok {
-		return fmt.Errorf("the pangolin root key is not apiKeyId.secret: %.24s…", keyLine)
-	}
 	blob, err := certcred.CPSecretBlob("pangolin", "pangolin", map[string]string{
 		"PANGOLIN_BASE":     endpoint, // the CP's loopback — the tunnel stage's forward
-		"PANGOLIN_KEY":      id + "." + secret,
+		"PANGOLIN_KEY":      keyLine,
 		"PANGOLIN_ENDPOINT": newtEndpoint, // what Newt dials: TLS via the edge's own cert
 	}, seal, pub)
 	if err != nil {
@@ -292,61 +261,34 @@ func buildPangolinSession(cfg *config.Config, region, plan string) (*provisionin
 	return session, captured, cleanup, nil
 }
 
-// pangolinKeyJSON is the mint response's shape (the wrapped envelope).
-type pangolinKeyJSON struct {
-	Data struct {
-		APIKeyID string `json:"apiKeyId"`
-		APIKey   string `json:"apiKey"`
-	} `json:"data"`
-}
-
-// parseRootKey pulls the minted key's JSON line out of the install output
-// and parses it GO-SIDE (the shell never parses JSON). It also ships the
-// key file back to the VPS (root-only) so the next run re-prints instead
-// of re-minting.
+// parseRootKey pulls the minted key out of the install output — BOTH
+// output forms: the mint path prints the raw response (PANGOLIN_KEY_JSON=,
+// parsed Go-side), the re-run path prints the persisted key
+// (PANGOLIN_ROOT_KEY=, already apiKeyId.secret).
 func parseRootKey(outputs []string) string {
 	key := ""
 	for _, o := range outputs {
 		for _, l := range strings.Split(o, "\n") {
-			if !strings.HasPrefix(l, "PANGOLIN_KEY_JSON=") {
-				continue
-			}
-			raw := strings.TrimSpace(strings.TrimPrefix(l, "PANGOLIN_KEY_JSON="))
-			var j pangolinKeyJSON
-			if json.Unmarshal([]byte(raw), &j) != nil {
-				continue
-			}
-			if j.Data.APIKeyID != "" && j.Data.APIKey != "" {
-				key = j.Data.APIKeyID + "." + j.Data.APIKey
+			switch {
+			case strings.HasPrefix(l, "PANGOLIN_ROOT_KEY="):
+				if v := strings.TrimSpace(strings.TrimPrefix(l, "PANGOLIN_ROOT_KEY=")); strings.Contains(v, ".") {
+					key = v
+				}
+			case strings.HasPrefix(l, "PANGOLIN_KEY_JSON="):
+				raw := strings.TrimSpace(strings.TrimPrefix(l, "PANGOLIN_KEY_JSON="))
+				var j struct {
+					Data struct {
+						APIKeyID string `json:"apiKeyId"`
+						APIKey   string `json:"apiKey"`
+					} `json:"data"`
+				}
+				if json.Unmarshal([]byte(raw), &j) == nil && j.Data.APIKeyID != "" && j.Data.APIKey != "" {
+					key = j.Data.APIKeyID + "." + j.Data.APIKey
+				}
 			}
 		}
 	}
 	return key
-}
-
-// verifyOrgJSON asserts the org create's response named the world's org.
-func verifyOrgJSON(outputs []string) error {
-	for _, o := range outputs {
-		for _, l := range strings.Split(o, "\n") {
-			if !strings.HasPrefix(l, "PANGOLIN_ORG_JSON=") {
-				continue
-			}
-			raw := strings.TrimSpace(strings.TrimPrefix(l, "PANGOLIN_ORG_JSON="))
-			var j struct {
-				Data struct {
-					OrgID string `json:"orgId"`
-				} `json:"data"`
-				Error bool `json:"error"`
-			}
-			if json.Unmarshal([]byte(raw), &j) != nil {
-				continue
-			}
-			if j.Data.OrgID == "freehold" {
-				return nil
-			}
-		}
-	}
-	return fmt.Errorf("the pangolin org was not created (the install output carried no successful org create)")
 }
 
 // The tunnel key lives on the CP guest at this path (the tunnel unit's -i).
@@ -356,13 +298,13 @@ const tunnelKeyPath = "/srv/data/cp/pangolin-tunnel.key"
 // runner): the private half is born there and never transits. Idempotent.
 func mintTunnelKey(cfg *config.Config, cfgPath string) error {
 	vmid := cpVmid(cfg)
-	out, err := freeholdExec(cfgPath, "exec", "proxmox-box", fmt.Sprintf(
+	out, err := freeholdExec(cfgPath, "proxmox-box", fmt.Sprintf(
 		"pct exec %d -- sh -c '[ -f %s ] || ssh-keygen -t ed25519 -N \"\" -f %s -C pangolin-tunnel >/dev/null && chmod 600 %s && test -f %s'",
 		vmid, tunnelKeyPath, tunnelKeyPath, tunnelKeyPath, tunnelKeyPath))
 	if err != nil || !strings.Contains(out, "tunnel.key") && !strings.Contains(out, "pangolin-tunnel") {
 		// ssh-keygen is quiet on success here; the file test's exit carries
 		// the truth — re-check.
-		out2, err2 := freeholdExec(cfgPath, "exec", "proxmox-box", fmt.Sprintf(
+		out2, err2 := freeholdExec(cfgPath, "proxmox-box", fmt.Sprintf(
 			"pct exec %d -- test -f %s && echo key-present", vmid, tunnelKeyPath))
 		if err2 != nil || !strings.Contains(out2, "key-present") {
 			return fmt.Errorf("the key did not land: %.160s", out)
@@ -373,7 +315,7 @@ func mintTunnelKey(cfg *config.Config, cfgPath string) error {
 
 // readTunnelPub reads the minted key's PUBLIC line (non-secret; argv-safe).
 func readTunnelPub(cfg *config.Config, cfgPath string) (string, error) {
-	out, err := freeholdExec(cfgPath, "exec", "proxmox-box", fmt.Sprintf(
+	out, err := freeholdExec(cfgPath, "proxmox-box", fmt.Sprintf(
 		"pct exec %d -- cat %s.pub", cpVmid(cfg), tunnelKeyPath))
 	if err != nil {
 		return "", err
@@ -417,8 +359,9 @@ func cpVmid(cfg *config.Config) int {
 	return 0
 }
 
-// freeholdExec runs the freehold CLI's own exec verb in-process, carrying
-// this verb's --config so the profile context survives the shell-out.
+// freeholdExec runs the freehold CLI's own exec verb in-process (the
+// target + the command ride args), carrying this verb's --config so the
+// profile context survives the shell-out.
 func freeholdExec(cfgPath string, args ...string) (string, error) {
 	full := append([]string{"exec"}, args...)
 	full = append(full, "--config", cfgPath)
