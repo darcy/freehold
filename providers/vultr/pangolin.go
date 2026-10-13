@@ -20,9 +20,11 @@ import (
 // signup → session login → root API key → the actions grant. The key prints
 // ONCE (PANGOLIN_ROOT_KEY=…) for the caller to seal CP-side.
 
-// pangolinStackPorts are the ports the edge serves and the VPS must have
-// open: web (traefik) and the Newt WireGuard listener.
-const pangolinStackPorts = "80,443/tcp web; 51820/udp newt"
+// The API ports bind LOOPBACK on the VPS: the world's CP reaches the
+// integration API through an SSH forward over the door key (the CP-side
+// tunnel stage), never through the public NIC — the Bearer key never rides
+// cleartext internet. Newt dials TLS via pangolin.<world-domain> (the
+// edge's own ACME cert).
 
 // PangolinInstallScript turns the fresh Debian instance into the world's
 // Pangolin edge: docker, the three-container stack (pangolin + gerbil +
@@ -75,12 +77,12 @@ ADMIN_PW=$(openssl rand -hex 16)
 curl -s -X PUT http://localhost:3000/api/v1/auth/signup -H "Content-Type: application/json" -H "X-CSRF-Token: x-csrf-protection" -d "{\"email\":\"$ADMIN_EMAIL\",\"password\":\"$ADMIN_PW\"}" >/dev/null
 curl -s -c /srv/pangolin/admin.cookies -X POST http://localhost:3000/api/v1/auth/login -H "Content-Type: application/json" -H "X-CSRF-Token: x-csrf-protection" -d "{\"email\":\"$ADMIN_EMAIL\",\"password\":\"$ADMIN_PW\"}" >/dev/null
 KEY_JSON=$(curl -s -b /srv/pangolin/admin.cookies -X PUT http://localhost:3000/api/v1/api-key -H "Content-Type: application/json" -H "X-CSRF-Token: x-csrf-protection" -d "{\"name\":\"freehold\"}")
-KEY_ID=$(echo "$KEY_JSON" | grep -o "\"apiKeyId\":\"[^\"]*\"" | cut -d\\" -f4)
-KEY_SECRET=$(echo "$KEY_JSON" | grep -o "\"apiKey\":\"[^\"]*\"" | cut -d\\" -f4)
+	KEY_ID=$(echo "$KEY_JSON" | tr "," "\n" | grep -w apiKeyId | tr -dc "a-z0-9")
+	KEY_SECRET=$(echo "$KEY_JSON" | tr "," "\n" | grep -w apiKey | tr -dc "a-z0-9")
 if [ -z "$KEY_ID" ] || [ -z "$KEY_SECRET" ]; then echo pangolin-key-mint-failed; exit 1; fi
 ORG_JSON=$(curl -s -X PUT http://localhost:3003/v1/org -H "Authorization: Bearer $KEY_ID.$KEY_SECRET" -H "Content-Type: application/json" -d "{\"orgId\":\"freehold\",\"name\":\"freehold\",\"subnet\":\"100.90.0.0/16\",\"utilitySubnet\":\"100.91.0.0/24\"}")
-ORG_ID=$(echo "$ORG_JSON" | grep -o "\"orgId\":\"freehold\"" | head -1)
-if [ -z "$ORG_ID" ]; then echo pangolin-org-create-failed; exit 1; fi
+	echo "$ORG_JSON" | grep -q orgId || { echo pangolin-org-create-failed; exit 1; }
+
 curl -s -b /srv/pangolin/admin.cookies -X POST http://localhost:3000/api/v1/api-key/$KEY_ID/actions -H "Content-Type: application/json" -H "X-CSRF-Token: x-csrf-protection" -d "{\"actionIds\":[\"createOrg\",\"createSite\",\"deleteSite\",\"createResource\",\"deleteResource\",\"createTarget\",\"deleteTarget\",\"getSite\",\"getResource\",\"listSites\",\"listResources\",\"listTargets\",\"getDomain\",\"listOrgDomains\",\"generateAccessToken\",\"updateResource\"]}" >/dev/null
 printf "%%s\n" "$KEY_ID.$KEY_SECRET" > /srv/pangolin/root-key.env
 chmod 600 /srv/pangolin/root-key.env
@@ -150,9 +152,9 @@ services:
     container_name: pangolin
     restart: unless-stopped
     ports:
-      - "3000:3000"
-      - "3001:3001"
-      - "3003:3003"
+      - "127.0.0.1:3000:3000"
+      - "127.0.0.1:3001:3001"
+      - "127.0.0.1:3003:3003"
     volumes:
       - ./config:/app/config
     healthcheck:
@@ -202,6 +204,7 @@ services:
 // world's CP drives it), signup open for the bootstrap (the admin exists
 // after the script; locking signup is the operator's hardening act).
 func pangolinConfig(worldDomain string) string {
+	dash := "pangolin." + worldDomain
 	return fmt.Sprintf(`gerbil:
     start_port: 51820
     base_endpoint: "%s"
@@ -227,7 +230,7 @@ flags:
     disable_signup_without_invite: false
     disable_user_create_org: false
     allow_raw_resources: true
-`, worldDomain, worldDomain, worldDomain, worldDomain)
+`, dash, dash, worldDomain, worldDomain)
 }
 
 // pangolinTraefikConf renders the traefik static config: the ACME resolver

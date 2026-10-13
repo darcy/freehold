@@ -14,7 +14,6 @@ import (
 	"fmt"
 	"os"
 	"regexp"
-	"runtime"
 	"strings"
 	"time"
 
@@ -27,6 +26,8 @@ import (
 	oplogin "freehold/freehold-cli/login"
 	"freehold/platform/provisioning"
 	"freehold/platform/provisioning/box"
+	cert "freehold/platform/services/certificates/letsencrypt"
+	dnsman "freehold/platform/services/externaldns/cloudflare"
 	"freehold/providers/proxmox"
 	"freehold/providers/vultr"
 )
@@ -83,10 +84,11 @@ func run(cmd *cobra.Command, args []string) error {
 	if cfg.PangolinHost != nil {
 		existingID = cfg.PangolinHost.ID
 	}
-	session, captured, err := buildPangolinSession(cfg, region, plan)
+	session, captured, cleanup, err := buildPangolinSession(cfg, region, plan)
 	if err != nil {
 		return err
 	}
+	defer cleanup() // the temp door key dies when the run does
 	// A mint + an install takes minutes.
 	ctx, cancel := context.WithTimeout(context.Background(), 30*60*time.Second)
 	defer cancel()
@@ -98,13 +100,18 @@ func run(cmd *cobra.Command, args []string) error {
 	if keyLine == "" {
 		return fmt.Errorf("the pangolin install printed no root key — the instance %s is LIVE AND BILLING; recover the key from /srv/pangolin/root-key.env on it (the door key reaches it)", host.ID)
 	}
-	endpoint := "http://" + host.IP + ":3003"
+	endpoint := "http://127.0.0.1:3003" // the CP's SSH-forward loopback — the tunnel stage makes it mean the VPS
+	newtEndpoint := "https://pangolin." + worldDomain
 
 	// Record the bill + the public-path shape in the profile (uninstall's
-	// --destroy-host finds it here).
+	// --destroy-host finds it here). DNSIP = the VPS: the exposed apps' A
+	// records move to the edge the moment the build runs.
 	cfg.PangolinHost = &config.PangolinHostSpec{Provider: "vultr", ID: host.ID, IP: host.IP, Endpoint: endpoint}
-	if cfg.Pangolin == nil {
-		cfg.Pangolin = &config.PangolinCoords{Org: "freehold", Site: cfg.Name, Domain: worldDomain}
+	cfg.Pangolin = &config.PangolinCoords{Org: "freehold", Site: cfg.Name, Domain: worldDomain, DNSIP: host.IP}
+	// The edge's own hostname (pangolin.<world>) points at the VPS: its ACME
+	// cert issues there (HTTP-01) and Newt dials TLS through it.
+	if err := pointPangolinHost(cfg, "pangolin."+worldDomain, host.IP); err != nil {
+		fmt.Printf("  (the pangolin.<world> record could not be written: %v — the edge cert + the Newt TLS dial need it; write %s A %s by hand)\n", err, "pangolin."+worldDomain, host.IP)
 	}
 	if err := cfg.Save(cfgPath); err != nil {
 		return fmt.Errorf("record the pangolin host: %w", err)
@@ -127,9 +134,9 @@ func run(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("the pangolin root key is not apiKeyId.secret: %s", keyLine[:12]+"…")
 	}
 	blob, err := certcred.CPSecretBlob("pangolin", "pangolin", map[string]string{
-		"PANGOLIN_BASE":     endpoint,
+		"PANGOLIN_BASE":     endpoint, // the CP's loopback — the tunnel stage's forward
 		"PANGOLIN_KEY":      id + "." + secret,
-		"PANGOLIN_ENDPOINT": "http://" + host.IP + ":3000",
+		"PANGOLIN_ENDPOINT": newtEndpoint, // what Newt dials: TLS via the edge's own cert
 	}, seal, pub)
 	if err != nil {
 		return err
@@ -154,21 +161,21 @@ func run(cmd *cobra.Command, args []string) error {
 	return nil
 }
 
-func buildPangolinSession(cfg *config.Config, region, plan string) (*provisioning.HostSession, *[]string, error) {
+func buildPangolinSession(cfg *config.Config, region, plan string) (*provisioning.HostSession, *[]string, func(), error) {
 	if err := box.EnsureIdentity(box.OpsDir()); err != nil {
-		return nil, nil, fmt.Errorf("ops identity: %w", err)
+		return nil, nil, nil, fmt.Errorf("ops identity: %w", err)
 	}
 	pem, err := box.DoorKeyPEM()
 	if err != nil {
-		return nil, nil, fmt.Errorf("door key: %w", err)
+		return nil, nil, nil, fmt.Errorf("door key: %w", err)
 	}
 	line, err := crypto.ExtractED25519PublicKeyLine(pem)
 	if err != nil {
-		return nil, nil, fmt.Errorf("door key: %w", err)
+		return nil, nil, nil, fmt.Errorf("door key: %w", err)
 	}
 	keyPath, cleanup, err := proxmox.WriteTempKey(pem)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	captured := &[]string{}
 	session := &provisioning.HostSession{
@@ -181,7 +188,7 @@ func buildPangolinSession(cfg *config.Config, region, plan string) (*provisionin
 		World:    cfg.Name,
 	}
 	if session.Answers["VULTR_API_KEY"] == "" {
-		return nil, nil, fmt.Errorf("pangolin needs the Vultr API key (VULTR_API_KEY in the env; used for this mint, never stored)")
+		return nil, nil, nil, fmt.Errorf("pangolin needs the Vultr API key (VULTR_API_KEY in the env; used for this mint, never stored)")
 	}
 	session.ExecOnHost = func(script string, timeoutSecs uint64) error {
 		out, err := proxmox.SSHExec(session.Host, keyPath)(script, timeoutSecs)
@@ -204,10 +211,7 @@ func buildPangolinSession(cfg *config.Config, region, plan string) (*provisionin
 		}
 	}
 	session.Print = func(format string, args ...any) { fmt.Printf(format, args...) }
-	// The key file's temp cleanup rides the process exit (the session's
-	// execs dial through it for the whole flow).
-	runtime.SetFinalizer(session, func(*provisioning.HostSession) { cleanup() })
-	return session, captured, nil
+	return session, captured, cleanup, nil
 }
 
 func parseRootKey(outputs []string) string {
@@ -220,6 +224,32 @@ func parseRootKey(outputs []string) string {
 		}
 	}
 	return key
+}
+
+// pointPangolinHost writes the edge's own hostname record
+// (pangolin.<world>) — its ACME cert issues on the VPS (HTTP-01) and Newt
+// dials TLS through it. The zone credential = the box's own sealed DNS copy
+// (the one the build's record management reads); a manual-DNS world returns
+// an error the caller surfaces as the by-hand instruction.
+func pointPangolinHost(cfg *config.Config, host, ip string) error {
+	cc := &certcred.Engine{Out: os.Stdout, Yes: true}
+	_, identSecret, _, err := cc.CertIdent()
+	if err != nil {
+		return err
+	}
+	open := func(sec, aad, blob []byte) ([]byte, error) { return crypto.Open(sec, aad, blob) }
+	provider, env, err := cert.LoadCreds(cc.CertCredPath("relay"), open, identSecret)
+	if err != nil {
+		return err
+	}
+	if provider == "manual" {
+		return fmt.Errorf("manual DNS mode")
+	}
+	mgr, err := dnsman.For(provider, env)
+	if err != nil {
+		return err
+	}
+	return mgr.UpsertA(host, ip)
 }
 
 func consoleLogin(cfg *config.Config) (*console.Client, error) {

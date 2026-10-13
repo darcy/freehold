@@ -430,6 +430,9 @@ func (s *Spec) pangolinEnsure(rec agenttools.AppRecord) error {
 			return fmt.Errorf("pangolin: site %q was CREATED and its one-time Newt secret could not be sealed — the identity is unusable until it is (remove the site on the instance and re-run): %w", p.Site, err)
 		}
 	}
+	if err := s.ensurePangolinTunnel(); err != nil {
+		return fmt.Errorf("pangolin: the CP tunnel stage: %w", err)
+	}
 	if err := s.ensureNewtGateway(endpoint); err != nil {
 		return fmt.Errorf("pangolin: the gateway's newt stage: %w", err)
 	}
@@ -448,6 +451,40 @@ func (s *Spec) pangolinEnsure(rec agenttools.AppRecord) error {
 		fmt.Fprintf(os.Stderr, "pangolin: resource %s created (%s)\n", rec.Name, res.FullDomain)
 	}
 	return nil
+}
+
+// ensurePangolinTunnel keeps the CP's side of the public path up: the VPS's
+// integration API binds LOOPBACK (the Bearer key never rides cleartext
+// internet), so the CP reaches it through an SSH forward to the VPS over
+// the door key (the VPS was born with it authorized) — a systemd unit on
+// the CP guest, restarted on every assert like every other stage. The
+// client's sealed base stays http://127.0.0.1:3003 — this unit IS what
+// makes that address mean the VPS.
+func (s *Spec) ensurePangolinTunnel() error {
+	if s.Pangolin == nil || s.Pangolin.DNSIP == "" {
+		return nil // no VPS address on record — nothing to forward to
+	}
+	vps := s.Pangolin.DNSIP
+	unit := fmt.Sprintf(`set -e
+cat > /etc/systemd/system/pangolin-tunnel.service <<UNIT
+[Unit]
+Description=Pangolin integration tunnel (freehold public path)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/bin/ssh -N -o ServerAliveInterval=30 -o ExitOnForwardFailure=yes -o StrictHostKeyChecking=accept-new -i /srv/data/cp/verb-ssh.key -L 127.0.0.1:3003:127.0.0.1:3003 root@%s
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+systemctl daemon-reload
+systemctl enable pangolin-tunnel >/dev/null 2>&1
+systemctl restart pangolin-tunnel
+`, vps)
+	return s.run(unit, 60)
 }
 
 // newtVersion pins the Newt release the gateway stage installs; newtURL is

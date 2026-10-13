@@ -222,6 +222,14 @@ func destroyPangolinHost(cfg *config.Config, yes, destroy bool) error {
 	for k, v := range cfg.HostProvider.Answers {
 		answers[k] = v
 	}
+	for _, need := range prov.Needs() {
+		if !need.Secret {
+			continue
+		}
+		if v := strings.TrimSpace(os.Getenv(need.Name)); v != "" {
+			answers[need.Name] = v
+		}
+	}
 	session := &provisioning.HostSession{Answers: answers}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
