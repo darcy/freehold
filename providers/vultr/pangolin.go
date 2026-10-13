@@ -89,7 +89,8 @@ printf "%%s\n" "$KEY_ID.$KEY_SECRET" > /srv/pangolin/root-key.env
 chmod 600 /srv/pangolin/root-key.env
 ORG_JSON=$(curl -s -X PUT http://localhost:3003/v1/org -H "Authorization: Bearer $KEY_ID.$KEY_SECRET" -H "Content-Type: application/json" -d "{\"orgId\":\"freehold\",\"name\":\"freehold\",\"subnet\":\"100.90.0.0/16\",\"utilitySubnet\":\"100.91.0.0/24\"}")
 echo "$ORG_JSON" | grep -q orgId || { echo "PANGOLIN_ORG_JSON=$ORG_JSON"; echo pangolin-org-create-failed; exit 1; }
-curl -s -b /srv/pangolin/admin.cookies -X POST http://localhost:3000/api/v1/api-key/$KEY_ID/actions -H "Content-Type: application/json" -H "X-CSRF-Token: x-csrf-protection" -d "{\"actionIds\":[\"createOrg\",\"createSite\",\"deleteSite\",\"createResource\",\"deleteResource\",\"createTarget\",\"deleteTarget\",\"getSite\",\"getResource\",\"listSites\",\"listResources\",\"listTargets\",\"getDomain\",\"listOrgDomains\",\"generateAccessToken\",\"updateResource\"]}" >/dev/null
+GRANT=$(curl -sf -b /srv/pangolin/admin.cookies -X POST http://localhost:3000/api/v1/api-key/$KEY_ID/actions -H "Content-Type: application/json" -H "X-CSRF-Token: x-csrf-protection" -d "{\"actionIds\":[\"createOrg\",\"createSite\",\"deleteSite\",\"createResource\",\"deleteResource\",\"createTarget\",\"deleteTarget\",\"getSite\",\"getResource\",\"listSites\",\"listResources\",\"listTargets\",\"getDomain\",\"listOrgDomains\",\"generateAccessToken\",\"updateResource\"]}") || { echo pangolin-actions-grant-failed; exit 1; }
+echo "$GRANT" | grep -q "\"success\":true" || { echo "PANGOLIN_GRANT_JSON=$GRANT"; echo pangolin-actions-grant-failed; exit 1; }
 echo "PANGOLIN_ROOT_KEY=$KEY_ID.$KEY_SECRET"
 rm -f /srv/pangolin/admin.cookies
 echo pangolin-install-ok

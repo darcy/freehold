@@ -536,13 +536,6 @@ type WorldBuildResult struct {
 // shared cpbuild engine through its co-located runner — the drive-through-CP
 // build a thin box uses. The build runs for minutes, so this switches to a
 // long client timeout.
-// SetAPIKeyActions grants an API key its action set (the server-admin
-// session route) — the bootstrap flow's last leg: the freshly minted root
-// key learns what the world's CP may call.
-func (c *Client) SetAPIKeyActions(apiKeyID string, actions []string) (json.RawMessage, error) {
-	return c.request(http.MethodPost, "/api/v1/api-key/"+apiKeyID+"/actions", map[string]any{"actionIds": actions})
-}
-
 func (c *Client) WorldBuild() (*WorldBuildResult, error) {
 	c.hc = &http.Client{Timeout: 20 * time.Minute}
 	raw, err := c.request(http.MethodPost, "/api/world-build", nil)

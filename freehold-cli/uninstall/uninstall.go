@@ -75,6 +75,9 @@ var uninstallCmd = &cobra.Command{
 			} else {
 				fmt.Println("  no world to tear down (a half-installed host, or the runner is not serving) — destroying the instance directly; the API needs no host access")
 			}
+			if perr := destroyPangolinHost(cfg, yes, true); perr != nil {
+				return perr
+			}
 			running, derr := destroyHostViaProvider(cfg, yes, true)
 			if derr != nil {
 				return derr
@@ -114,6 +117,9 @@ var uninstallCmd = &cobra.Command{
 			if err := runUninstallTransient(cfg, host, removeData, keepHostAccess); err != nil {
 				return err
 			}
+			if perr := destroyPangolinHost(cfg, yes, destroyHost); perr != nil {
+				return perr
+			}
 			instanceRunning, derr := destroyHostViaProvider(cfg, yes, destroyHost)
 			if derr != nil {
 				return derr
@@ -129,6 +135,9 @@ var uninstallCmd = &cobra.Command{
 		}
 		if err := runUninstall(cfg, configPath, host, removeData, keepHostAccess); err != nil {
 			return err
+		}
+		if perr := destroyPangolinHost(cfg, yes, destroyHost); perr != nil {
+			return perr
 		}
 		instanceRunning, derr := destroyHostViaProvider(cfg, yes, destroyHost)
 		if derr != nil {
@@ -167,11 +176,6 @@ func destroyHostViaProvider(cfg *config.Config, yes, destroy bool) (bool, error)
 		if err := common.ConfirmDestructive("destroy the " + prov.Name() + " instance (its data dies with it)"); err != nil {
 			fmt.Println("  instance left running — destroy it later with --destroy-host")
 			return true, nil
-		}
-	}
-	if cfg.PangolinHost != nil && cfg.PangolinHost.ID != "" {
-		if err := destroyPangolinHost(cfg, yes, destroy); err != nil {
-			return true, err
 		}
 	}
 	answers := map[string]string{}

@@ -458,8 +458,9 @@ func (s *Spec) pangolinEnsure(rec agenttools.AppRecord) error {
 
 // ensurePangolinTunnel keeps the CP's side of the public path up: the VPS's
 // integration API binds LOOPBACK (the Bearer key never rides cleartext
-// internet), so the CP reaches it through an SSH forward to the VPS over
-// the door key (the VPS was born with it authorized) — a systemd unit on
+// internet), so the CP reaches it through an SSH forward to the VPS using
+// the CP-minted tunnel key (the VPS's authorized_keys carries its pub —
+// written by `freehold pangolin`) — a systemd unit on
 // the CP guest, restarted on every assert like every other stage. The
 // client's sealed base stays http://127.0.0.1:3003 — this unit IS what
 // makes that address mean the VPS.
