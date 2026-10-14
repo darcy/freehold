@@ -1245,3 +1245,151 @@ func TestPangolinStageReAssertsPerExpose(t *testing.T) {
 		t.Fatalf("the second expose must re-assert the stage (the reset), got %d", count())
 	}
 }
+
+// TestRenderCasaqReferenceShape pins the casaq incident's fix end to end:
+// the world domain AT the apex (world_domain), the portal vhost at the root,
+// the four registry apps + two gate-less rider vhosts behind the SHARED
+// wildcard, and the operator's two matchers (browns' bearer + path
+// exemption, navidrome's Subsonic paths) in the @gated dispatch shape. The
+// expected body is the restored reference render
+// (k3s:/srv/data/k8s-volumes/caddy-edge/Caddyfile.restored-2026-10-14)
+// verbatim — the acceptance is "diffs clean against it modulo upstream
+// IPs", and the fixture pins the reference's own IPs, so the render must be
+// byte-equal.
+func TestRenderCasaqReferenceShape(t *testing.T) {
+	te := newTestExposer(t, nil, nil)
+	te.spec.RelayHost = "chat.casaquerencia.net"
+	te.spec.RelayIP = "10.77.0.11"
+	te.spec.CpHost = "admin.casaquerencia.net"
+	te.spec.CpIP = "10.77.0.12"
+	te.spec.K3sIP = "10.77.0.13"
+	te.spec.WorldDomainOverride = "casaquerencia.net"
+	te.spec.EdgeApps = map[string]config.EdgeApp{
+		"browns":    {ExemptPaths: []string{"/openapi.json", "/api/*"}, ExemptBearer: true},
+		"navidrome": {ExemptPaths: []string{"/rest/*", "/auth/*"}},
+		"nextcloud": {Upstream: "10.43.137.233:80"},
+		"paperless": {Upstream: "10.43.79.131:80"},
+	}
+	for _, rec := range []agenttools.AppRecord{
+		{Name: "browns", FQDN: "browns.casaquerencia.net", Target: "10.43.183.77:3000", Auth: agenttools.AuthGate, Group: "f4466ad8-ba6e-4803-b272-5dc529077d34"},
+		{Name: "litellm", FQDN: "litellm.casaquerencia.net", Target: "10.77.0.13:31400", Auth: agenttools.AuthGate, Group: "f4466ad8-ba6e-4803-b272-5dc529077d34"},
+		{Name: "navidrome", FQDN: "navidrome.casaquerencia.net", Target: "10.43.221.70:4533", Auth: agenttools.AuthGate, Group: "f4466ad8-ba6e-4803-b272-5dc529077d34"},
+		{Name: "sparkdash", FQDN: "sparkdash.casaquerencia.net", Target: "10.43.79.53:5555", Auth: agenttools.AuthGate, Group: "f4466ad8-ba6e-4803-b272-5dc529077d34"},
+	} {
+		if err := te.apps.Expose(rec); err != nil {
+			t.Fatal(err)
+		}
+	}
+	te.spec.execHook = func(cmd string, _ uint64, _ ...string) (string, error) {
+		if strings.Contains(cmd, "base64 -w0 <") {
+			if strings.Contains(cmd, "caddy-edge/portal") {
+				return base64.StdEncoding.EncodeToString(selfSigned(t, "casaquerencia.net")), nil
+			}
+			return base64.StdEncoding.EncodeToString(selfSigned(t, "*.casaquerencia.net")), nil
+		}
+		return "OK", nil
+	}
+	body := te.spec.renderCaddyfile()
+
+	want := `{
+  auto_https off
+}
+
+chat.casaquerencia.net {
+  tls /data/tls/relay/fullchain.pem /data/tls/relay/key.pem
+  handle /pair* {
+    reverse_proxy 10.77.0.13:5000
+  }
+  handle {
+    reverse_proxy 10.77.0.11:3000
+  }
+}
+
+admin.casaquerencia.net {
+  tls /data/tls/cp/fullchain.pem /data/tls/cp/key.pem
+  handle /mcp {
+    reverse_proxy 10.77.0.12:8089
+  }
+  handle {
+    reverse_proxy 10.77.0.12:8080
+  }
+}
+
+casaquerencia.net {
+  tls /data/tls/portal/fullchain.pem /data/tls/portal/key.pem
+  handle {
+    reverse_proxy 10.77.0.12:8080
+  }
+}
+
+browns.casaquerencia.net {
+  tls /data/tls/apps/fullchain.pem /data/tls/apps/key.pem
+  @gated not {
+    path /openapi.json /api/*
+    header Authorization Bearer*
+  }
+  handle @gated {
+    forward_auth 10.77.0.12:8080 {
+      uri /auth/verify
+      header_up X-Original-Host {host}
+      header_up X-Original-Uri {uri}
+    }
+    reverse_proxy 10.43.183.77:3000
+  }
+  handle {
+    reverse_proxy 10.43.183.77:3000
+  }
+}
+
+litellm.casaquerencia.net {
+  tls /data/tls/apps/fullchain.pem /data/tls/apps/key.pem
+  forward_auth 10.77.0.12:8080 {
+    uri /auth/verify
+    header_up X-Original-Host {host}
+    header_up X-Original-Uri {uri}
+  }
+  reverse_proxy 10.77.0.13:31400
+}
+
+navidrome.casaquerencia.net {
+  tls /data/tls/apps/fullchain.pem /data/tls/apps/key.pem
+  @gated not {
+    path /rest/* /auth/*
+  }
+  handle @gated {
+    forward_auth 10.77.0.12:8080 {
+      uri /auth/verify
+      header_up X-Original-Host {host}
+      header_up X-Original-Uri {uri}
+    }
+    reverse_proxy 10.43.221.70:4533
+  }
+  handle {
+    reverse_proxy 10.43.221.70:4533
+  }
+}
+
+nextcloud.casaquerencia.net {
+  tls /data/tls/apps/fullchain.pem /data/tls/apps/key.pem
+  reverse_proxy 10.43.137.233:80
+}
+
+paperless.casaquerencia.net {
+  tls /data/tls/apps/fullchain.pem /data/tls/apps/key.pem
+  reverse_proxy 10.43.79.131:80
+}
+
+sparkdash.casaquerencia.net {
+  tls /data/tls/apps/fullchain.pem /data/tls/apps/key.pem
+  forward_auth 10.77.0.12:8080 {
+    uri /auth/verify
+    header_up X-Original-Host {host}
+    header_up X-Original-Uri {uri}
+  }
+  reverse_proxy 10.43.79.53:5555
+}
+`
+	if body != want {
+		t.Errorf("the casaq render must diff clean against the restored reference:\nGOT:\n%s\nWANT:\n%s", body, want)
+	}
+}

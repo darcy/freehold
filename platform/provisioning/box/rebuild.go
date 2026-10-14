@@ -2715,6 +2715,7 @@ func (e *Engine) worldConfigJSON(cfg *config.Config) string {
 		OwnerPub:       e.F.OperatorPubkey,
 		OperatorName:   firstNonBlank(e.F.OperatorName, cfg.OperatorName),
 		WorldDomain:    firstNonBlank(e.F.WorldDomain, cfg.WorldDomain),
+		EdgeApps:       edgeAppsFromConfig(cfg),
 		Pangolin:       cfg.Pangolin,
 		LitellmBaseURL: cfg.Litellm.URL,
 		// The agent-tools server's reachable URL, NOT the console's: this is the
@@ -2898,6 +2899,21 @@ func firstNonBlank(a, b string) string {
 		return a
 	}
 	return b
+}
+
+// edgeAppsFromConfig lifts the profile's [edge.apps] riders into the coords —
+// the world-config is the console's only input, and the edge render converges
+// from it (the operator's gate-less exceptions + gate exemptions ride every
+// restart instead of living in a rendered configmap a pass can strip).
+func edgeAppsFromConfig(cfg *config.Config) map[string]config.EdgeApp {
+	if len(cfg.Edge.Apps) == 0 {
+		return nil
+	}
+	out := make(map[string]config.EdgeApp, len(cfg.Edge.Apps))
+	for name, ea := range cfg.Edge.Apps {
+		out[name] = ea
+	}
+	return out
 }
 
 func derefU32(p *uint32) uint32 {

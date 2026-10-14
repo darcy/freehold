@@ -148,6 +148,12 @@ type Spec struct {
 	// world AT the apex. Resolved through Spec.worldDomain() — consumed only
 	// when the CP host is actually its child. Empty = the derived shape.
 	WorldDomainOverride string
+	// EdgeApps is the operator's at-source edge riders (the profile's
+	// [edge.apps], via the world-config): gate exemptions for registry apps
+	// by name + gate-less rider vhosts for apps with no registry row. The
+	// edge render merges them in — a restart converges to the operator's
+	// shape instead of stripping what only the rendered configmap carried.
+	EdgeApps map[string]config.EdgeApp
 	// RepoURL is the source repository the shared system-orientation block
 	// points agents at. Empty = the agents package's upstream default.
 	RepoURL string

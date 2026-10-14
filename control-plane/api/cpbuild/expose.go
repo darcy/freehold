@@ -209,12 +209,51 @@ func (s *Spec) appVhost(rec agenttools.AppRecord) caddydeploy.AppVhost {
 	if rec.Auth == agenttools.AuthGate {
 		gate = s.CpIP + ":8080"
 	}
-	return caddydeploy.AppVhost{
+	v := caddydeploy.AppVhost{
 		FQDN:     s.appRecordFQDN(rec),
 		Upstream: rec.Target,
 		Slot:     appsCertSlot,
 		Gate:     gate,
 	}
+	// The operator's at-source exemptions ride by NAME (the profile's
+	// [edge.apps]) — the registry row still owns fqdn/upstream.
+	if ea, ok := s.EdgeApps[rec.Name]; ok {
+		v.ExemptPaths = ea.ExemptPaths
+		v.ExemptBearer = ea.ExemptBearer
+	}
+	return v
+}
+
+// edgeRiders renders the operator's at-source rider vhosts — [edge.apps]
+// rows with NO registry record (the gate-less apps an operator pins at
+// source: nextcloud/paperless-class services). The registry owns the gated
+// surface; these are the operator's explicit exceptions, and they ride the
+// SAME shared wildcard slot (cert-before-config applies — the caller renders
+// them only behind a valid wildcard). A row whose name matches a registry
+// record is NOT a rider (its exemptions merged in appVhost instead).
+func (s *Spec) edgeRiders(registry map[string]bool) []caddydeploy.AppVhost {
+	if len(s.EdgeApps) == 0 {
+		return nil
+	}
+	var riders []caddydeploy.AppVhost
+	for name, ea := range s.EdgeApps {
+		if registry[name] || ea.Upstream == "" {
+			continue
+		}
+		gate := ""
+		if ea.Gate != nil && *ea.Gate {
+			gate = s.CpIP + ":8080"
+		}
+		riders = append(riders, caddydeploy.AppVhost{
+			FQDN:        appFQDN(s.CpHost, s.WorldDomainOverride, name),
+			Upstream:    ea.Upstream,
+			Slot:        appsCertSlot,
+			Gate:        gate,
+			ExemptPaths: ea.ExemptPaths,
+			ExemptBearer: ea.ExemptBearer,
+		})
+	}
+	return riders
 }
 
 // appsCertEnsure runs the SHARED wildcard cert's chain (*.world-domain): the
@@ -671,9 +710,12 @@ func (s *Spec) renderCaddyfile() string {
 		wc, err := s.durableFullchain(s.K3sVmid, appsCertSlot)
 		if err == nil {
 			if _, ok := cert.ReuseIfValidBytes(wc, time.Now(), 0); ok && certCovers(wc, s.appWildcard()) {
+				registry := map[string]bool{}
 				for _, rec := range s.Apps.List() {
+					registry[rec.Name] = true
 					apps = append(apps, s.appVhost(rec))
 				}
+				apps = append(apps, s.edgeRiders(registry)...)
 			}
 		}
 	}

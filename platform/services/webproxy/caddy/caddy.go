@@ -74,12 +74,20 @@ func RenderCaddyfile(relayHost, relayUpstream, pairUpstream, cpHost, cpUpstream,
 // internal upstream it proxies to, the cert slot that must ALREADY be
 // installed (a vhost referencing a missing cert crash-loops the whole edge),
 // and the console upstream its member gate forwards through ("" = ungated —
-// an operator-only choice).
+// an operator-only choice). ExemptPaths/ExemptBearer (operator-pinned, via
+// the profile's [edge.apps]) shape the gate into the @gated dispatch: the
+// exempted requests (matching paths, or carrying an Authorization bearer
+// header — the app's own API clients) skip the member gate entirely and
+// proxy straight through; everything else still authenticates. caddy 2.8.4
+// rejects named matchers on forward_auth, so the dispatch shape is
+// `@gated not { … }` + paired handle blocks — test-proven.
 type AppVhost struct {
-	FQDN     string
-	Upstream string
-	Slot     string
-	Gate     string
+	FQDN        string
+	Upstream    string
+	Slot        string
+	Gate        string
+	ExemptPaths []string
+	ExemptBearer bool
 }
 
 // RenderAppVhosts renders the apps' site blocks appended after the base
@@ -97,11 +105,31 @@ func RenderAppVhosts(apps []AppVhost) string {
 			// X-Original-Host/Uri: the gate reads WHICH app the request hit
 			// (and where to return the member after login) — explicit header_up
 			// beats betting on Caddy's default forwarded headers.
-			b.WriteString("  forward_auth " + a.Gate + " {\n    uri /auth/verify\n")
-			b.WriteString("    header_up X-Original-Host {host}\n")
-			b.WriteString("    header_up X-Original-Uri {uri}\n  }\n")
+			if len(a.ExemptPaths) > 0 || a.ExemptBearer {
+				b.WriteString("  @gated not {\n")
+				if len(a.ExemptPaths) > 0 {
+					b.WriteString("    path " + strings.Join(a.ExemptPaths, " ") + "\n")
+				}
+				if a.ExemptBearer {
+					b.WriteString("    header Authorization Bearer*\n")
+				}
+				b.WriteString("  }\n")
+				b.WriteString("  handle @gated {\n")
+				b.WriteString("    forward_auth " + a.Gate + " {\n      uri /auth/verify\n")
+				b.WriteString("      header_up X-Original-Host {host}\n")
+				b.WriteString("      header_up X-Original-Uri {uri}\n    }\n")
+				b.WriteString("    reverse_proxy " + a.Upstream + "\n  }\n")
+				b.WriteString("  handle {\n")
+				b.WriteString("    reverse_proxy " + a.Upstream + "\n  }\n")
+			} else {
+				b.WriteString("  forward_auth " + a.Gate + " {\n    uri /auth/verify\n")
+				b.WriteString("    header_up X-Original-Host {host}\n")
+				b.WriteString("    header_up X-Original-Uri {uri}\n  }\n")
+				b.WriteString("  reverse_proxy " + a.Upstream + "\n")
+			}
+		} else {
+			b.WriteString("  reverse_proxy " + a.Upstream + "\n")
 		}
-		b.WriteString("  reverse_proxy " + a.Upstream + "\n")
 		b.WriteString("}\n")
 	}
 	return b.String()

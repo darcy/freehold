@@ -76,6 +76,7 @@ func NewSpec(c Coords, sec []byte, audience string) *Spec {
 		GatewayLxc:          c.GatewayLxc,
 		HostedGateway:       c.HostedGateway,
 		K3sIP:               c.K3sIP,
+		EdgeApps:            c.EdgeApps,
 		Sec:                 sec,
 		Audience:            audience,
 	}
@@ -122,6 +123,7 @@ func (s *Spec) Coords() Coords {
 		GatewayCIDR: s.GatewayCIDR, GatewayVlan: s.GatewayVlan, GatewayLxc: s.GatewayLxc,
 		HostedGateway: s.HostedGateway,
 		K3sIP:         s.K3sIP,
+		EdgeApps:      s.EdgeApps,
 		Pangolin:      s.Pangolin,
 	}
 }
