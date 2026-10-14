@@ -125,6 +125,12 @@ func (s *Spec) agentToolsServeFlags() string {
 			serveFlags += " --pangolin-b64 " + base64.StdEncoding.EncodeToString(b)
 		}
 	}
+	if ea := EdgeAppsArg(s.EdgeApps); ea != "" {
+		// The verb path's Spec must carry the operator's edge riders too:
+		// an expose/unexpose re-applies the edge config, and a render without
+		// the riders silently strips them (the two-appliers invariant).
+		serveFlags += " --edge-apps-b64 " + ea
+	}
 	if s.RelayPK != "" {
 		serveFlags += " --relay-pubkey " + s.RelayPK
 	}

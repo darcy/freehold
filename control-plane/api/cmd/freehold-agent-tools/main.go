@@ -452,6 +452,7 @@ func cmdServe(args []string) {
 	// on a root-executed argv must never carry shell/flag metacharacters.
 	operatorNameB64 := fs.String("operator-name-b64", "", "operator display name in Buzz, base64 (the kind:0 profile the build publishes; default \"Operator\")")
 	pangolinB64 := fs.String("pangolin-b64", "", "the pangolin public-path coords (org/site/domain/dns_ip) as base64 JSON — the non-secret shape; the instance address + root key stay sealed CP-side")
+	edgeAppsB64 := fs.String("edge-apps-b64", "", "the operator's edge riders ([edge.apps]: gate exemptions + gate-less rider vhosts) as base64 JSON — the render's third input beside the world coords and the apps registry")
 	ownerPub := fs.String("owner-pubkey", "", "operator pubkey (agent identity secret owner)")
 	litellmBase := fs.String("litellm-base", "", "litellm gateway base URL for agent pods")
 	selfURL := fs.String("self-url", "", "this server's reachable HTTP base URL (e.g. http://<cpIP>:8089) the CPA pod bootstraps its mcp bridge from")
@@ -513,6 +514,10 @@ func cmdServe(args []string) {
 	if err != nil {
 		log.Fatalf("--pangolin-b64 is not valid base64 JSON: %v", err)
 	}
+	edgeApps, err := cpbuild.EdgeAppsFromArg(*edgeAppsB64)
+	if err != nil {
+		log.Fatalf("--edge-apps-b64 is not valid base64 JSON: %v", err)
+	}
 
 	spec := &cpbuild.Spec{
 		StateDir:       *stateDir,
@@ -551,6 +556,7 @@ func cmdServe(args []string) {
 		OwnerPub:       *ownerPub,
 		OperatorName:   operatorName,
 		Pangolin:       pangolinCoords,
+		EdgeApps:       edgeApps,
 		LitellmBaseURL: litellmBaseURL,
 		Sec:            secBytes,
 		Audience:       audience,

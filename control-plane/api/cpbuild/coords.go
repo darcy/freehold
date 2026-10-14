@@ -33,6 +33,40 @@ func PangolinFromArg(arg string) (*config.PangolinCoords, error) {
 	return &p, nil
 }
 
+// EdgeAppsFromArg decodes the agent-tools serve argv's edge-apps block (b64
+// JSON of the profile's [edge.apps] riders). Empty returns nil — a serve
+// predating the flag renders the registry-only edge, exactly as before.
+func EdgeAppsFromArg(arg string) (map[string]config.EdgeApp, error) {
+	if strings.TrimSpace(arg) == "" {
+		return nil, nil
+	}
+	raw, err := base64.StdEncoding.DecodeString(strings.TrimSpace(arg))
+	if err != nil {
+		return nil, err
+	}
+	var apps map[string]config.EdgeApp
+	if err := json.Unmarshal(raw, &apps); err != nil {
+		return nil, err
+	}
+	return apps, nil
+}
+
+// EdgeAppsArg encodes the Spec's edge riders for the agent-tools serve argv
+// (the b64 JSON EdgeAppsFromArg decodes) — the verb path's render must carry
+// the same riders the console's does, or an expose/unexpose re-applies an
+// edge that silently strips them (the two-appliers-render-identically
+// invariant). "" when the Spec carries none.
+func EdgeAppsArg(apps map[string]config.EdgeApp) string {
+	if len(apps) == 0 {
+		return ""
+	}
+	b, err := json.Marshal(apps)
+	if err != nil {
+		return ""
+	}
+	return base64.StdEncoding.EncodeToString(b)
+}
+
 func NewSpec(c Coords, sec []byte, audience string) *Spec {
 	s := &Spec{
 		Name:                c.Name,

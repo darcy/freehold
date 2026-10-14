@@ -28,6 +28,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"log"
 	"net"
 	"os"
 	"path/filepath"
@@ -235,9 +236,19 @@ func (s *Spec) edgeRiders(registry map[string]bool) []caddydeploy.AppVhost {
 	if len(s.EdgeApps) == 0 {
 		return nil
 	}
+	portal := s.portalHost()
 	var riders []caddydeploy.AppVhost
 	for name, ea := range s.EdgeApps {
 		if registry[name] || ea.Upstream == "" {
+			continue
+		}
+		fqdn := appFQDN(s.CpHost, s.WorldDomainOverride, name)
+		// Two site blocks for one host is an unloadable Caddyfile — the
+		// edge crash-loops and kubectl apply still exits 0. The registry
+		// path refuses the edge's own hosts (BuildExposeAppFn); the rider
+		// path can't fail a render, so it skips loud instead.
+		if fqdn == s.RelayHost || fqdn == s.CpHost || fqdn == portal {
+			log.Printf("edge rider %q: %s is the edge's own host — skipped (rename the rider)", name, fqdn)
 			continue
 		}
 		gate := ""
@@ -245,11 +256,11 @@ func (s *Spec) edgeRiders(registry map[string]bool) []caddydeploy.AppVhost {
 			gate = s.CpIP + ":8080"
 		}
 		riders = append(riders, caddydeploy.AppVhost{
-			FQDN:        appFQDN(s.CpHost, s.WorldDomainOverride, name),
-			Upstream:    ea.Upstream,
-			Slot:        appsCertSlot,
-			Gate:        gate,
-			ExemptPaths: ea.ExemptPaths,
+			FQDN:         fqdn,
+			Upstream:     ea.Upstream,
+			Slot:         appsCertSlot,
+			Gate:         gate,
+			ExemptPaths:  ea.ExemptPaths,
 			ExemptBearer: ea.ExemptBearer,
 		})
 	}

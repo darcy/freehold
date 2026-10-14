@@ -1393,3 +1393,51 @@ sparkdash.casaquerencia.net {
 		t.Errorf("the casaq render must diff clean against the restored reference:\nGOT:\n%s\nWANT:\n%s", body, want)
 	}
 }
+
+// TestExposeVerbRenderKeepsRiders pins the verb path's half of the
+// two-appliers invariant: the agent-tools process builds its Spec from
+// ARGV (not the world-config), and an expose/unexpose there re-applies the
+// edge config — a Spec without the operator's EdgeApps would render an edge
+// that silently strips the riders, surviving until the next console-side
+// build. The serve argv carries the riders (--edge-apps-b64), and the verb
+// render must show them.
+func TestExposeVerbRenderKeepsRiders(t *testing.T) {
+	te := newTestExposer(t, nil, nil)
+	// The agent-tools Spec: same shape, EdgeApps decoded from the serve argv.
+	arg := EdgeAppsArg(map[string]config.EdgeApp{
+		"nextcloud": {Upstream: "10.43.137.233:80"},
+	})
+	if arg == "" {
+		t.Fatal("EdgeAppsArg must encode a non-empty rider set")
+	}
+	back, err := EdgeAppsFromArg(arg)
+	if err != nil {
+		t.Fatalf("EdgeAppsFromArg: %v", err)
+	}
+	te.spec.EdgeApps = back
+	if err := te.apps.Expose(agenttools.AppRecord{
+		Name: "navidrome", FQDN: appFQDN(te.spec.CpHost, "", "navidrome"), Target: "10.78.0.13:4533",
+		Visibility: agenttools.VisibilityFamily, Auth: agenttools.AuthGate,
+		Group: "3fa85f64-5717-4562-b3fc-2c963f66afa6", Owner: "op", Requester: strings.Repeat("b", 64), CreatedAt: 7,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	te.spec.execHook = func(cmd string, _ uint64, _ ...string) (string, error) {
+		if strings.Contains(cmd, "fullchain.pem") {
+			return base64.StdEncoding.EncodeToString(selfSigned(t, "*.librem.example.test")), nil
+		}
+		return "OK", nil
+	}
+	body := te.spec.renderCaddyfile()
+	if !strings.Contains(body, "navidrome.librem.example.test {") {
+		t.Fatalf("the registry app must ride the verb-path render: %s", body)
+	}
+	if !strings.Contains(body, "nextcloud.librem.example.test {") || !strings.Contains(body, "reverse_proxy 10.43.137.233:80") {
+		t.Fatalf("the rider vhost must survive the verb-path re-render: %s", body)
+	}
+	// And the round trip is lossless enough to rebuild the argv for the next
+	// serve restart.
+	if EdgeAppsArg(back) != arg {
+		t.Fatal("the argv codec must round-trip the riders")
+	}
+}
