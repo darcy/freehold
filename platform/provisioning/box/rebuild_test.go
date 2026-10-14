@@ -236,7 +236,7 @@ func TestRecordCoords(t *testing.T) {
 	if err := e.RecordCoords(config.Coords{
 		RelayLxc: 100, RelayIP: "192.168.30.20",
 		CpLxc: 101, CpIP: "192.168.30.21",
-		K3sVmid: 102, ProxyIP: "192.168.30.8",
+		K3sVmid: 102, ProxyIP: "192.168.30.8", K3sIP: "10.77.0.13",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -250,11 +250,29 @@ func TestRecordCoords(t *testing.T) {
 	if got.Lxc.Cp.Vmid == nil || *got.Lxc.Cp.Vmid != 101 || got.Lxc.Cp.Ip == nil || *got.Lxc.Cp.Ip != "192.168.30.21/24" {
 		t.Errorf("cp coords not recorded: %+v", got.Lxc.Cp)
 	}
-	if got.Lxc.K3s.Vmid == nil || *got.Lxc.K3s.Vmid != 102 || got.Lxc.K3s.Ip == nil || *got.Lxc.K3s.Ip != "192.168.30.8/24" {
+	// Behind a gateway the k3s record is the node's INTERNAL address — the
+	// gateway guest carries ProxyIP, and writing that here re-clobbered the
+	// record with the gateway's LAN address on every build.
+	if got.Lxc.K3s.Vmid == nil || *got.Lxc.K3s.Vmid != 102 || got.Lxc.K3s.Ip == nil || *got.Lxc.K3s.Ip != "10.77.0.13/24" {
 		t.Errorf("k3s coords not recorded: %+v", got.Lxc.K3s)
 	}
 	if !containsStr(got.Managed, "k3s") {
 		t.Errorf("managed missing k3s: %v", got.Managed)
+	}
+	// A CP predating the K3s coord reports no k3s_ip: its k3s node still IS
+	// the proxy, so ProxyIP is the right fallback.
+	if err := e.RecordCoords(config.Coords{
+		RelayLxc: 100, RelayIP: "192.168.30.20",
+		CpLxc: 101, CpIP: "192.168.30.21",
+		K3sVmid: 102, ProxyIP: "192.168.30.8",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got, err = config.Load(cfgPath); err != nil {
+		t.Fatal(err)
+	}
+	if got.Lxc.K3s.Ip == nil || *got.Lxc.K3s.Ip != "192.168.30.8/24" {
+		t.Errorf("k3s fallback to ProxyIP not recorded: %+v", got.Lxc.K3s)
 	}
 }
 

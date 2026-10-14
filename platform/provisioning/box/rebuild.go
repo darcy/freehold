@@ -796,6 +796,13 @@ func (e *Engine) RecordCoords(c config.Coords) error {
 	if cfg == nil {
 		return fmt.Errorf("no config at %s", e.F.ConfigPath)
 	}
+	k3sIP := c.K3sIP
+	if k3sIP == "" {
+		// A CP predating the K3sIP coord reports no k3s_ip; its world's
+		// k3s node then still IS the proxy (the pre-gateway shape), so the
+		// old assumption is the right fallback.
+		k3sIP = c.ProxyIP
+	}
 	for _, g := range []struct {
 		role string
 		vmid uint32
@@ -803,9 +810,13 @@ func (e *Engine) RecordCoords(c config.Coords) error {
 	}{
 		{"relay", c.RelayLxc, c.RelayIP},
 		{"cp", c.CpLxc, c.CpIP},
-		// The k3s node's address IS the static proxy IP (k3s carries no Ip of
-		// its own), so the CP reports it as ProxyIP.
-		{"k3s", c.K3sVmid, c.ProxyIP},
+		// K3sIP is the k3s node's OWN address — with a gateway the INTERNAL
+		// one (the gateway guest carries ProxyIP, the edge). Recording
+		// ProxyIP here (the pre-gateway assumption) re-clobbered the k3s
+		// record with the gateway's LAN address on every build, so the
+		// config lied about the k3s guest forever (casaq's stale
+		// 192.168.30.5).
+		{"k3s", c.K3sVmid, k3sIP},
 	} {
 		if g.vmid == 0 {
 			continue
