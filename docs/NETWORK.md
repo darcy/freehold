@@ -165,10 +165,10 @@ The gateway has TWO shapes, one per substrate:
     pulls, so a relay fix upstream does not reach a world until a human pulls (a bounce is
     not an update).
 *   The gateway's host route rides the gateway (its LAN IP) and is re-asserted by every
-    build's gateway stage — but between builds it is kernel runtime state: a PVE host
-    reboot drops it and nothing on the box restores it until the next `freehold build`
-    (which is itself blocked by the missing route's terraform dial). A persisted
-    `if-up.d` route on the host is the stopgap.
+    build's gateway stage (before the terraform dial that needs it, so a post-reboot build
+    self-heals) — but between builds it is kernel runtime state: until the next build, any
+    host-side dial into the subnet (the box's pct-side probes, a thin box's verbs) has no
+    path and blackholes. A persisted `if-up.d` route on the host is the stopgap.
 *   Port 80 reaches Caddy but nothing redirects to 443; no per-guest vhosts; the DNAT list
     is hard-coded.
 *   Pre-gateway worlds' guests are DHCP, so a reboot can strand recorded addresses.
