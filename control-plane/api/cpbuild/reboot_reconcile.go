@@ -22,10 +22,16 @@ import (
 // build/world_build, and the CPA that could ask for one is itself one of the
 // dead pods. The console serve calls ReviveRebootedAgents at boot and keeps
 // a slow periodic re-check for the process lifetime: pods whose last
-// container termination is a NON-CLEAN exit recorded at/after the k3s
-// guest's current boot time are re-asserted through the same
-// create-is-idempotent path every reconcile uses; clean exits (0) and
-// terminations predating the boot stay untouched.
+// container termination is recorded at/after the k3s guest's current boot
+// time are re-asserted through the same create-is-idempotent path every
+// reconcile uses — whatever the exit code, because a boot-window clean exit
+// is a casualty too (the harness starts before the relay/model gateway
+// finish booting and exits 0 in seconds, which restartPolicy: Never then
+// freezes forever), and so are wedged ContainerStatusUnknown terminations,
+// whose FinishedAt the kubelet never records. A clean exit PREDATING the
+// boot stays terminal — that is the intentional-exit case I5 protects
+// (stopping an agent on purpose deletes the pod, which the revive never
+// sees).
 
 const (
 	rebootProbeEvery   = 30 * time.Second
@@ -63,12 +69,16 @@ type podList struct {
 }
 
 // rebootKilled returns the deduped agent display names whose pod's last
-// container termination matches a node reboot: a non-clean exit recorded
-// at/after bootEpoch (the k3s guest's current boot time). A clean exit (0)
-// stays terminal (I5); a non-clean exit predating bootEpoch was already
-// terminal before the reboot and stays as-is. A container still running (or
-// re-created by the kubelet) is alive; a waiting container falls back to its
-// lastState termination record (the FailedMount wedge a reboot can leave).
+// container termination matches a reboot casualty: a termination recorded
+// at/after bootEpoch (the k3s guest's current boot time) — clean or not,
+// because the harness exits 0 when its dependencies (relay, model gateway)
+// are still booting — or a wedged ContainerStatusUnknown (non-clean exit
+// with no FinishedAt; "could not be located when the pod was
+// terminated/deleted" — undatable, and dead regardless of when it happened).
+// A clean exit predating bootEpoch was already terminal before the reboot
+// and stays as-is (I5). A container still running (or re-created by the
+// kubelet) is alive; a waiting container falls back to its lastState
+// termination record (the FailedMount wedge a reboot can leave).
 func rebootKilled(pods podList, bootEpoch int64) []string {
 	var dead []string
 	seen := map[string]bool{}
@@ -85,8 +95,22 @@ func rebootKilled(pods podList, bootEpoch int64) []string {
 			if term == nil && cs.State.Running == nil {
 				term = cs.LastState.Terminated
 			}
-			if term == nil || term.ExitCode == 0 || term.FinishedAt.IsZero() {
+			if term == nil {
 				continue
+			}
+			if term.FinishedAt.IsZero() {
+				// The kubelet lost the container: no timestamp to date it
+				// against the boot. A non-clean exit code is the wedge
+				// signature; a clean one stays terminal (the conservative
+				// default for an undatable exit).
+				if term.ExitCode != 0 {
+					dead = append(dead, name)
+					seen[name] = true
+				}
+				break
+			}
+			if term.ExitCode == 0 && term.FinishedAt.Unix() < bootEpoch {
+				continue // pre-boot clean exit stays terminal (I5)
 			}
 			if term.FinishedAt.Unix() >= bootEpoch {
 				dead = append(dead, name)
