@@ -806,11 +806,19 @@ func (s *Spec) worldBootK3s(mounts []planebase.MountSpec) error {
 
 // worldGateway (re)writes the gateway's nftables ruleset — a pure
 // function of the recorded coords, so every build re-asserts it (a rebuilt
-// k3s with a new internal IP must not leave a stale DNAT). The gateway is
-// created by the BOX install (before the CP, whose default route it
-// becomes); the CP build only owns the config. No-op without one. On a
-// hosted gateway (api-vultr) the assert rides the host itself — same script,
-// no pct wrapper.
+// k3s with a new internal IP must not leave a stale DNAT) — and the HOST's
+// route into the subnet: kernel runtime state a host reboot drops, and the
+// host-side dials (terraform's kubernetes provider, pct-side probes) have no
+// other path into the RFC1918 subnet than the default route to the LAN
+// router, which blackholes them. The route goes VIA the gateway (its LAN
+// IP), never L2-direct: the gateway is stateful, and a flow that bypasses it
+// gets replies its conntrack never saw — the edge's reverse-DNAT then dies
+// for every LAN client while the subnet itself looks healthy (the casaq
+// outage). The gateway is created by the BOX install (before the CP, whose
+// default route it becomes); the CP build only owns the config. No-op
+// without one. On a hosted gateway (api-vultr) the assert rides the host
+// itself — same script, no pct wrapper, and no route (the host owns the
+// bridge's connected route).
 func (s *Spec) worldGateway() error {
 	if s.GatewayCIDR == "" || (s.GatewayLxc == 0 && !s.HostedGateway) {
 		return nil
@@ -857,6 +865,12 @@ systemctl restart nftables dnsmasq >/dev/null 2>&1 || nft -f /etc/nftables.conf
 	}
 	if err := s.run(cmd, 300); err != nil {
 		return fmt.Errorf("gateway nftables: %w", err)
+	}
+	if !s.HostedGateway {
+		if err := s.run(fmt.Sprintf("ip route replace %s via %s dev %s",
+			s.GatewayCIDR, config.StripCIDR(s.ProxyIP), bridge), 30); err != nil {
+			return fmt.Errorf("gateway host route: %w", err)
+		}
 	}
 	return nil
 }

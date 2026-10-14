@@ -164,10 +164,11 @@ The gateway has TWO shapes, one per substrate:
     guest — the converge's `compose up -d --wait` re-runs the locally cached image and never
     pulls, so a relay fix upstream does not reach a world until a human pulls (a bounce is
     not an update).
-*   The gateway's host route isn't persisted — it is asserted by the box's gateway stage
-    (`ip route replace`), lost on a PVE host reboot until the next install/re-adopt. A switch
-    reboot lost it once and the world kept serving — only the box-side verbs went dark until
-    the route returned.
+*   The gateway's host route rides the gateway (its LAN IP) and is re-asserted by every
+    build's gateway stage (before the terraform dial that needs it, so a post-reboot build
+    self-heals) — but between builds it is kernel runtime state: until the next build, any
+    host-side dial into the subnet (the box's pct-side probes, a thin box's verbs) has no
+    path and blackholes. A persisted `if-up.d` route on the host is the stopgap.
 *   Port 80 reaches Caddy but nothing redirects to 443; no per-guest vhosts; the DNAT list
     is hard-coded.
 *   Pre-gateway worlds' guests are DHCP, so a reboot can strand recorded addresses.
