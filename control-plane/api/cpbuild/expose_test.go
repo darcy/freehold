@@ -1469,3 +1469,37 @@ func TestAgentToolsServeFlagsCarryTheOperatorShape(t *testing.T) {
 		t.Fatalf("the legacy shape must not carry empty operator-shape flags:\n%s", bare)
 	}
 }
+
+// TestWorldAppsRunsForRidersAlone pins the tail's entry gate: a world whose
+// registry has zero rows but whose profile pins riders must still run the
+// rider DNS, the shared wildcard, and the edge render — the early return
+// that predates riders made those pins fully inert while the build reported
+// success.
+func TestWorldAppsRunsForRidersAlone(t *testing.T) {
+	te := newTestExposer(t, nil, nil)
+	te.spec.EdgeApps = map[string]config.EdgeApp{"nextcloud": {Upstream: "10.43.137.233:80"}}
+	te.spec.execHook = func(cmd string, _ uint64, _ ...string) (string, error) {
+		if strings.Contains(cmd, "fullchain.pem") {
+			return base64.StdEncoding.EncodeToString(selfSigned(t, "*.librem.example.test")), nil
+		}
+		return "OK", nil
+	}
+	report, err := te.spec.worldApps()
+	if err != nil {
+		t.Fatalf("worldApps (riders only): %v", err)
+	}
+	if !strings.Contains(report, "0") {
+		t.Fatalf("an empty registry reports zero apps: %q", report)
+	}
+	// The rider's public A record was upserted (the fake zone API counted
+	// the write and carried the rider's derived name).
+	found := false
+	for _, b := range *te.cfBodies {
+		if strings.Contains(b, "nextcloud.librem.example.test") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("the rider's DNS row must ride the build tail: %v", *te.cfBodies)
+	}
+}

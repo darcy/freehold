@@ -243,6 +243,16 @@ func (s *Spec) edgeRiders(registry map[string]bool) []caddydeploy.AppVhost {
 			continue
 		}
 		fqdn := appFQDN(s.CpHost, s.WorldDomainOverride, name)
+		// Rider keys are operator free-hand; registry names are enforced
+		// lowercase DNS labels. A case-variant ("Nextcloud" vs the registry
+		// row "nextcloud") would dodge the merge above AND — hosts match
+		// case-insensitively — render a second site block for a host that
+		// already has one: the unloadable-config crash-loop, reported by
+		// nothing. Same refusal the registry path applies, loud skip here.
+		if !agenttools.ValidAppName(name) {
+			log.Printf("edge rider %q: not a lowercase DNS label — skipped", name)
+			continue
+		}
 		// Two site blocks for one host is an unloadable Caddyfile — the
 		// edge crash-loops and kubectl apply still exits 0. The registry
 		// path refuses the edge's own hosts (BuildExposeAppFn); the rider
@@ -851,7 +861,10 @@ func (s *Spec) worldApps() (string, error) {
 		return "", fmt.Errorf("apps registry reload: %w", err)
 	}
 	records := s.Apps.List()
-	if len(records) == 0 {
+	// Riders alone carry the tail on a registry-less world: their DNS, the
+	// shared wildcard, and the edge render must still run, or the operator's
+	// pins are fully inert while the build reports success.
+	if len(records) == 0 && len(s.EdgeApps) == 0 {
 		return "", nil
 	}
 	var failed []string
