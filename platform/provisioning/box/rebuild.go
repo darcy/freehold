@@ -1471,6 +1471,14 @@ func mergeFromAnswers(ans *config.Config, prev *config.Config) *config.Config {
 	} else {
 		cfg.Gateway = prev.Gateway
 	}
+	// The operator's edge shape is SOURCE, not pipeline output: the world
+	// root override + the [edge.apps] riders are operator-authored (the CP
+	// re-derives everything else from them) — a merge that drops them makes
+	// the next build re-render the WRONG shape and strip the riders' vhosts
+	// (the casaq strip: browns.admin. over browns., the portal gone). The
+	// answers never carry these; prev always wins.
+	cfg.WorldDomain = prev.WorldDomain
+	cfg.Edge = prev.Edge
 	// The post-world recorder (recordPostWorld) persists the coords + sections
 	// world_build established to disk; finalSave rebuilds from answers and must
 	// keep them (like Plane) or it would silently erase them on every run —

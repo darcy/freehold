@@ -140,6 +140,13 @@ func TestMergeKeepsDnsAndLitellm(t *testing.T) {
 		Litellm: config.LitellmSpec{URL: "http://192.168.30.7:31400", Host: "192.168.30.7"},
 		Plane:   config.PlaneSpec{Backend: ptr("pve")},
 		Managed: []string{"relay", "cp", "litellm"},
+		// The operator's edge shape: world_domain + [edge.apps] are SOURCE —
+		// the merge must carry them or every build/update re-rendered the
+		// wrong world shape and stripped the riders' vhosts (the casaq strip).
+		WorldDomain: "casaquerencia.net",
+		Edge: config.EdgeSpec{Apps: map[string]config.EdgeApp{
+			"browns": {ExemptPaths: []string{"/api/*"}, ExemptBearer: true},
+		}},
 	}
 	ans := &config.Config{Managed: []string{"relay", "cp"}}
 	got := mergeFromAnswers(ans, prev)
@@ -151,6 +158,12 @@ func TestMergeKeepsDnsAndLitellm(t *testing.T) {
 	}
 	if got.Plane.Backend == nil || *got.Plane.Backend != "pve" {
 		t.Errorf("plane must still merge: %+v", got.Plane)
+	}
+	if got.WorldDomain != "casaquerencia.net" {
+		t.Errorf("world_domain dropped by merge: %q", got.WorldDomain)
+	}
+	if len(got.Edge.Apps) != 1 || !got.Edge.Apps["browns"].ExemptBearer {
+		t.Errorf("edge riders dropped by merge: %+v", got.Edge)
 	}
 }
 
