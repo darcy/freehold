@@ -267,6 +267,34 @@ func (s *Spec) edgeRiders(registry map[string]bool) []caddydeploy.AppVhost {
 	return riders
 }
 
+// edgeRiderDNSEnsure points a rider vhost's public A record — the same
+// surface appDNSEnsure gives registry apps (the proxy's edge IP, or the
+// Pangolin VPS when the public path rides the tunnel). Without it the rider
+// renders for an NXDOMAIN name: the operator pins the app, the build reports
+// success, nothing is reachable.
+func (s *Spec) edgeRiderDNSEnsure(name string) (bool, error) {
+	fqdn := appFQDN(s.CpHost, s.WorldDomainOverride, name)
+	ip := s.ProxyIP
+	if s.Pangolin != nil && s.Pangolin.DNSIP != "" {
+		ip = s.Pangolin.DNSIP
+	}
+	if ip == "" {
+		return false, fmt.Errorf("rider dns %s: the proxy IP is not in the world coords", fqdn)
+	}
+	provider, env, err := s.dnsCredFromStore("relay")
+	if err != nil {
+		return false, fmt.Errorf("rider dns %s: %w", fqdn, err)
+	}
+	mgr, err := dnsman.For(provider, env)
+	if err != nil {
+		return false, fmt.Errorf("rider dns %s: %w", fqdn, err)
+	}
+	if err := mgr.UpsertA(fqdn, ip); err != nil {
+		return false, fmt.Errorf("rider dns %s: %w", fqdn, err)
+	}
+	return true, nil
+}
+
 // appsCertEnsure runs the SHARED wildcard cert's chain (*.world-domain): the
 // durable-reuse gate (a valid mirror cert seeds the PVC — no LE order), the
 // box seed cache, then the in-process resumable DNS-01 issue. Returns
@@ -848,6 +876,26 @@ func (s *Spec) worldApps() (string, error) {
 		}
 		if recordFailed {
 			failedNames[rec.Name] = true
+		}
+	}
+	// The riders' DNS: a rider vhost whose name is NXDOMAIN is the
+	// operator's pin silently dead — the same surface the registry apps get.
+	for name, ea := range s.EdgeApps {
+		if ea.Upstream == "" || failedNames[name] {
+			continue
+		}
+		inRegistry := false
+		for _, rec := range records {
+			if rec.Name == name {
+				inRegistry = true
+				break
+			}
+		}
+		if inRegistry {
+			continue
+		}
+		if _, err := s.edgeRiderDNSEnsure(name); err != nil {
+			failed = append(failed, name+" rider dns: "+err.Error())
 		}
 	}
 	if _, err := s.appsCertEnsure(); err != nil {

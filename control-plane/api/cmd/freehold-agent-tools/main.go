@@ -448,6 +448,7 @@ func cmdServe(args []string) {
 	runnerPK := fs.String("runner-pubkey", "", "runner pubkey (deploy exec audience)")
 	runnerTarget := fs.String("runner-target", "", "runner target that reaches the box")
 	cpaName := fs.String("cpa-name", agent.DefaultCPAName, "CPA display name")
+	worldDomain := fs.String("world-domain", "", "the explicit world-root override (the profile's world_domain) — appFQDN/appWildcard/portalHost derive from it; empty = the CP host's derived shape")
 	// The operator display name rides B64 (operatorNameArg) — free-form text
 	// on a root-executed argv must never carry shell/flag metacharacters.
 	operatorNameB64 := fs.String("operator-name-b64", "", "operator display name in Buzz, base64 (the kind:0 profile the build publishes; default \"Operator\")")
@@ -555,6 +556,7 @@ func cmdServe(args []string) {
 		CpaName:        *cpaName,
 		OwnerPub:       *ownerPub,
 		OperatorName:   operatorName,
+		WorldDomainOverride: strings.TrimSpace(*worldDomain),
 		Pangolin:       pangolinCoords,
 		EdgeApps:       edgeApps,
 		LitellmBaseURL: litellmBaseURL,

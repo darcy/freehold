@@ -131,6 +131,14 @@ func (s *Spec) agentToolsServeFlags() string {
 		// the riders silently strips them (the two-appliers invariant).
 		serveFlags += " --edge-apps-b64 " + ea
 	}
+	if s.WorldDomainOverride != "" {
+		// The verb path's appFQDN/appWildcard derive from the CP host's shape
+		// without this — on an apex-shaped world the derivation stays
+		// admin.<root>, the cert gate then covers *.admin. against the real
+		// *.root wildcard, fails, and the verb re-applies an edge with every
+		// app + rider vhost silently stripped.
+		serveFlags += " --world-domain " + s.WorldDomainOverride
+	}
 	if s.RelayPK != "" {
 		serveFlags += " --relay-pubkey " + s.RelayPK
 	}
@@ -525,6 +533,14 @@ func (s *Spec) manualDNSNote() string {
 	// console has moved off it — the operator must create its record too.
 	if p := s.portalHost(); p != "" {
 		hosts = append(hosts, p)
+	}
+	// The rider vhosts render beside the registry apps' — their records are
+	// the operator's to place in a manual-DNS world too.
+	for name, ea := range s.EdgeApps {
+		if ea.Upstream == "" {
+			continue
+		}
+		hosts = append(hosts, appFQDN(s.CpHost, s.WorldDomainOverride, name))
 	}
 	var missing, verified []string
 	for _, h := range hosts {

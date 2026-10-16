@@ -1441,3 +1441,31 @@ func TestExposeVerbRenderKeepsRiders(t *testing.T) {
 		t.Fatal("the argv codec must round-trip the riders")
 	}
 }
+
+// TestAgentToolsServeFlagsCarryTheOperatorShape pins the verb serve's argv:
+// the agent-tools process builds its Spec from flags, and an apex-shaped
+// world (the casaq reference) MUST arrive with the world-domain override —
+// without it the verb render's cert gate checks *.admin.<root> against the
+// real *.root wildcard, fails, and the re-apply strips every app + rider
+// vhost. The edge riders ride beside it for the same reason.
+func TestAgentToolsServeFlagsCarryTheOperatorShape(t *testing.T) {
+	s := &Spec{
+		WorldDomainOverride: "casaquerencia.net",
+		EdgeApps: map[string]config.EdgeApp{
+			"nextcloud": {Upstream: "10.43.137.233:80"},
+		},
+		OperatorName: "Darcy", RelayPK: strings.Repeat("5", 64),
+	}
+	flags := s.agentToolsServeFlags()
+	if !strings.Contains(flags, "--world-domain casaquerencia.net") {
+		t.Fatalf("the serve argv must carry the world-domain override:\n%s", flags)
+	}
+	if !strings.Contains(flags, "--edge-apps-b64 ") {
+		t.Fatalf("the serve argv must carry the edge riders:\n%s", flags)
+	}
+	// A world with neither renders the legacy argv (no empty tokens).
+	bare := (&Spec{RelayPK: strings.Repeat("5", 64)}).agentToolsServeFlags()
+	if strings.Contains(bare, "--world-domain") || strings.Contains(bare, "--edge-apps-b64") {
+		t.Fatalf("the legacy shape must not carry empty operator-shape flags:\n%s", bare)
+	}
+}
