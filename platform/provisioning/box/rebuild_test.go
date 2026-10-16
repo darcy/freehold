@@ -144,6 +144,7 @@ func TestMergeKeepsDnsAndLitellm(t *testing.T) {
 		// the merge must carry them or every build/update re-rendered the
 		// wrong world shape and stripped the riders' vhosts (the casaq strip).
 		WorldDomain: "casaquerencia.net",
+		Pangolin:    &config.PangolinCoords{Domain: "example.test"},
 		Edge: config.EdgeSpec{Apps: map[string]config.EdgeApp{
 			"browns": {ExemptPaths: []string{"/api/*"}, ExemptBearer: true},
 		}},
@@ -164,6 +165,9 @@ func TestMergeKeepsDnsAndLitellm(t *testing.T) {
 	}
 	if len(got.Edge.Apps) != 1 || !got.Edge.Apps["browns"].ExemptBearer {
 		t.Errorf("edge riders dropped by merge: %+v", got.Edge)
+	}
+	if got.Pangolin == nil || got.Pangolin.Domain != "example.test" {
+		t.Errorf("pangolin dropped by merge: %+v", got.Pangolin)
 	}
 }
 
