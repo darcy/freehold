@@ -54,6 +54,7 @@ type Config struct {
 	Lxc              LxcSpec     `toml:"lxc"`
 	Plane            PlaneSpec   `toml:"plane,omitempty"`
 	Dns              DnsSpec     `toml:"dns,omitempty"`
+	Edge             EdgeSpec    `toml:"edge,omitempty"`
 	Litellm          LitellmSpec `toml:"litellm,omitempty"`
 	Caddy            CaddySpec   `toml:"caddy,omitempty"`
 	Gateway          GatewaySpec `toml:"gateway,omitempty"`
@@ -321,6 +322,29 @@ type LxcSpec struct {
 	Cp      LxcGuest `toml:"cp"`
 	K3s     LxcGuest `toml:"k3s,omitempty"`
 	Gateway LxcGuest `toml:"gateway,omitempty"`
+}
+
+// EdgeApp is the operator's at-source pin for ONE app on the rendered edge —
+// the surface for what the agent-owned apps registry deliberately doesn't
+// carry: the gate-less rider vhosts (an operator's explicit exception —
+// upstream required, Gate false) and the gate exemptions on a REGISTRY app
+// (paths and/or the Authorization bearer matcher that bypass the member gate
+// for that app's own API clients; the registry row still owns fqdn/upstream).
+// Exemptions on a name with no registry row ride the rider vhost when it's
+// gated.
+type EdgeApp struct {
+	Upstream     string   `toml:"upstream,omitempty"`
+	Gate         *bool    `toml:"gate,omitempty"`
+	ExemptPaths  []string `toml:"exempt_paths,omitempty"`
+	ExemptBearer bool     `toml:"exempt_bearer,omitempty"`
+}
+
+// EdgeSpec is the [edge] profile section: the operator's edge riders, keyed
+// by app name. The renderer merges them with the apps registry (exemptions by
+// name, riders appended), so a console restart converges to the operator's
+// shape instead of stripping what only the rendered configmap carried.
+type EdgeSpec struct {
+	Apps map[string]EdgeApp `toml:"apps,omitempty"`
 }
 
 // DnsSpec is the CP-owned resolver's explicit records (name -> IP), the

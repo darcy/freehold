@@ -1245,3 +1245,261 @@ func TestPangolinStageReAssertsPerExpose(t *testing.T) {
 		t.Fatalf("the second expose must re-assert the stage (the reset), got %d", count())
 	}
 }
+
+// TestRenderCasaqReferenceShape pins the casaq incident's fix end to end:
+// the world domain AT the apex (world_domain), the portal vhost at the root,
+// the four registry apps + two gate-less rider vhosts behind the SHARED
+// wildcard, and the operator's two matchers (browns' bearer + path
+// exemption, navidrome's Subsonic paths) in the @gated dispatch shape. The
+// expected body is the restored reference render
+// (k3s:/srv/data/k8s-volumes/caddy-edge/Caddyfile.restored-2026-10-14)
+// verbatim — the acceptance is "diffs clean against it modulo upstream
+// IPs", and the fixture pins the reference's own IPs, so the render must be
+// byte-equal.
+func TestRenderCasaqReferenceShape(t *testing.T) {
+	te := newTestExposer(t, nil, nil)
+	te.spec.RelayHost = "chat.casaquerencia.net"
+	te.spec.RelayIP = "10.77.0.11"
+	te.spec.CpHost = "admin.casaquerencia.net"
+	te.spec.CpIP = "10.77.0.12"
+	te.spec.K3sIP = "10.77.0.13"
+	te.spec.WorldDomainOverride = "casaquerencia.net"
+	te.spec.EdgeApps = map[string]config.EdgeApp{
+		"browns":    {ExemptPaths: []string{"/openapi.json", "/api/*"}, ExemptBearer: true},
+		"navidrome": {ExemptPaths: []string{"/rest/*", "/auth/*"}},
+		"nextcloud": {Upstream: "10.43.137.233:80"},
+		"paperless": {Upstream: "10.43.79.131:80"},
+	}
+	for _, rec := range []agenttools.AppRecord{
+		{Name: "browns", FQDN: "browns.casaquerencia.net", Target: "10.43.183.77:3000", Auth: agenttools.AuthGate, Group: "f4466ad8-ba6e-4803-b272-5dc529077d34"},
+		{Name: "litellm", FQDN: "litellm.casaquerencia.net", Target: "10.77.0.13:31400", Auth: agenttools.AuthGate, Group: "f4466ad8-ba6e-4803-b272-5dc529077d34"},
+		{Name: "navidrome", FQDN: "navidrome.casaquerencia.net", Target: "10.43.221.70:4533", Auth: agenttools.AuthGate, Group: "f4466ad8-ba6e-4803-b272-5dc529077d34"},
+		{Name: "sparkdash", FQDN: "sparkdash.casaquerencia.net", Target: "10.43.79.53:5555", Auth: agenttools.AuthGate, Group: "f4466ad8-ba6e-4803-b272-5dc529077d34"},
+	} {
+		if err := te.apps.Expose(rec); err != nil {
+			t.Fatal(err)
+		}
+	}
+	te.spec.execHook = func(cmd string, _ uint64, _ ...string) (string, error) {
+		if strings.Contains(cmd, "base64 -w0 <") {
+			if strings.Contains(cmd, "caddy-edge/portal") {
+				return base64.StdEncoding.EncodeToString(selfSigned(t, "casaquerencia.net")), nil
+			}
+			return base64.StdEncoding.EncodeToString(selfSigned(t, "*.casaquerencia.net")), nil
+		}
+		return "OK", nil
+	}
+	body := te.spec.renderCaddyfile()
+
+	want := `{
+  auto_https off
+}
+
+chat.casaquerencia.net {
+  tls /data/tls/relay/fullchain.pem /data/tls/relay/key.pem
+  handle /pair* {
+    reverse_proxy 10.77.0.13:5000
+  }
+  handle {
+    reverse_proxy 10.77.0.11:3000
+  }
+}
+
+admin.casaquerencia.net {
+  tls /data/tls/cp/fullchain.pem /data/tls/cp/key.pem
+  handle /mcp {
+    reverse_proxy 10.77.0.12:8089
+  }
+  handle {
+    reverse_proxy 10.77.0.12:8080
+  }
+}
+
+casaquerencia.net {
+  tls /data/tls/portal/fullchain.pem /data/tls/portal/key.pem
+  handle {
+    reverse_proxy 10.77.0.12:8080
+  }
+}
+
+browns.casaquerencia.net {
+  tls /data/tls/apps/fullchain.pem /data/tls/apps/key.pem
+  @gated not {
+    path /openapi.json /api/*
+    header Authorization Bearer*
+  }
+  handle @gated {
+    forward_auth 10.77.0.12:8080 {
+      uri /auth/verify
+      header_up X-Original-Host {host}
+      header_up X-Original-Uri {uri}
+    }
+    reverse_proxy 10.43.183.77:3000
+  }
+  handle {
+    reverse_proxy 10.43.183.77:3000
+  }
+}
+
+litellm.casaquerencia.net {
+  tls /data/tls/apps/fullchain.pem /data/tls/apps/key.pem
+  forward_auth 10.77.0.12:8080 {
+    uri /auth/verify
+    header_up X-Original-Host {host}
+    header_up X-Original-Uri {uri}
+  }
+  reverse_proxy 10.77.0.13:31400
+}
+
+navidrome.casaquerencia.net {
+  tls /data/tls/apps/fullchain.pem /data/tls/apps/key.pem
+  @gated not {
+    path /rest/* /auth/*
+  }
+  handle @gated {
+    forward_auth 10.77.0.12:8080 {
+      uri /auth/verify
+      header_up X-Original-Host {host}
+      header_up X-Original-Uri {uri}
+    }
+    reverse_proxy 10.43.221.70:4533
+  }
+  handle {
+    reverse_proxy 10.43.221.70:4533
+  }
+}
+
+nextcloud.casaquerencia.net {
+  tls /data/tls/apps/fullchain.pem /data/tls/apps/key.pem
+  reverse_proxy 10.43.137.233:80
+}
+
+paperless.casaquerencia.net {
+  tls /data/tls/apps/fullchain.pem /data/tls/apps/key.pem
+  reverse_proxy 10.43.79.131:80
+}
+
+sparkdash.casaquerencia.net {
+  tls /data/tls/apps/fullchain.pem /data/tls/apps/key.pem
+  forward_auth 10.77.0.12:8080 {
+    uri /auth/verify
+    header_up X-Original-Host {host}
+    header_up X-Original-Uri {uri}
+  }
+  reverse_proxy 10.43.79.53:5555
+}
+`
+	if body != want {
+		t.Errorf("the casaq render must diff clean against the restored reference:\nGOT:\n%s\nWANT:\n%s", body, want)
+	}
+}
+
+// TestExposeVerbRenderKeepsRiders pins the verb path's half of the
+// two-appliers invariant: the agent-tools process builds its Spec from
+// ARGV (not the world-config), and an expose/unexpose there re-applies the
+// edge config — a Spec without the operator's EdgeApps would render an edge
+// that silently strips the riders, surviving until the next console-side
+// build. The serve argv carries the riders (--edge-apps-b64), and the verb
+// render must show them.
+func TestExposeVerbRenderKeepsRiders(t *testing.T) {
+	te := newTestExposer(t, nil, nil)
+	// The agent-tools Spec: same shape, EdgeApps decoded from the serve argv.
+	arg := EdgeAppsArg(map[string]config.EdgeApp{
+		"nextcloud": {Upstream: "10.43.137.233:80"},
+	})
+	if arg == "" {
+		t.Fatal("EdgeAppsArg must encode a non-empty rider set")
+	}
+	back, err := EdgeAppsFromArg(arg)
+	if err != nil {
+		t.Fatalf("EdgeAppsFromArg: %v", err)
+	}
+	te.spec.EdgeApps = back
+	if err := te.apps.Expose(agenttools.AppRecord{
+		Name: "navidrome", FQDN: appFQDN(te.spec.CpHost, "", "navidrome"), Target: "10.78.0.13:4533",
+		Visibility: agenttools.VisibilityFamily, Auth: agenttools.AuthGate,
+		Group: "3fa85f64-5717-4562-b3fc-2c963f66afa6", Owner: "op", Requester: strings.Repeat("b", 64), CreatedAt: 7,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	te.spec.execHook = func(cmd string, _ uint64, _ ...string) (string, error) {
+		if strings.Contains(cmd, "fullchain.pem") {
+			return base64.StdEncoding.EncodeToString(selfSigned(t, "*.librem.example.test")), nil
+		}
+		return "OK", nil
+	}
+	body := te.spec.renderCaddyfile()
+	if !strings.Contains(body, "navidrome.librem.example.test {") {
+		t.Fatalf("the registry app must ride the verb-path render: %s", body)
+	}
+	if !strings.Contains(body, "nextcloud.librem.example.test {") || !strings.Contains(body, "reverse_proxy 10.43.137.233:80") {
+		t.Fatalf("the rider vhost must survive the verb-path re-render: %s", body)
+	}
+	// And the round trip is lossless enough to rebuild the argv for the next
+	// serve restart.
+	if EdgeAppsArg(back) != arg {
+		t.Fatal("the argv codec must round-trip the riders")
+	}
+}
+
+// TestAgentToolsServeFlagsCarryTheOperatorShape pins the verb serve's argv:
+// the agent-tools process builds its Spec from flags, and an apex-shaped
+// world (the casaq reference) MUST arrive with the world-domain override —
+// without it the verb render's cert gate checks *.admin.<root> against the
+// real *.root wildcard, fails, and the re-apply strips every app + rider
+// vhost. The edge riders ride beside it for the same reason.
+func TestAgentToolsServeFlagsCarryTheOperatorShape(t *testing.T) {
+	s := &Spec{
+		WorldDomainOverride: "casaquerencia.net",
+		EdgeApps: map[string]config.EdgeApp{
+			"nextcloud": {Upstream: "10.43.137.233:80"},
+		},
+		OperatorName: "Darcy", RelayPK: strings.Repeat("5", 64),
+	}
+	flags := s.agentToolsServeFlags()
+	if !strings.Contains(flags, "--world-domain casaquerencia.net") {
+		t.Fatalf("the serve argv must carry the world-domain override:\n%s", flags)
+	}
+	if !strings.Contains(flags, "--edge-apps-b64 ") {
+		t.Fatalf("the serve argv must carry the edge riders:\n%s", flags)
+	}
+	// A world with neither renders the legacy argv (no empty tokens).
+	bare := (&Spec{RelayPK: strings.Repeat("5", 64)}).agentToolsServeFlags()
+	if strings.Contains(bare, "--world-domain") || strings.Contains(bare, "--edge-apps-b64") {
+		t.Fatalf("the legacy shape must not carry empty operator-shape flags:\n%s", bare)
+	}
+}
+
+// TestWorldAppsRunsForRidersAlone pins the tail's entry gate: a world whose
+// registry has zero rows but whose profile pins riders must still run the
+// rider DNS, the shared wildcard, and the edge render — the early return
+// that predates riders made those pins fully inert while the build reported
+// success.
+func TestWorldAppsRunsForRidersAlone(t *testing.T) {
+	te := newTestExposer(t, nil, nil)
+	te.spec.EdgeApps = map[string]config.EdgeApp{"nextcloud": {Upstream: "10.43.137.233:80"}}
+	te.spec.execHook = func(cmd string, _ uint64, _ ...string) (string, error) {
+		if strings.Contains(cmd, "fullchain.pem") {
+			return base64.StdEncoding.EncodeToString(selfSigned(t, "*.librem.example.test")), nil
+		}
+		return "OK", nil
+	}
+	report, err := te.spec.worldApps()
+	if err != nil {
+		t.Fatalf("worldApps (riders only): %v", err)
+	}
+	if !strings.Contains(report, "0") {
+		t.Fatalf("an empty registry reports zero apps: %q", report)
+	}
+	// The rider's public A record was upserted (the fake zone API counted
+	// the write and carried the rider's derived name).
+	found := false
+	for _, b := range *te.cfBodies {
+		if strings.Contains(b, "nextcloud.librem.example.test") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("the rider's DNS row must ride the build tail: %v", *te.cfBodies)
+	}
+}

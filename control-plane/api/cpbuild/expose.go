@@ -28,6 +28,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"log"
 	"net"
 	"os"
 	"path/filepath"
@@ -209,12 +210,99 @@ func (s *Spec) appVhost(rec agenttools.AppRecord) caddydeploy.AppVhost {
 	if rec.Auth == agenttools.AuthGate {
 		gate = s.CpIP + ":8080"
 	}
-	return caddydeploy.AppVhost{
+	v := caddydeploy.AppVhost{
 		FQDN:     s.appRecordFQDN(rec),
 		Upstream: rec.Target,
 		Slot:     appsCertSlot,
 		Gate:     gate,
 	}
+	// The operator's at-source exemptions ride by NAME (the profile's
+	// [edge.apps]) — the registry row still owns fqdn/upstream.
+	if ea, ok := s.EdgeApps[rec.Name]; ok {
+		v.ExemptPaths = ea.ExemptPaths
+		v.ExemptBearer = ea.ExemptBearer
+	}
+	return v
+}
+
+// edgeRiders renders the operator's at-source rider vhosts — [edge.apps]
+// rows with NO registry record (the gate-less apps an operator pins at
+// source: nextcloud/paperless-class services). The registry owns the gated
+// surface; these are the operator's explicit exceptions, and they ride the
+// SAME shared wildcard slot (cert-before-config applies — the caller renders
+// them only behind a valid wildcard). A row whose name matches a registry
+// record is NOT a rider (its exemptions merged in appVhost instead).
+func (s *Spec) edgeRiders(registry map[string]bool) []caddydeploy.AppVhost {
+	if len(s.EdgeApps) == 0 {
+		return nil
+	}
+	portal := s.portalHost()
+	var riders []caddydeploy.AppVhost
+	for name, ea := range s.EdgeApps {
+		if registry[name] || ea.Upstream == "" {
+			continue
+		}
+		fqdn := appFQDN(s.CpHost, s.WorldDomainOverride, name)
+		// Rider keys are operator free-hand; registry names are enforced
+		// lowercase DNS labels. A case-variant ("Nextcloud" vs the registry
+		// row "nextcloud") would dodge the merge above AND — hosts match
+		// case-insensitively — render a second site block for a host that
+		// already has one: the unloadable-config crash-loop, reported by
+		// nothing. Same refusal the registry path applies, loud skip here.
+		if !agenttools.ValidAppName(name) {
+			log.Printf("edge rider %q: not a lowercase DNS label — skipped", name)
+			continue
+		}
+		// Two site blocks for one host is an unloadable Caddyfile — the
+		// edge crash-loops and kubectl apply still exits 0. The registry
+		// path refuses the edge's own hosts (BuildExposeAppFn); the rider
+		// path can't fail a render, so it skips loud instead.
+		if fqdn == s.RelayHost || fqdn == s.CpHost || fqdn == portal {
+			log.Printf("edge rider %q: %s is the edge's own host — skipped (rename the rider)", name, fqdn)
+			continue
+		}
+		gate := ""
+		if ea.Gate != nil && *ea.Gate {
+			gate = s.CpIP + ":8080"
+		}
+		riders = append(riders, caddydeploy.AppVhost{
+			FQDN:         fqdn,
+			Upstream:     ea.Upstream,
+			Slot:         appsCertSlot,
+			Gate:         gate,
+			ExemptPaths:  ea.ExemptPaths,
+			ExemptBearer: ea.ExemptBearer,
+		})
+	}
+	return riders
+}
+
+// edgeRiderDNSEnsure points a rider vhost's public A record — the same
+// surface appDNSEnsure gives registry apps (the proxy's edge IP, or the
+// Pangolin VPS when the public path rides the tunnel). Without it the rider
+// renders for an NXDOMAIN name: the operator pins the app, the build reports
+// success, nothing is reachable.
+func (s *Spec) edgeRiderDNSEnsure(name string) (bool, error) {
+	fqdn := appFQDN(s.CpHost, s.WorldDomainOverride, name)
+	ip := s.ProxyIP
+	if s.Pangolin != nil && s.Pangolin.DNSIP != "" {
+		ip = s.Pangolin.DNSIP
+	}
+	if ip == "" {
+		return false, fmt.Errorf("rider dns %s: the proxy IP is not in the world coords", fqdn)
+	}
+	provider, env, err := s.dnsCredFromStore("relay")
+	if err != nil {
+		return false, fmt.Errorf("rider dns %s: %w", fqdn, err)
+	}
+	mgr, err := dnsman.For(provider, env)
+	if err != nil {
+		return false, fmt.Errorf("rider dns %s: %w", fqdn, err)
+	}
+	if err := mgr.UpsertA(fqdn, ip); err != nil {
+		return false, fmt.Errorf("rider dns %s: %w", fqdn, err)
+	}
+	return true, nil
 }
 
 // appsCertEnsure runs the SHARED wildcard cert's chain (*.world-domain): the
@@ -671,9 +759,12 @@ func (s *Spec) renderCaddyfile() string {
 		wc, err := s.durableFullchain(s.K3sVmid, appsCertSlot)
 		if err == nil {
 			if _, ok := cert.ReuseIfValidBytes(wc, time.Now(), 0); ok && certCovers(wc, s.appWildcard()) {
+				registry := map[string]bool{}
 				for _, rec := range s.Apps.List() {
+					registry[rec.Name] = true
 					apps = append(apps, s.appVhost(rec))
 				}
+				apps = append(apps, s.edgeRiders(registry)...)
 			}
 		}
 	}
@@ -770,7 +861,10 @@ func (s *Spec) worldApps() (string, error) {
 		return "", fmt.Errorf("apps registry reload: %w", err)
 	}
 	records := s.Apps.List()
-	if len(records) == 0 {
+	// Riders alone carry the tail on a registry-less world: their DNS, the
+	// shared wildcard, and the edge render must still run, or the operator's
+	// pins are fully inert while the build reports success.
+	if len(records) == 0 && len(s.EdgeApps) == 0 {
 		return "", nil
 	}
 	var failed []string
@@ -795,6 +889,26 @@ func (s *Spec) worldApps() (string, error) {
 		}
 		if recordFailed {
 			failedNames[rec.Name] = true
+		}
+	}
+	// The riders' DNS: a rider vhost whose name is NXDOMAIN is the
+	// operator's pin silently dead — the same surface the registry apps get.
+	for name, ea := range s.EdgeApps {
+		if ea.Upstream == "" || failedNames[name] {
+			continue
+		}
+		inRegistry := false
+		for _, rec := range records {
+			if rec.Name == name {
+				inRegistry = true
+				break
+			}
+		}
+		if inRegistry {
+			continue
+		}
+		if _, err := s.edgeRiderDNSEnsure(name); err != nil {
+			failed = append(failed, name+" rider dns: "+err.Error())
 		}
 	}
 	if _, err := s.appsCertEnsure(); err != nil {
