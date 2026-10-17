@@ -23,6 +23,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"net/url"
 	"os"
@@ -755,6 +756,16 @@ func (s *Server) forwardAuthVerify(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, "member gate is not enabled on this console")
 		return
 	}
+	// The deny-log's subject: the app host + path the gate saw (the same
+	// originals memberAdmits judges).
+	host := r.Header.Get("X-Original-Host")
+	if host == "" {
+		host = r.Header.Get("X-Forwarded-Host")
+	}
+	uri := r.Header.Get("X-Original-Uri")
+	if uri == "" {
+		uri = r.Header.Get("X-Forwarded-Uri")
+	}
 	if s.Auth != nil {
 		if tok := cookieValue(r, sessionCookie); tok != "" {
 			if pk, role, ok := s.Auth.SessionIdentity(tok); ok {
@@ -769,6 +780,7 @@ func (s *Server) forwardAuthVerify(w http.ResponseWriter, r *http.Request) {
 				}
 				admitted, err := s.memberAdmits(MemberInfo{Pubkey: pk, Name: pk}, r)
 				if err != nil {
+					log.Printf("gate deny %s%s: console session (pk %s) membership error: %v", host, uri, pk[:8], err)
 					writeErr(w, http.StatusServiceUnavailable, "membership unavailable: "+err.Error())
 					return
 				}
@@ -776,6 +788,9 @@ func (s *Server) forwardAuthVerify(w http.ResponseWriter, r *http.Request) {
 					w.WriteHeader(http.StatusNoContent)
 					return
 				}
+				log.Printf("gate deny %s%s: console session (pk %s) not in the app's group", host, uri, pk[:8])
+			} else {
+				log.Printf("gate deny %s%s: session cookie present but invalid", host, uri)
 			}
 		}
 	}
@@ -785,6 +800,7 @@ func (s *Server) forwardAuthVerify(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				// The membership source is unreachable AND the cache's grace
 				// window passed: fail closed, say why.
+				log.Printf("gate deny %s%s: member session (pk %.8s device=%v) membership error: %v", host, uri, info.Pubkey, info.Device, err)
 				writeErr(w, http.StatusServiceUnavailable, "membership unavailable: "+err.Error())
 				return
 			}
@@ -792,7 +808,16 @@ func (s *Server) forwardAuthVerify(w http.ResponseWriter, r *http.Request) {
 				w.WriteHeader(http.StatusNoContent)
 				return
 			}
+			who := info.Pubkey
+			if info.Device {
+				who = "device:" + info.Name
+			}
+			log.Printf("gate deny %s%s: member session (%s) not admitted to this app", host, uri, who)
+		} else {
+			log.Printf("gate deny %s%s: member cookie present but unknown/expired", host, uri)
 		}
+	} else {
+		log.Printf("gate deny %s%s: no session and no member cookie", host, uri)
 	}
 	// The MACHINE identity: a NIP-98-signed request (an agent verifying its
 	// own exposure — no session exists to carry). The signing key runs the
