@@ -289,7 +289,7 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	setSessionCookie(w, token)
+	setSessionCookie(w, token, s.memberCookieDomain())
 	writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "pubkey": req.Pubkey, "role": role})
 }
 
@@ -341,7 +341,7 @@ func (s *Server) portalLand(w http.ResponseWriter, r *http.Request, token string
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	setSessionCookie(w, session)
+	setSessionCookie(w, session, s.memberCookieDomain())
 	w.Header().Set("Location", "/")
 	w.WriteHeader(http.StatusFound)
 }
