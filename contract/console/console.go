@@ -48,9 +48,9 @@ type Runner struct {
 	// relay-signed 39002 roster — what actually gates exec), "package" (the
 	// shipped fallback — the co-located runner's mode), "unavailable" (the
 	// read failed). Empty when no list was readable.
-	Grants      []string    `json:"grants"`
-	GrantsSource string       `json:"grants_source,omitempty"`
-	Readiness    interface{}  `json:"readiness,omitempty"`
+	Grants       []string    `json:"grants"`
+	GrantsSource string      `json:"grants_source,omitempty"`
+	Readiness    interface{} `json:"readiness,omitempty"`
 	// Colocated marks the CP's own co-located runner (the build/relay-admin
 	// hands on the CP guest) so clients can label it.
 	Colocated bool `json:"colocated,omitempty"`

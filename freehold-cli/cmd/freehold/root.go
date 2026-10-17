@@ -24,6 +24,7 @@ import (
 	"freehold/freehold-cli/hosts"
 	"freehold/freehold-cli/install"
 	"freehold/freehold-cli/internal/stages"
+	"freehold/freehold-cli/pangolin"
 	"freehold/freehold-cli/profiles"
 	"freehold/freehold-cli/snapshot"
 	"freehold/freehold-cli/status"
@@ -47,6 +48,7 @@ func init() {
 		profiles.Command(),
 		door.Command(),
 		dnscred.Command(),
+		pangolin.Command(),
 		addrelaymember.Command(),
 		status.Command(),
 		update.Command(),

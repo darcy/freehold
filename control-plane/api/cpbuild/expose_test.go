@@ -167,6 +167,7 @@ type testExposer struct {
 	cfWrites  *int      // the fake CF's record-write counter
 	cfDeletes *int      // the fake CF's record-delete counter (the shape-migration test)
 	cfBodies  *[]string // the fake CF's write bodies (the A-record content)
+	sawTunnel *bool     // the exec hook sets it when the tunnel unit asserts
 }
 
 func newTestExposer(t *testing.T, channels []relayChannel, members []memberEvent) *testExposer {
@@ -253,9 +254,13 @@ func newTestExposer(t *testing.T, channels []relayChannel, members []memberEvent
 	if err != nil {
 		t.Fatal(err)
 	}
-	te := &testExposer{spec: spec, apps: apps, bodies: map[string]string{}, cfWrites: &cfWrites, cfDeletes: &cfDeletes, cfBodies: cfBodiesPtr}
+	var sawTunnel bool
+	te := &testExposer{spec: spec, apps: apps, bodies: map[string]string{}, cfWrites: &cfWrites, cfDeletes: &cfDeletes, cfBodies: cfBodiesPtr, sawTunnel: &sawTunnel}
 	spec.Apps = apps
 	spec.execHook = func(cmd string, _ uint64, _ ...string) (string, error) {
+		if strings.Contains(cmd, "pangolin-tunnel.service") {
+			*te.sawTunnel = true
+		}
 		te.cmds = append(te.cmds, cmd)
 		if strings.Contains(cmd, "fullchain.pem") {
 			return base64.StdEncoding.EncodeToString(fc), nil
@@ -650,7 +655,16 @@ func TestExposeRidesThePangolinPath(t *testing.T) {
 	family := "3fa85f64-5717-4562-b3fc-2c963f66afa6"
 	homelab := strings.Repeat("b", 64)
 	var calls []string
+	var te *testExposer // the handler runs after the fixture exists
 	pang := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// BEHAVIORAL ordering pin: the client's base is the CP's loopback —
+		// the forward unit is what makes it mean the VPS. A dial before the
+		// tunnel asserted = the deadlock the ordering prevents.
+		if te == nil || te.sawTunnel == nil || !*te.sawTunnel {
+			w.WriteHeader(500)
+			_, _ = w.Write([]byte(`{"success":false,"error":true,"message":"the tunnel must assert before any dial"}`))
+			return
+		}
 		calls = append(calls, r.Method+" "+r.URL.Path)
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
@@ -675,7 +689,7 @@ func TestExposeRidesThePangolinPath(t *testing.T) {
 	}))
 	defer pang.Close()
 
-	te := newTestExposer(t, []relayChannel{{family, "family"}},
+	te = newTestExposer(t, []relayChannel{{family, "family"}},
 		[]memberEvent{{channelID: family, pubkey: homelab, kind: wire.PutUser, ts: 100}})
 	te.spec.Pangolin = &config.PangolinCoords{Org: "freehold", Site: "librem", Domain: "librem.example.test", DNSIP: "203.0.113.9"}
 	te.sealPangolinCreds(t, pang.URL, "yi5o.thesecret")
@@ -698,6 +712,21 @@ func TestExposeRidesThePangolinPath(t *testing.T) {
 		"POST /v1/resource/7", // the sso gate — created resources are never open
 		"GET /v1/resource/7/targets",
 		"PUT /v1/resource/7/target",
+	}
+	// The ordering PROVEN behaviorally: the fake refused every pre-tunnel
+	// dial — a live expose here means the tunnel asserted first. The
+	// forward dials through the CP-minted key.
+	tunnelCmd := ""
+	for _, cmd := range te.cmds {
+		if strings.Contains(cmd, "pangolin-tunnel.service") {
+			tunnelCmd = cmd
+		}
+	}
+	if tunnelCmd == "" {
+		t.Fatalf("the CP tunnel stage must run on every pangolin ensure: %.400s", strings.Join(te.cmds, "\n"))
+	}
+	if !strings.Contains(tunnelCmd, "/srv/data/cp/pangolin-tunnel.key") {
+		t.Fatal("the tunnel's forward must dial through the CP-minted key")
 	}
 	for i, w := range want {
 		if len(calls) <= i || calls[i] != w {
