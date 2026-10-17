@@ -143,7 +143,7 @@ func TestLoginRoundtrip(t *testing.T) {
 	for _, c := range rec.Result().Cookies() {
 		if c.Name == sessionCookie {
 			cookie = c.Value
-			if !c.HttpOnly || c.SameSite != http.SameSiteLaxMode || !c.Secure {
+			if !c.HttpOnly || c.SameSite != http.SameSiteStrictMode || !c.Secure {
 				t.Fatalf("cookie flags wrong: HttpOnly=%v SameSite=%v Secure=%v", c.HttpOnly, c.SameSite, c.Secure)
 			}
 			if c.MaxAge != sessionMaxAge {
