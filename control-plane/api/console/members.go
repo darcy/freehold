@@ -642,7 +642,7 @@ func (s *Server) memberLogin(w http.ResponseWriter, r *http.Request) {
 	role := "member"
 	if s.Auth != nil && s.Auth.isAdmin(req.Pubkey) {
 		if opTok, oerr := s.Auth.IssueSessionRole(req.Pubkey, RoleOperator); oerr == nil {
-			setSessionCookie(w, opTok)
+			setSessionCookie(w, opTok, s.memberCookieDomain())
 			role = "operator"
 		}
 	}
@@ -1017,7 +1017,18 @@ func (s *Server) memberChannelAllowed(pubkey, groupID string) (bool, error) {
 		if rpk == "" {
 			return false, errRelayUnknown
 		}
-		return relay.IsMemberAuth(dial, auth, s.ConsoleSecret, groupID, pubkey)
+		ok, err := relay.IsMemberAuth(dial, auth, s.ConsoleSecret, groupID, pubkey)
+		// The relay's bridge has been observed answering the SAME membership
+		// filter empty then populated seconds apart (the casaq flap: 1 at
+		// 14:04/14:14, 0 at 14:18:59, 1 again on a re-run) — a single empty
+		// is not trustworthy enough to bounce a member. One re-read after a
+		// beat; a genuine not-a-member costs it 750ms, a flapped one is
+		// admitted instead of looped.
+		if err == nil && !ok {
+			time.Sleep(750 * time.Millisecond)
+			ok, err = relay.IsMemberAuth(dial, auth, s.ConsoleSecret, groupID, pubkey)
+		}
+		return ok, err
 	})
 }
 
