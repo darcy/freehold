@@ -397,6 +397,10 @@ type provisionRunnerArgs struct {
 	// ResourceQuota hard spec.
 	NS    string `json:"ns"`
 	Quota string `json:"quota"`
+	// NoSecret declares the door's credential is config (agent-sealable via
+	// fill_door) — the flow refuses it for ssh/kubernetes and pins it at
+	// first provision.
+	NoSecret bool `json:"no_secret"`
 }
 type revokeRunnerArgs struct {
 	Name string `json:"name"`
@@ -766,7 +770,7 @@ func (s *Server) dispatch(w http.ResponseWriter, id json.RawMessage, params json
 			Name: a.Name, Kind: a.Kind, Address: a.Address, GrantTo: a.GrantTo,
 			Hosted: a.Hosted, Host: a.Host, Pubkey: a.Pubkey, EncPubkey: a.EncPub,
 			Probe: a.Probe, ProbeBody: a.ProbeBody,
-			NS: a.NS, Quota: a.Quota,
+			NS: a.NS, Quota: a.Quota, NoSecret: a.NoSecret,
 		})
 		s.textResult(w, id, err, report)
 	case "revoke_runner":
