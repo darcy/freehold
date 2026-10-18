@@ -679,6 +679,11 @@ func cmdServe(args []string) {
 	// so the two flows share their ownership guards by construction (they read the
 	// same capability table through the same registry handle).
 	tools.Revoke = cpbuild.BuildRevokeRunner(spec, reg)
+	// The no-secret seal leg (fill_door) and the self-hosted package fetch
+	// (door_package) — bound to the same spec so they read the same capability
+	// table the give/take flows wrote.
+	tools.Fill = cpbuild.BuildFillDoor(spec)
+	tools.DoorPackage = cpbuild.BuildDoorPackage(spec)
 	// The edit surface for the agents create made: purpose/model/channels/rename
 	// (update_agent), and the pod-retire half of manage_agent remove. Same spec +
 	// registry handle; the core identities are refused by the flows themselves.

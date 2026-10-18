@@ -190,7 +190,13 @@ action it causes is signed, authorized, and audited by machinery that cannot rea
     **Credentials never ride chat:** an ssh door mints its own keypair (the operator
     installs the returned public key once); an api door provisions EMPTY and the agent DMs
     the operator the door's console page, whose kind-aware form seals the credential and
-    restarts the door. The api door's **verify arm is data, not code**: the requesting
+    restarts the door — UNLESS the door was DECLARED `no_secret` at provision time. The
+    declaration is made once, while constructing the door, so the agent never judges "is
+    this one secret?": a no-secret door's credential is config the agent stated in
+    conversation (an address, a public token), and the agent seals it itself via
+    `fill_door` — the same seal path the console uses (sealed to the door's key, never
+    plaintext on disk). A door without the declaration is agent-unfillable forever. The
+    api door's **verify arm is data, not code**: the requesting
     agent names the probe (`"<METHOD> <path> [auth] [want] [insecure]"`, e.g. `GET
     /user/tokens/verify bearer`), it ships in the door's package (with its optional
     `probe_body`), and the runner composes its self-check curl
@@ -201,7 +207,12 @@ action it causes is signed, authorized, and audited by machinery that cannot rea
     audited leg, never the CPA's — and the CP then reads the SA token from the slot and
     seals it CP-side, so the door is live with no console fill; the record re-creates the
     slot and re-seals the token on every rebuild, the same role `doors.tf` plays for the
-    static kube doors. The grant surface itself is the CPA's identity alone,
+    static kube doors. A **self-hosted door's package** (the sealed credential + its
+    connection spec, which the guest needs placed as `secrets.json`) is fetched by the
+    door's GRANTEE from the CP's own record via `door_package` — the gate is the door's
+    live relay roster (the same signed source the runner checks per call, fail-closed on
+    relay outage), so the package never transits the operator's clipboard or the CPA's
+    context. The grant surface itself is the CPA's identity alone,
     server-enforced: a created agent (or department) calling
     `provision_runner`/`revoke_runner` is refused — capability asks route
     through freehold in conversation. Confirmation is governed by

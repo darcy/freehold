@@ -843,6 +843,10 @@ func (s *Server) overview(w http.ResponseWriter, r *http.Request) {
 		// presented pubkeys (the fill unlocks on confirm).
 		SelfHosted      bool `json:"self_hosted,omitempty"`
 		EnrollConfirmed bool `json:"enroll_confirmed,omitempty"`
+		// NoSecret marks a door whose credential is declared config (the
+		// provisioning agent seals it via fill_door); the console fill still
+		// works but is not required.
+		NoSecret bool `json:"no_secret,omitempty"`
 	}
 	runners := make([]runnerOut, 0, len(snap.Runners))
 	// Per-runner package state, kept by slice index so the roster results can
@@ -887,9 +891,12 @@ func (s *Server) overview(w http.ResponseWriter, r *http.Request) {
 		// package-mode runner); a live roster result below overwrites it for
 		// relay-mode runners.
 		out.Grants, out.GrantsSource = grantsFor(nil, nil, pkg, readable, false)
-		if capability, ok := snap.Capabilities[name]; ok && capability.SelfHosted() {
-			out.SelfHosted = true
-			out.EnrollConfirmed = capability.EnrollConfirmedAt != nil
+		if capability, ok := snap.Capabilities[name]; ok {
+			if capability.SelfHosted() {
+				out.SelfHosted = true
+				out.EnrollConfirmed = capability.EnrollConfirmedAt != nil
+			}
+			out.NoSecret = capability.NoSecret
 		}
 		// Live readiness probe (the console signs a status call as its own
 		// identity — the runner still fails closed).

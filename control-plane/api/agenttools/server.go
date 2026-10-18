@@ -209,7 +209,7 @@ func ToolList() []map[string]interface{} {
 			}, []string{"runner", "pubkeys"}),
 		},
 		{
-			"name": "provision_runner", "description": "Stage a NEW capability runner on the fly and grant the named agents onto its roster (the grant-giving flow: new capability = new runner, named <target>-<protocol>-<identity>). The tool takes NO credential: kind=ssh mints the runner's own keypair and returns the public key to install on the target; api-class kinds ship EMPTY — DM the operator the returned door page link and they fill the credential in the console web UI. api-class kinds REQUIRE probe — the door's verify arm as data, since you know the API: \"<METHOD> <path> [auth] [want] [insecure]\" (e.g. \"GET /user/tokens/verify bearer\"; auth one of bearer (default) | basic | json-body — the credential IS the POST body, unifi-style | none; want a 3-digit status, default 200; the literal token \"insecure\" composes curl -k for a private-CA target like a k3s API) and optionally probe_body (a literal JSON request body alongside the credential — kubernetes' SelfSubjectReview; kind=kubernetes injects its own verify arm — never send a probe or probe_body on a kube door). The runner composes the curl itself; no rebuild is ever needed for a new kind. unifi doors: the operator fills username+password in the console and the exec env carries UNIFI_API_ADMIN as a JSON object with the keys username and password — POST it to <controller>/api/auth/login, take the session token from the response, and call the API with it; there is no X-API-KEY on this door (probe: \"POST /api/auth/login json-body\"). hosted=\"self\" (kind=local) enrolls a runner RESIDENT on the target instead of staging one on the CP guest: the runner-client was installed on the box and `runner enroll` printed its pubkeys — pass them (pubkey, enc_pubkey) plus host (the box's PINNED NAME — a bare host, no port; the CP allocates the port); the CP records the identity, starts nothing, and the target runs its own unit. The operator must confirm the enrollment on the door page (verifying the pubkeys against the guest's own enroll output) before the credential fill unlocks. kind=kubernetes is a KUBE SLOT — a namespace-scoped door for an agent's own workloads, NEVER cluster scope (the cluster itself is Compute's, kube-api-root): name it kube-api-<slot>, pass ns (the slot's namespace — a fresh DNS label, not a platform namespace (kube-*, default, caddy, litellm, agents)) and optionally quota (\"cpu=4,memory=8Gi,pods=32\"), and the slot must be CARVED FIRST by Compute through kube-api-root — ask Compute in conversation to apply the slot manifest (a missing slot's error carries it) — then this tool verifies the slot, reads its SA token and seals it CP-side: the door is live immediately, no console fill, no door page. The record re-creates the slot and re-seals the token on every rebuild (a k3s rebuild rotates the CA); the ns is fixed at first provision, and one slot per namespace — share the door via grant_to instead of re-slicing it. grant_to is the agent whose workloads live in the namespace (the service's owner) — the carving department's part ends at the carve. Grants land live; the grantees' pods are re-applied with the new coords. address is the target endpoint (user@host[:port] for ssh, the base URL for api-class) — REFUSED for kind=kubernetes (the CP derives the k3s API route; an agent-stated endpoint would hand the sealed token to a server the agent controls).",
+			"name": "provision_runner", "description": "Stage a NEW capability runner on the fly and grant the named agents onto its roster (the grant-giving flow: new capability = new runner, named <target>-<protocol>-<identity>). The tool takes NO credential: kind=ssh mints the runner's own keypair and returns the public key to install on the target; api-class kinds ship EMPTY — DM the operator the returned door page link and they fill the credential in the console web UI, UNLESS you declare no_secret=true (the credential is config you stated in conversation — an address, a public token, never a secret): then seal it yourself with fill_door and the grantee fetches the package with door_package. no_secret is fixed at first provision and refused for ssh (nothing to fill) and kubernetes (the CP sources the SA token). api-class kinds REQUIRE probe — the door's verify arm as data, since you know the API: \"<METHOD> <path> [auth] [want] [insecure]\" (e.g. \"GET /user/tokens/verify bearer\"; auth one of bearer (default) | basic | json-body — the credential IS the POST body, unifi-style | none; want a 3-digit status, default 200; the literal token \"insecure\" composes curl -k for a private-CA target like a k3s API) and optionally probe_body (a literal JSON request body alongside the credential — kubernetes' SelfSubjectReview; kind=kubernetes injects its own verify arm — never send a probe or probe_body on a kube door). The runner composes the curl itself; no rebuild is ever needed for a new kind. unifi doors: the operator fills username+password in the console and the exec env carries UNIFI_API_ADMIN as a JSON object with the keys username and password — POST it to <controller>/api/auth/login, take the session token from the response, and call the API with it; there is no X-API-KEY on this door (probe: \"POST /api/auth/login json-body\"). hosted=\"self\" (kind=local) enrolls a runner RESIDENT on the target instead of staging one on the CP guest: the runner-client was installed on the box and `runner enroll` printed its pubkeys — pass them (pubkey, enc_pubkey) plus host (the box's PINNED NAME — a bare host, no port; the CP allocates the port); the CP records the identity, starts nothing, and the target runs its own unit. The operator must confirm the enrollment on the door page (verifying the pubkeys against the guest's own enroll output) before the credential fill unlocks. kind=kubernetes is a KUBE SLOT — a namespace-scoped door for an agent's own workloads, NEVER cluster scope (the cluster itself is Compute's, kube-api-root): name it kube-api-<slot>, pass ns (the slot's namespace — a fresh DNS label, not a platform namespace (kube-*, default, caddy, litellm, agents)) and optionally quota (\"cpu=4,memory=8Gi,pods=32\"), and the slot must be CARVED FIRST by Compute through kube-api-root — ask Compute in conversation to apply the slot manifest (a missing slot's error carries it) — then this tool verifies the slot, reads its SA token and seals it CP-side: the door is live immediately, no console fill, no door page. The record re-creates the slot and re-seals the token on every rebuild (a k3s rebuild rotates the CA); the ns is fixed at first provision, and one slot per namespace — share the door via grant_to instead of re-slicing it. grant_to is the agent whose workloads live in the namespace (the service's owner) — the carving department's part ends at the carve. Grants land live; the grantees' pods are re-applied with the new coords. address is the target endpoint (user@host[:port] for ssh, the base URL for api-class) — REFUSED for kind=kubernetes (the CP derives the k3s API route; an agent-stated endpoint would hand the sealed token to a server the agent controls).",
 			"inputSchema": i(map[string]interface{}{
 				"name":       map[string]interface{}{"type": "string"},
 				"kind":       map[string]interface{}{"type": "string"},
@@ -223,7 +223,21 @@ func ToolList() []map[string]interface{} {
 				"enc_pubkey": map[string]interface{}{"type": "string"},
 				"ns":         map[string]interface{}{"type": "string"},
 				"quota":      map[string]interface{}{"type": "string"},
+				"no_secret":  map[string]interface{}{"type": "boolean"},
 			}, []string{"name", "kind", "grant_to"}),
+		},
+		{
+			"name": "fill_door", "description": "Seal a NON-SECRET credential value into a door you provisioned with no_secret=true — config you stated in conversation (an address, a public token). A door WITHOUT that declaration is refused: its credential is operator-sealed (the console's fill is the only path), and \"is this one secret?\" is never your judgment call — the declaration at provision time is. The value rides the same seal path the console uses (sealed to the door's own key, never plaintext on disk); a CP-guest door restarts to pick it up, a resident door's grantee then fetches the package with door_package.",
+			"inputSchema": i(map[string]interface{}{
+				"name":  map[string]interface{}{"type": "string"},
+				"value": map[string]interface{}{"type": "string"},
+			}, []string{"name", "value"}),
+		},
+		{
+			"name": "door_package", "description": "Fetch a self-hosted door's ready-to-ship package JSON (secrets.json: the sealed credential + the door's connection spec) from the control plane's own record — the operator never copy-pastes it through chat. Only the door's GRANTEES may fetch: the gate is the door's live relay roster (the same signed source the runner checks per call), failing closed on a relay outage. Write the package beside the runner's identity.json on the guest and restart the unit there.",
+			"inputSchema": i(map[string]interface{}{
+				"name": map[string]interface{}{"type": "string"},
+			}, []string{"name"}),
 		},
 		{
 			"name": "revoke_runner", "description": "Take a capability away — the counterpart of provision_runner. With revoke_from set, those agent NAMES lose their grant on the door while it keeps serving the rest of its roster; with revoke_from empty the WHOLE door is retired (roster cleared, credential erased from the CP, its unit stopped where freehold hosts it, its record dropped). Every leg reports whether it was VERIFIED: the roster is re-read from the relay (what the runner checks per call), the unit is asked if it is still active and its port probed, the sealed package is re-opened. Anything unverified is named — a revoked door that is still running is a known state, never a silent one, so relay the unverified legs to the operator instead of claiming a clean teardown. The door's audit channel is KEPT read-only so the revocation stays auditable. Only doors provision_runner gave are touchable: build-time capability runners, the cloudflare-api- doors, and console-provisioned ones stay operator-scoped.",
@@ -389,6 +403,21 @@ type revokeRunnerArgs struct {
 	// RevokeFrom are the agent NAMES to drop from the door's roster; empty =
 	// retire the whole door. The server never interprets it — the flow does.
 	RevokeFrom []string `json:"revoke_from"`
+}
+
+// fillDoorArgs seals a NON-SECRET credential into a no_secret door: value is
+// the config the agent stated in conversation (an address, a public token) —
+// a secret door is refused by the flow, never judged here.
+type fillDoorArgs struct {
+	Name  string `json:"name"`
+	Value string `json:"value"`
+}
+
+// doorPackageArgs names the self-hosted door whose package the grantee
+// fetches; the caller's verified pubkey is the gate (the flow checks the
+// door's live roster).
+type doorPackageArgs struct {
+	Name string `json:"name"`
 }
 
 // exposeAppArgs / unexposeAppArgs are the exposure verbs' bodies. group is
@@ -765,6 +794,39 @@ func (s *Server) dispatch(w http.ResponseWriter, id json.RawMessage, params json
 		}
 		report, err := s.Tools.RevokeRunner(agent.RetireArgs{Name: a.Name, RevokeFrom: a.RevokeFrom})
 		s.textResult(w, id, err, report)
+	case "fill_door":
+		// The seal leg of the grant flow — the SAME identity gate and kill
+		// switch as provision_runner/revoke_runner: an operator who turned
+		// agent grants off has said the console is the only door surface. The
+		// DOOR-side guards (declared no_secret, agent-provisioned, fillable
+		// kind) live in the flow, so no dispatch path can skip them.
+		if err := s.requireGranter(caller); err != nil {
+			s.rpcError(w, id, -32003, "unauthorized: "+err.Error())
+			return
+		}
+		if mode := s.agentGrantsMode(); mode == "off" {
+			s.rpcError(w, id, -32003, "unauthorized: agent_grants is off — fill_door is disabled (the operator seals via the console)")
+			return
+		}
+		var a fillDoorArgs
+		if err := json.Unmarshal(call.Arguments, &a); err != nil {
+			s.rpcError(w, id, -32602, "fill_door arguments: "+err.Error())
+			return
+		}
+		report, err := s.Tools.FillDoor(a.Name, a.Value)
+		s.textResult(w, id, err, report)
+	case "door_package":
+		// NOT granter-gated: the GRANTEE fetches (compute places the package,
+		// the CPA never touches credential material). The gate is the door's
+		// live relay roster, checked in the flow against the verified caller
+		// pubkey — the same fail-closed source the runner authorizes against.
+		var a doorPackageArgs
+		if err := json.Unmarshal(call.Arguments, &a); err != nil {
+			s.rpcError(w, id, -32602, "door_package arguments: "+err.Error())
+			return
+		}
+		pkg, err := s.Tools.FetchDoorPackage(a.Name, caller)
+		s.textResult(w, id, err, pkg)
 	case "expose_app":
 		// NETWORK's capability (external proxy/edge): the network department's
 		// identity or an operator — a custom agent asking directly is refused

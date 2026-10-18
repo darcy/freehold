@@ -207,6 +207,23 @@ func BuildProvisionRunner(spec *Spec, reg *agenttools.Registry) agent.ProvisionR
 		if hasPrevRecord && prevRecord.Kind != "" && prevRecord.Kind != kind {
 			return "", fmt.Errorf("provision_runner %s: kind %q is fixed — the door was provisioned as %q (a different kind is a NEW capability, new name)", name, kind, prevRecord.Kind)
 		}
+		// no_secret is the door's fill-authority declaration, made once while
+		// constructing it: a no_secret door's credential is agent-sealable
+		// (fill_door), every other door is operator-sealed forever. Declaring
+		// an operator-sealed door agent-fillable is the one widening this flow
+		// refuses — a NEW declaration is a NEW door. Sticky on re-provision:
+		// once declared, the record keeps it (and ssh/kubernetes refuse the
+		// flag outright — nothing fillable exists to declare).
+		if args.NoSecret && (kind == "ssh" || kube) {
+			return "", fmt.Errorf("provision_runner %s: no_secret does not apply — an ssh door mints its own keypair and a kube slot's token is CP-sourced; neither has an agent-fillable credential", name)
+		}
+		if hasPrevRecord && args.NoSecret && !prevRecord.NoSecret {
+			return "", fmt.Errorf("provision_runner %s: no_secret is fixed at first provision — a door whose credential the operator sealed is never agent-fillable (a new declaration is a new door, new name)", name)
+		}
+		noSecret := args.NoSecret
+		if hasPrevRecord {
+			noSecret = prevRecord.NoSecret
+		}
 		if kube {
 			// The ns is FIXED at first provision; a re-provision may omit it
 			// (the record keeps it) but never change it — a different ns is a
@@ -386,7 +403,7 @@ func BuildProvisionRunner(spec *Spec, reg *agenttools.Registry) agent.ProvisionR
 			Kind: kind, Address: strings.TrimSpace(args.Address), Port: port,
 			Rosters: append([]string(nil), grantTo...), Origin: state.OriginAgent,
 			Hosted: hosted, Host: host,
-			NS: ns, Quota: quota,
+			NS: ns, Quota: quota, NoSecret: noSecret,
 			CreatedAt: uint64(time.Now().Unix()),
 		}
 		if hasPrevRecord {
@@ -493,12 +510,18 @@ func BuildProvisionRunner(spec *Spec, reg *agenttools.Registry) agent.ProvisionR
 			// how the operator fills the credential (never via any agent's chat).
 			link := doorLink(spec, name)
 			report += "\nDoor page: " + link
-			if kind != "ssh" && !selfHosted {
+			if kind != "ssh" && !selfHosted && !noSecret {
 				report += "\nThe door ships EMPTY: DM the operator that link (log in first if asked — the page opens the door's fill form). The console seals the credential and restarts the door; verify by exec-probe before claiming the capability is live."
 			}
 		}
 		if selfHosted {
-			report += "\nThe door ships EMPTY: DM the operator that link (log in first if asked) — they verify the presented pubkeys and confirm the enrollment on the page, then fill the credential. The console seals it to the runner's own key and returns the package JSON; the GRANTEE writes it to the guest's state dir as secrets.json (through its own door exec) and restarts the unit there. Verify by exec-probe before claiming the capability is live."
+			if noSecret {
+				report += "\nThe door is declared NO-SECRET (its credential is config stated in conversation — an address, a public token): seal it yourself with fill_door(" + name + ", value) once the operator has CONFIRMED the enrollment on the door page (that confirm stays — it binds the seal to the key the guest actually holds). Then the GRANTEE fetches the package itself with door_package(" + name + ") and places it on the guest (secrets.json beside the runner's identity.json, restart the unit there). Verify by exec-probe before claiming the capability is live."
+			} else {
+				report += "\nThe door ships EMPTY: DM the operator that link (log in first if asked) — they verify the presented pubkeys and confirm the enrollment on the page, then fill the credential. The console seals it to the runner's own key; the GRANTEE then fetches the package itself with door_package(" + name + ") and places it on the guest (secrets.json beside the runner's identity.json, restart the unit there). Verify by exec-probe before claiming the capability is live."
+			}
+		} else if noSecret {
+			report += "\nThe door is declared NO-SECRET (its credential is config stated in conversation): seal it yourself with fill_door(" + name + ", value) — the door restarts and picks it up. Verify by exec-probe before claiming the capability is live."
 		}
 		report += "\nVerify with the runner's self-check before claiming the capability is live."
 		return report, nil
