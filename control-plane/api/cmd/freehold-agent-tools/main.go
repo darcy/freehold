@@ -665,6 +665,28 @@ func cmdServe(args []string) {
 	}
 	go sched.Run(context.Background())
 
+	// The mention watcher: the channel-less mention path. A task comment or
+	// assignment (a kind-1/1621 note with the agent's p tag and NO channel)
+	// can never wake a pod — buzz-acp subscribes per-channel — so this polls
+	// for exactly that shape, records it in mentions.json, and kicks the
+	// agent directly (buzz-acp run --task in its pod; the agent replies ON
+	// the task via the bridge's task_comment). The console identity signs
+	// the poll and the fallback wake, like the scheduler above.
+	mentions, merr := agenttools.OpenMentions(filepath.Join(*stateDir, agenttools.MentionsFile))
+	if merr != nil {
+		log.Fatalf("open mentions: %v", merr)
+	}
+	watcher := &agenttools.MentionWatcher{
+		Mentions:    mentions,
+		Agents:      reg.Agents,
+		DialURL:     *relayURL,
+		AuthURL:     authURL,
+		Secret:      consoleSecret,
+		WakeChannel: cpbuild.FreeholdChannelID,
+		Kick:        cpbuild.BuildMentionKicker(spec),
+	}
+	go watcher.Run(context.Background())
+
 	tools := &agent.Tools{
 		Console:         reg,
 		Create:          cpbuild.BuildCreateAgentFn(spec),

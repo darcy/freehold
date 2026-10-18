@@ -121,6 +121,33 @@ the schedule and channel, then calls `create_job` — and a `jobs.json` row afte
     IANA timezone per job — the resolving agent asks the asker's clock first. One-shots
     are a unix `at` timestamp.
 
+## Mention watch
+
+A channel mention wakes a pod because buzz-acp subscribes per-channel. A mention that
+carries no channel — a **task comment or assignment on a Buzz project** (a kind-1/kind-1621
+note with the agent's `p` tag and no `h` tag) — can never wake one that way. The
+**mention watcher** closes that gap: it polls the relay for exactly that shape, records
+every mention in a `mentions.json` ledger (0600, durable plane, beside `jobs.json` — the
+CP is the record of what was seen, kicked, and settled), and **kicks the agent directly**:
+a `buzz-acp run --task` exec'd into the agent's pod through the same box-runner path every
+build stage uses. The task session keeps the agent's memory and carries the mention text,
+the task reference, and the task itself (fetched by id, so a bare assignment still gives
+the agent something to work); the agent replies **on the task** via the bridge's
+`task_comment` tool — its own key signs a kind-1 with the task as its root `e` tag, the
+exact shape the desktop renders as a task comment.
+
+*   **One in-flight task per agent** — a busy pod would drop a second kick (the
+    bot-not-responding failure mode). A mention that lands while the agent works stays
+    `discovered` in the ledger and kicks on a later tick; a burst is bounded at three
+    new kicks per agent per tick.
+*   **Nothing is lost**: a kick that cannot run (pod gone, runner unreachable) falls
+    back to the ordinary mention path — one wake into `#freehold`, which every pod's
+    subscription does see. A kick lost across a CP restart (no terminal record) closes
+    `timed_out` with a reason; the reply window is 30 minutes.
+*   **The delivery is the agent's own kind-1 on the task**, detected by an
+    author-filtered relay query after the kick time — so it settles correctly across
+    restarts, and an agent's older comment on the same task never counts.
+
 ## Runners and secrets — how agents touch the world
 
 The reason this architecture is safe to point at real infrastructure is that the

@@ -22,6 +22,12 @@ const (
 	GroupMembers   = 39002
 	MemoryKind     = 30174
 	ChannelMessage = 9
+	// TextNote is NIP-01's kind:1 note — Buzz's Pulse surface, and the shape
+	// of a task comment/assignment (a root `e` tag names the issue event).
+	TextNote = 1
+	// GitIssue is NIP-34's issue kind — Buzz projects model tasks as issues;
+	// a mention inside one carries the issue's id as a root `e` tag.
+	GitIssue = 1621
 	// KINDNip43Membership is NIP-43's relay membership list (kind 13534) —
 	// published and signed by the relay's own key; a member's pubkey rides a
 	// `member` tag (NOT a p-tag). The trust anchor for "who may use this

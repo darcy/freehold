@@ -145,6 +145,141 @@ func PollStreamP(relayURL string, secret []byte, channelID, mentionPubkey string
 	return pollAuth(relayURL, relayURL, secret, channelID, mentionPubkey, since)
 }
 
+// TaggedEvent is one signature-verified relay event with its tags intact —
+// the mention watcher's unit: id, kind, author, timestamp, tags (root-e/a/h/p
+// parsing) and content.
+type TaggedEvent struct {
+	ID        string
+	Kind      uint32
+	Author    string
+	CreatedAt int64
+	Tags      [][]string
+	Content   string
+}
+
+// Tag returns the first value of tag name ("" when absent).
+func (e TaggedEvent) Tag(name string) string {
+	for _, t := range e.Tags {
+		if len(t) > 1 && t[0] == name {
+			return t[1]
+		}
+	}
+	return ""
+}
+
+// Root returns the task/issue id the event hangs on: the e tag carrying the
+// NIP-01 "root" marker wins; the first e tag is the fallback.
+func (e TaggedEvent) Root() string {
+	for _, t := range e.Tags {
+		if len(t) >= 4 && t[0] == "e" && t[3] == "root" {
+			return t[1]
+		}
+	}
+	return e.Tag("e")
+}
+
+// HasChannel reports whether the event carries an h tag — the channel-scoped
+// shape a per-channel subscription already sees (the watcher must skip these;
+// the channel path owns them).
+func (e TaggedEvent) HasChannel() bool {
+	for _, t := range e.Tags {
+		if len(t) > 0 && t[0] == "h" {
+			return true
+		}
+	}
+	return false
+}
+
+// TaggedFilter is a relay query by kind plus optional tag/author matches —
+// the channel-less path a per-channel (#h) subscription can never see. A
+// zero/empty field means "no filter" for that dimension (Kinds must be
+// non-empty).
+type TaggedFilter struct {
+	Kinds   []uint32
+	P       []string
+	E       []string
+	Ids     []string
+	Authors []string
+	Since   int64
+	Limit   int
+}
+
+// QueryTaggedAuth queries the relay for events matching f, locally
+// signature-verified — unverifiable events are dropped, never surfaced.
+func QueryTaggedAuth(dialURL, authURL string, secret []byte, f TaggedFilter) ([]TaggedEvent, error) {
+	if len(f.Kinds) == 0 {
+		return nil, nil
+	}
+	filter := map[string]interface{}{
+		"kinds": strsToIface(uint32sToStrings(f.Kinds)),
+		"since": f.Since,
+		"limit": f.Limit,
+	}
+	if f.Limit == 0 {
+		filter["limit"] = 500
+	}
+	if len(f.P) > 0 {
+		filter["#p"] = strsToIface(f.P)
+	}
+	if len(f.E) > 0 {
+		filter["#e"] = strsToIface(f.E)
+	}
+	if len(f.Ids) > 0 {
+		filter["ids"] = strsToIface(f.Ids)
+	}
+	if len(f.Authors) > 0 {
+		filter["authors"] = strsToIface(f.Authors)
+	}
+	events, err := relay.QueryEventsAuth(dialURL, authURL, secret, []interface{}{filter})
+	if err != nil {
+		return nil, err
+	}
+	allowed := make(map[uint32]bool, len(f.Kinds))
+	for _, k := range f.Kinds {
+		allowed[k] = true
+	}
+	return collectTagged(events, allowed), nil
+}
+
+// collectTagged signature-verifies each event and keeps those whose kind is
+// allowed (the relay's order is preserved; callers sort if they care).
+func collectTagged(events []map[string]interface{}, allowed map[uint32]bool) []TaggedEvent {
+	var out []TaggedEvent
+	for _, ev := range events {
+		kind := uint32(int64num(ev["kind"]))
+		if !allowed[kind] {
+			continue
+		}
+		author, _ := ev["pubkey"].(string)
+		createdAt := int64num(ev["created_at"])
+		tags := parseTags(ev)
+		content, _ := ev["content"].(string)
+		sig, _ := ev["sig"].(string)
+		if _, err := wire.VerifyEvent(author, createdAt, kind, tags, content, sig); err != nil {
+			continue
+		}
+		id, _ := ev["id"].(string)
+		out = append(out, TaggedEvent{ID: id, Kind: kind, Author: author, CreatedAt: createdAt, Tags: tags, Content: content})
+	}
+	return out
+}
+
+func uint32sToStrings(ks []uint32) []string {
+	out := make([]string, len(ks))
+	for i, k := range ks {
+		out[i] = strconv.FormatUint(uint64(k), 10)
+	}
+	return out
+}
+
+func strsToIface(ss []string) []interface{} {
+	out := make([]interface{}, len(ss))
+	for i, s := range ss {
+		out[i] = s
+	}
+	return out
+}
+
 func pollAuth(dialURL, authURL string, secret []byte, channelID, p string, since int64) ([]PollResult, error) {
 	filter := map[string]interface{}{
 		"kinds": []interface{}{StreamMsgKind},
