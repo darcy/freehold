@@ -88,6 +88,15 @@ type ProvisionArgs struct {
 	// "key=value,key=value" (e.g. "cpu=4,memory=8Gi,pods=32"). Empty = no
 	// quota. Restated on a re-provision to resize the slot.
 	Quota string `json:"quota,omitempty"`
+	// NoSecret declares the door's fillable credential is NOT a secret — the
+	// agent states it in conversation (an address, a public token) and seals
+	// it itself via fill_door, no operator fill. The declaration is made ONCE,
+	// at stage time, when the door is constructed: the agent never judges
+	// "is this one secret?" mid-flight — a door without the declaration is
+	// agent-unfillable, its credential sealed only by the operator's console
+	// fill. Refused for ssh (nothing to fill) and kubernetes (the CP sources
+	// the SA token). Fixed at first provision.
+	NoSecret bool `json:"no_secret,omitempty"`
 }
 
 // ProvisionRunnerFn stages a NEW capability runner on the fly (the CPA's
@@ -121,6 +130,21 @@ type RetireArgs struct {
 // the report: the agent that just lost the door is never handed a teardown job
 // for it. Built by cpbuild.BuildRevokeRunner; nil = unsupported.
 type RevokeRunnerFn func(args RetireArgs) (report string, err error)
+
+// FillDoorFn seals a NON-SECRET credential value into a no_secret door the
+// agent provisioned (the same seal path the console's fill uses). Built by
+// cpbuild.BuildFillDoor; nil = unsupported. The caller gate lives at the
+// dispatch (the CPA's grant surface); the door-side guards (declared
+// no_secret, agent-provisioned, fillable kind) live in the flow so every
+// caller path hits them.
+type FillDoorFn func(name, value string) (report string, err error)
+
+// DoorPackageFn fetches a self-hosted door's ready-to-ship package JSON from
+// the CP's own record — the grantee places it on the guest; the operator never
+// copy-pastes it. callerPubkey is the verified agent-tools caller; the flow
+// admits only pubkeys on the door's LIVE relay roster (fail-closed). Built by
+// cpbuild.BuildDoorPackage; nil = unsupported.
+type DoorPackageFn func(name, callerPubkey string) (pkg string, err error)
 
 // UpdateArgs is one update_agent call. Name is the agent to touch; every other
 // field is optional and absent-means-keep-current, resolved against the agent's
@@ -187,6 +211,12 @@ type Tools struct {
 	// Revoke retires a capability door on the fly (revoke_runner — the CPA's
 	// take-away flow; the counterpart of Provision above). nil = unsupported.
 	Revoke RevokeRunnerFn
+	// Fill seals a non-secret credential into a no_secret door (fill_door).
+	// nil = unsupported.
+	Fill FillDoorFn
+	// DoorPackage fetches a self-hosted door's package JSON from the record
+	// (door_package — the grantee's fetch). nil = unsupported.
+	DoorPackage DoorPackageFn
 	// Update applies update_agent (purpose/model/channels/rename). nil =
 	// unsupported.
 	Update UpdateAgentFn
@@ -391,6 +421,22 @@ func (t *Tools) RevokeRunner(args RetireArgs) (string, error) {
 		return "", fmt.Errorf("revoke_runner: no retirement path bound")
 	}
 	return t.Revoke(args)
+}
+
+// FillDoor seals a non-secret credential into a declared no_secret door.
+func (t *Tools) FillDoor(name, value string) (string, error) {
+	if t.Fill == nil {
+		return "", fmt.Errorf("fill_door: no seal path bound")
+	}
+	return t.Fill(name, value)
+}
+
+// FetchDoorPackage fetches a self-hosted door's package JSON (roster-gated).
+func (t *Tools) FetchDoorPackage(name, callerPubkey string) (string, error) {
+	if t.DoorPackage == nil {
+		return "", fmt.Errorf("door_package: no fetch path bound")
+	}
+	return t.DoorPackage(name, callerPubkey)
 }
 
 // UpdateAgent applies an update_agent call (purpose/model/channels/rename).

@@ -117,6 +117,14 @@ of questions up front:
   console web UI (the console seals it to the door's key and restarts the
   door). You reference the credential by env name only, after the fact. The
   TOOL enforces this: provision_runner takes no credential field at all.
+  **The one exception is the no_secret declaration** — when the door's
+  fillable value is config you ALREADY stated in conversation (an address, a
+  public token — nothing anyone would protect), declare `no_secret=true` at
+  provision time and seal it yourself with `fill_door(name, value)`. The
+  declaration is the judgment, made once while constructing the door; never
+  declare it for a value you would not read aloud on a stage, and never
+  after the fact for a door the operator sealed — that door is operator-owned
+  in its credential forever, and a new declaration is a NEW door (new name).
 - **Bring the verify arm.** An api-class door REQUIRES `probe` at first
   provision — the door's verify arm as data, because you know the API and the
   runner does not: `"<METHOD> <path> [auth] [want] [insecure]"`, e.g. `GET
@@ -192,17 +200,21 @@ capability's runner once for both, or a fresh identical runner for the second
 use; never ask the operator to widen one.
 
 **After granting:** the grantees' pods re-apply automatically (the exec surface
-picks the new coords up); an EMPTY door stays 🟡 until the operator fills its
-credential via the door page link — for a CP-guest door the console seals +
-restarts it; for a SELF-HOSTED one the operator first CONFIRMS the enrollment
+picks the new coords up); an EMPTY door stays 🟡 until its credential is
+sealed — for a CP-guest door the console seals + restarts it, UNLESS you
+declared it no_secret: then `fill_door` seals it and the door restarts. For a
+SELF-HOSTED one the operator first CONFIRMS the enrollment
 on the page (verifying the presented pubkeys against the guest's own
 `runner enroll` output — Compute's audited report in the thread; this confirm
 is the technical barrier that binds the fill to the key the guest actually
 holds, so a compromised provisioning agent cannot seal the credential to its
-own key), then fills: the console seals to the runner's own key and returns
-the package JSON, and the GRANTEE carries it over — it holds exec on that
-guest through this very door — writing `secrets.json` beside the runner's
-identity.json and restarting the unit there. The ciphertext transits the
+own key — it stays for a no-secret door too), then the credential is sealed:
+by the operator's console fill, or — for a no_secret door — by your own
+`fill_door`. The package (the sealed credential + the door's connection spec)
+is then fetched BY THE GRANTEE via `door_package` — it reads the CP's own
+record, gated on the door's live relay roster, so the operator never
+copy-pastes anything: the grantee writes `secrets.json` beside the runner's
+identity.json and restarts the unit there. The ciphertext transits the
 grantee's context: that is the system's normal trust level (only the
 runner's key opens it), but on a RESIDENT runner the grantee could also read
 the runner's own key (it is on a box the grantee holds sudo on) — nothing
@@ -211,8 +223,9 @@ uses the sealed credential through the door and does not open the box's
 identity file. Say what is actually live after verifying the door's own
 self-check / an exec probe. A direct-credential mode (the operator handing
 the credential to this agent for freehold to seal) is a possible future
-`agent_grants` mode; it is not built, and until it is, chat is never the
-credential path.
+`agent_grants` mode; it is not built, and until it is, a SECRET credential
+never rides chat — the no_secret declaration is for config, made at stage
+time, and nothing else.
 
 **Revoking a self-hosted door is a feed-cut, not a stop.** The CP holds no
 identity and starts no unit for it, so roster removal + revoke cut the

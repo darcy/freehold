@@ -142,7 +142,15 @@ type CapabilityRecord struct {
 	NS string `json:"ns,omitempty"`
 	// Quota is the slot's optional ResourceQuota hard spec
 	// ("key=value,key=value"), re-applied from the record on every rebuild.
-	Quota     string `json:"quota,omitempty"`
+	Quota string `json:"quota,omitempty"`
+	// NoSecret declares the door's fillable credential is NOT a secret — the
+	// provisioning agent stated it in conversation (an address, a public
+	// token) and may seal/re-seal it itself via fill_door. A door WITHOUT this
+	// flag is agent-unfillable forever: its credential is sealed only by the
+	// operator's console fill. Fixed at first provision — a re-provision may
+	// never widen a sealed door into an agent-fillable one. Additive omitempty;
+	// records predating it load unchanged (and read agent-unfillable).
+	NoSecret  bool   `json:"no_secret,omitempty"`
 	CreatedAt uint64 `json:"created_at"`
 }
 

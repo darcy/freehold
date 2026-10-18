@@ -228,7 +228,7 @@ async function refresh() {
         (r.secret.rotated_at ? " · rotated" : "")
       : '<span class="muted">—</span>';
     return `<tr ${r.name === doorName ? 'class="door-focus"' : ""}>
-      <td><b>${esc(r.name)}</b>${r.colocated ? ' <span class="chip gray">co-located</span>' : ""}<div class="muted">${esc(r.nostr_pubkey.slice(0, 16))}…</div></td>
+      <td><b>${esc(r.name)}</b>${r.colocated ? ' <span class="chip gray">co-located</span>' : ""}${r.no_secret ? ' <span class="chip gray">config</span>' : ""}<div class="muted">${esc(r.nostr_pubkey.slice(0, 16))}…</div></td>
       <td>${r.status === "revoked" ? chip("red(revoked)") : chip("green(active)")}</td>
       <td>${r.risk ? chip(esc(r.risk)) : '<span class="muted">?</span>'}</td>
       <td>${secret}</td>
@@ -384,6 +384,7 @@ function openFill(name) {
   $("#fill-title").textContent = "fill credential — " + name;
   const fields = $("#fill-fields");
   fields.innerHTML = "";
+  $("#fill-cancel").textContent = "cancel";
   if (row && row.self_hosted && !row.enroll_confirmed) {
     $("#fill-note").textContent = "This is a SELF-HOSTED door and its enrollment is not confirmed yet: verify the pubkeys below against the guest's own `runner enroll` output (or Compute's report in the thread), then press \"confirm enroll\" — the fill unlocks after that. Confirming is what binds the credential to the key the guest actually holds.";
     fields.innerHTML = '<div class="small" style="margin-bottom:8px">nostr: ' + esc(row.nostr_pubkey) +
@@ -397,7 +398,9 @@ function openFill(name) {
   } else {
     $("#fill-note").textContent = kind === "unifi"
       ? "The UniFi Network application account for this door (an Admin role). Sealed to the door's key; the agent never sees it. The door restarts and verifies itself."
-      : "Credential for this door, pasted once — sealed to the door's key, never stored. The door restarts and picks it up.";
+      : (row && row.no_secret
+        ? "Config value for this door (declared NO-SECRET at provision): the provisioning agent seals it itself via fill_door — your fill here still works but is not required."
+        : "Credential for this door, pasted once — sealed to the door's key, never stored. The door restarts and picks it up.");
     $("#fill-submit").style.display = "";
     $("#fill-confirm").style.display = "none";
     const skip = row && row.self_hosted
@@ -437,12 +440,17 @@ $("#fill-submit").onclick = async () => {
     if (res.restart_error) $("#err").textContent = "sealed, but the door restart failed: " + res.restart_error;
     if (res.self_hosted && res.package_json) {
       // A self-hosted door runs on its own box — the console sealed to the
-      // runner's own key but cannot restart anything. The GRANTEE (it holds
-      // exec on that guest through this very door) carries the package JSON
-      // over: secrets.json beside identity.json, then a unit restart there.
-      $("#err").innerHTML = 'sealed for a self-hosted door — hand this package JSON to the granted agent (it writes it on the guest and restarts the unit): <input readonly value="' + esc(res.package_json) + '" onclick="this.select()">';
+      // runner's own key but cannot restart anything. The GRANTEE carries the
+      // package JSON over (it fetches this itself with door_package; the
+      // copy here is the fallback). Shown INSIDE the popup, before it closes —
+      // a div below the fold is a hand-off nobody sees.
+      $("#fill-note").innerHTML = 'Sealed for a self-hosted door. The granted agent fetches this itself (door_package) — to hand it over in chat instead, copy the package JSON:';
+      $("#fill-fields").innerHTML = '<input readonly value="' + esc(res.package_json) + '" onclick="this.select()" style="width:100%">';
+      $("#fill-submit").style.display = "none";
+      $("#fill-confirm").style.display = "none";
+      $("#fill-cancel").textContent = "done";
     }
-    $("#fill-overlay").style.display = "none";
+    if (!(res.self_hosted && res.package_json)) $("#fill-overlay").style.display = "none";
     await refresh();
   } catch (e) { $("#fill-err").textContent = "error: " + e.message; }
 };

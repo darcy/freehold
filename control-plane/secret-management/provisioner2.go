@@ -111,26 +111,36 @@ func RotateSecretSelfHosted(store *state.StateStore, name string, newSecret []by
 	if err != nil {
 		return state.SecretRecord{}, nil, err
 	}
-	ciphertextHex := fmt.Sprintf("%x", sealed)
-	pkgJSON, err := wire.New(
-		map[string]string{name: ciphertextHex},
-		map[string]wire.TargetMeta{name: {Kind: before.Kind, Address: before.Address, Secret: name,
-			Probe: before.Probe, ProbeBody: before.ProbeBody}},
-		nil,
-	).Bytes()
+	priorCiphertext := before.CiphertextHex
+	before.CiphertextHex = fmt.Sprintf("%x", sealed)
+	pkgJSON, err := PackageJSON(before)
 	if err != nil {
 		return state.SecretRecord{}, nil, err
 	}
 	now := uint64(time.Now().Unix())
-	if err := store.UpdateSecretCiphertext(name, ciphertextHex, now); err != nil {
+	if err := store.UpdateSecretCiphertext(name, before.CiphertextHex, now); err != nil {
 		return state.SecretRecord{}, nil, err
 	}
 	if err := store.Save(); err != nil {
-		_ = store.SetSecretCiphertext(name, before.CiphertextHex, before.RotatedAt)
+		_ = store.SetSecretCiphertext(name, priorCiphertext, before.RotatedAt)
 		return state.SecretRecord{}, nil, err
 	}
 	rec, _ := store.GetSecret(name)
 	return rec, pkgJSON, nil
+}
+
+// PackageJSON builds a self-hosted door's ready-to-ship package JSON from its
+// record alone — the exact shape RotateSecretSelfHosted returns, regenerable
+// at any time because the record holds every field the package carries
+// (ciphertext, kind, address, probe). The record's ciphertext is used as-is:
+// callers seal BEFORE calling this.
+func PackageJSON(before state.SecretRecord) ([]byte, error) {
+	return wire.New(
+		map[string]string{before.Runner: before.CiphertextHex},
+		map[string]wire.TargetMeta{before.Runner: {Kind: before.Kind, Address: before.Address, Secret: before.Runner,
+			Probe: before.Probe, ProbeBody: before.ProbeBody}},
+		nil,
+	).Bytes()
 }
 
 // ---- B3 revoke ----

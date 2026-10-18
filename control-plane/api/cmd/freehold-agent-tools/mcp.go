@@ -95,11 +95,21 @@ func freeholdToolDefs(hasRunner bool, targets []string) []map[string]interface{}
 				"enc_pubkey": map[string]interface{}{"type": "string"},
 				"ns":         map[string]interface{}{"type": "string"},
 				"quota":      map[string]interface{}{"type": "string"},
+				"no_secret":  map[string]interface{}{"type": "boolean"},
 			}, []string{"name", "kind", "grant_to"})},
 		{"name": "revoke_runner", "description": "Take a capability away — the counterpart of provision_runner. With revoke_from set, those agent NAMES lose their grant on the door while it keeps serving the rest of its roster; with revoke_from empty the WHOLE door is retired (roster cleared, credential erased from the CP, its unit stopped where freehold hosts it, its record dropped). Every leg says whether it was VERIFIED (the roster is re-read from the relay, the unit is asked whether it is still active and its port probed, the sealed package is re-opened). Relay the unverified legs to the operator verbatim rather than claiming a clean teardown: a revoked door that is still running is a known state, never a silent one. The door's audit channel is KEPT read-only. Only doors provision_runner gave are touchable — build-time, cloudflare-api-, and console-provisioned doors stay operator-scoped.",
 			"inputSchema": i(map[string]interface{}{
 				"name":        map[string]interface{}{"type": "string"},
 				"revoke_from": map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
+			}, []string{"name"})},
+		{"name": "fill_door", "description": "Seal a NON-SECRET credential value into a door you provisioned with no_secret=true — config you stated in conversation (an address, a public token). A door WITHOUT that declaration is refused: its credential is operator-sealed (the console's fill is the only path), and \"is this one secret?\" is never your judgment call — the declaration at provision time is. The value rides the same seal path the console uses (sealed to the door's own key, never plaintext on disk); a CP-guest door restarts to pick it up, a resident door's grantee then fetches the package with door_package.",
+			"inputSchema": i(map[string]interface{}{
+				"name":  map[string]interface{}{"type": "string"},
+				"value": map[string]interface{}{"type": "string"},
+			}, []string{"name", "value"})},
+		{"name": "door_package", "description": "Fetch a self-hosted door's ready-to-ship package JSON (secrets.json: the sealed credential + the door's connection spec) from the control plane's own record — the operator never copy-pastes it through chat. Only the door's GRANTEES may fetch: the gate is the door's live relay roster (the same signed source the runner checks per call), failing closed on a relay outage. Write the package beside the runner's identity.json on the guest and restart the unit there.",
+			"inputSchema": i(map[string]interface{}{
+				"name": map[string]interface{}{"type": "string"},
 			}, []string{"name"})},
 		{"name": "expose_app", "description": "Make a service reachable by the people it serves: a public TLS vhost on the edge (DNS pointed, cert issued, Caddy config applied live), gated by the member login. auth=gate is the STANDING DEFAULT POSTURE — every app is member-gated unless the operator says otherwise for that app; auth=app (the app has its own auth) | none, and visibility=public, are operator-only exceptions, never an agent's default. name is a DNS label — the app's hostname is <name>.<the world's own domain>, the world's subtree derived from YOUR cp host (cp.librem.freehold.technology → librem.freehold.technology; sandbox.freehold.technology → itself — so an app named litellm lands at litellm.librem.freehold.technology or litellm.sandbox.freehold.technology; the member cookie scopes to the same world domain). NEVER compose the hostname from the DNS zone, another world's records, or a guess — derive it from your own world's cp host. SCOPE: exposure is Network's capability — only the network department (or the operator) may call this; other agents are refused, so route the ask through Network in conversation. group is the relay CHANNEL the access rides (name or id; default general — the everyone-channel): the requester must ALREADY be in it — access narrows to groups the requester belongs to and never widens; the gate enforces the channel per request (IsMemberAuth), so removing someone from the channel revokes them within the cache TTL. requester is the pubkey of whoever asked (default: you). target is the service's internal host:port (the edge proxies plain HTTP to it). visibility: family (public DNS + gate — the default) | public (NO gate — operator-only) | lan (no public DNS). The record survives rebuilds; a failed apply is re-ensured by the next build and the report names which legs landed. VERIFY your work with gate_fetch: your own signed request passes the same channel check a member session does (expose validated the requester is in the group — verify as yourself only when requester defaults to you), so a 200 with the app's body proves the exposure serves through the edge; a 403 names the signer out of the group.",
 			"inputSchema": i(map[string]interface{}{
@@ -172,8 +182,12 @@ func isFreeholdTool(name string) bool {
 	// revoke_runner is its take-away twin and is advertised for the same reason:
 	// the half that hands capability out is not governable without the half that
 	// takes it back, and it is bounded by the same ownership guards (only doors
-	// the agent flow gave) and the same agent_grants kill switch.
+	// the agent flow gave) and the same agent_grants kill switch. fill_door is
+	// the grant flow's seal leg for declared no-secret doors (the same gate);
+	// door_package is the grantee's fetch — advertised to every agent, refused
+	// server-side to anyone off the door's live roster.
 	case "create_agent", "update_agent", "manage_agent", "provision_runner", "revoke_runner",
+		"fill_door", "door_package",
 		"expose_app", "unexpose_app",
 		"create_job", "list_jobs", "delete_job", "pause_job":
 		return true
