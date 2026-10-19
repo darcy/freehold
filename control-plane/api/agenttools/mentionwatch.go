@@ -38,9 +38,6 @@ const (
 	// mentionCursorSkew re-reads a little before the cursor so a clock edge
 	// between the relay and the CP cannot skip an event.
 	mentionCursorSkew = 120 // seconds
-	// MaxMentionKicksPerTick bounds one agent's new mentions per tick (a
-	// burst of mentions cannot stack unbounded turns).
-	MaxMentionKicksPerTick = 3
 	// mentionStaleGrace is how long a kicked row may sit without a terminal
 	// record before it is closed as lost (a CP restart mid-exec leaves
 	// exactly this shape).
@@ -264,28 +261,33 @@ func agentPked(ev *delegate.TaggedEvent, byPK map[string]string) string {
 	return ""
 }
 
-// kickOpen walks discovered records oldest-first and kicks one in-flight
-// task per agent, up to MaxMentionKicksPerTick new kicks per agent per tick.
+// kickOpen walks discovered records oldest-first and kicks at most one task
+// per agent: the gate is seeded from rows already kicked ACROSS TICKS (a
+// 15-minute task spans many ticks, so a same-tick-only map would let the
+// next tick kick a second task into the busy pod), then updated as this
+// tick's kick launches. A row past the stale grace is not in flight (the
+// exec timeout has passed; settle closes it this tick).
 func (w *MentionWatcher) kickOpen(now time.Time, byPK map[string]string) {
 	st := w.Mentions.Snapshot()
 	ids := make([]string, 0, len(st.Rows))
+	inflight := map[string]bool{} // agent pubkey → a task is running
 	for id, r := range st.Rows {
-		if r.Status == MentionDiscovered {
+		switch r.Status {
+		case MentionDiscovered:
 			ids = append(ids, id)
+		case MentionKicked:
+			if r.KickedAt > 0 && now.Unix()-int64(r.KickedAt) <= int64(mentionStaleGrace.Seconds()) {
+				inflight[r.AgentPubkey] = true
+			}
 		}
 	}
 	sort.Slice(ids, func(i, j int) bool {
 		return st.Rows[ids[i]].CreatedAt < st.Rows[ids[j]].CreatedAt
 	})
-	inflight := map[string]bool{} // agent pubkey → a task is running
-	budget := map[string]int{}
 	for _, id := range ids {
 		r := st.Rows[id]
 		if inflight[r.AgentPubkey] {
 			continue // the in-flight gate: one task per agent
-		}
-		if budget[r.AgentPubkey] >= MaxMentionKicksPerTick {
-			continue
 		}
 		name := byPK[r.AgentPubkey]
 		if name == "" {
@@ -295,7 +297,6 @@ func (w *MentionWatcher) kickOpen(now time.Time, byPK map[string]string) {
 			})
 			continue
 		}
-		budget[r.AgentPubkey]++
 		inflight[r.AgentPubkey] = true
 		w.launchKick(id, *r, name, now)
 	}
@@ -357,6 +358,10 @@ func (w *MentionWatcher) launchKick(id string, r MentionRecord, name string, now
 				status = MentionFailed
 			}
 			detail = "terminal: " + ts
+		} else {
+			// Exit 0 but no version-1 record: never claim a clean completion
+			// we cannot see (the reply poll is the real delivery signal).
+			detail = "no terminal record parsed"
 		}
 		if uerr := w.Mentions.Mutate(func(s *MentionState) bool {
 			row, ok := s.Rows[id]

@@ -211,7 +211,7 @@ func QueryTaggedAuth(dialURL, authURL string, secret []byte, f TaggedFilter) ([]
 		return nil, nil
 	}
 	filter := map[string]interface{}{
-		"kinds": strsToIface(uint32sToStrings(f.Kinds)),
+		"kinds": uint32sToIface(f.Kinds),
 		"since": f.Since,
 		"limit": f.Limit,
 	}
@@ -264,10 +264,12 @@ func collectTagged(events []map[string]interface{}, allowed map[uint32]bool) []T
 	return out
 }
 
-func uint32sToStrings(ks []uint32) []string {
-	out := make([]string, len(ks))
+// uint32sToIface renders NIP-01 kinds as JSON NUMBERS (the relay's filter
+// parses kinds numerically — a string-kind filter matches nothing).
+func uint32sToIface(ks []uint32) []interface{} {
+	out := make([]interface{}, len(ks))
 	for i, k := range ks {
-		out[i] = strconv.FormatUint(uint64(k), 10)
+		out[i] = k
 	}
 	return out
 }

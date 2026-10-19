@@ -184,6 +184,18 @@ func TestWatcherInFlightGate(t *testing.T) {
 	if row := rowOf(t, store, "m2"); row == nil || row.Status != MentionDiscovered {
 		t.Fatalf("m2 not discovered: %+v", row)
 	}
+	// The gate SPANS ticks: a second tick while m1 is still in flight must
+	// not kick m2 into the busy pod.
+	w.TickNow()
+	mu.Lock()
+	got = kicks
+	mu.Unlock()
+	if got != 1 {
+		t.Fatalf("kicks = %d after a second tick, want 1 (cross-tick gate)", got)
+	}
+	if row := rowOf(t, store, "m2"); row == nil || row.Status != MentionDiscovered {
+		t.Fatalf("m2 kicked into a busy agent: %+v", row)
+	}
 	close(release)
 	deadline := time.Now().Add(2 * time.Second)
 	for {

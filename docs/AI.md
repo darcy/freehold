@@ -138,8 +138,9 @@ exact shape the desktop renders as a task comment.
 
 *   **One in-flight task per agent** — a busy pod would drop a second kick (the
     bot-not-responding failure mode). A mention that lands while the agent works stays
-    `discovered` in the ledger and kicks on a later tick; a burst is bounded at three
-    new kicks per agent per tick.
+    `discovered` in the ledger and kicks on a later tick, one at a time as the agent
+    frees up; the gate spans ticks, so a 15-minute task never gets a second kick into
+    the busy pod.
 *   **Nothing is lost**: a kick that cannot run (pod gone, runner unreachable) falls
     back to the ordinary mention path — one wake into `#freehold`, which every pod's
     subscription does see. A kick lost across a CP restart (no terminal record) closes

@@ -116,8 +116,16 @@ func TestQueryTaggedAuthVerifiesAndKeepsTags(t *testing.T) {
 	if gotFilter == nil {
 		t.Fatal("relay saw no filter")
 	}
-	if f := fmt.Sprint(gotFilter["kinds"]); !strings.Contains(f, "1") || !strings.Contains(f, "1621") {
-		t.Fatalf("kinds filter = %v", gotFilter["kinds"])
+	// Kinds MUST be JSON numbers: the relay's filter parses them numerically,
+	// so a string-kind filter collapses to kind 0 and matches nothing.
+	ks, ok := gotFilter["kinds"].([]interface{})
+	if !ok || len(ks) != 2 {
+		t.Fatalf("kinds filter = %v, want two entries", gotFilter["kinds"])
+	}
+	for _, k := range ks {
+		if _, ok := k.(float64); !ok {
+			t.Fatalf("kind %v (%T) is not a JSON number", k, k)
+		}
 	}
 	if f := fmt.Sprint(gotFilter["#p"]); !strings.Contains(f, "agent-pk") {
 		t.Fatalf("#p filter = %v", gotFilter["#p"])
