@@ -123,6 +123,17 @@ type Coords struct {
 	Pangolin *PangolinCoords `json:"pangolin,omitempty"`
 }
 
+// PangolinHostSpec records the created Pangolin VPS — the handle the
+// uninstall's --destroy-host destroys and the door page the operator can
+// find it by. The integration origin rides here (non-secret); the root key
+// never lands in the profile (it seals to the console identity).
+type PangolinHostSpec struct {
+	Provider string `toml:"provider,omitempty"`
+	ID       string `toml:"id,omitempty"`
+	IP       string `toml:"ip,omitempty"`
+	Endpoint string `toml:"endpoint,omitempty"`
+}
+
 // PangolinCoords carries the world's Pangolin public path SHAPE — the
 // non-secret parts only (coords ride the console's argv and the update
 // flow's world-config scrape; NO credential lives here). The instance's

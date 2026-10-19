@@ -167,6 +167,10 @@ type Spec struct {
 	// re-ensures per record — the stage is once-per-build, not per-app).
 	newtAsserted bool
 
+	// seq: the tests' monotonic event counter (the exec-command ordering
+	// pins against the API call order). nil in production.
+	seq *int
+
 	// AgentRegistry/FactsStore are the running agent-tools server's in-process
 	// durable stores, set only when the build runs INSIDE that server (its own
 	// world_build tool). nil for the console executor, which opens its own copy

@@ -22,12 +22,12 @@ func readScript(t *testing.T, name string) string {
 func TestPinK3sBringup(t *testing.T) {
 	s := readScript(t, "k3s-bringup.sh")
 	for _, want := range []string{
-		"v1.36.4+k3s1",                 // pinned deterministic install
+		"v1.36.4+k3s1", // pinned deterministic install
 		"server --disable traefik --disable servicelb --kubelet-arg", // flag AFTER subcommand + ingress/LB disabled (caddy binds 80/443)
 		"KubeletInUserNamespace=true",
-		"/srv/data/k8s-volumes",        // durable local-path carve-out
-		"local-path-config",            // local-path provider ConfigMap
-		"get.k3s.io",                   // fetches the real installer
+		"/srv/data/k8s-volumes",             // durable local-path carve-out
+		"local-path-config",                 // local-path provider ConfigMap
+		"get.k3s.io",                        // fetches the real installer
 		"DEFAULT_PATH_FOR_NON_LISTED_NODES", // k3s node wildcard (NOT "k3s" - a wrong node name fails provisioning)
 	} {
 		if !strings.Contains(s, want) {
@@ -179,4 +179,3 @@ func TestPlaneShArgsQuoted(t *testing.T) {
 		t.Error("plane.sh: vg var unquoted — an empty value shifts every positional")
 	}
 }
-

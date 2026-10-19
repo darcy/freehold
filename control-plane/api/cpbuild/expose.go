@@ -508,6 +508,12 @@ func (s *Spec) pangolinEnsure(rec agenttools.AppRecord) error {
 	if err != nil {
 		return fmt.Errorf("pangolin: target %q port: %w", rec.Target, err)
 	}
+	// The tunnel FIRST: the client's base is the CP's loopback — the
+	// forward unit is what makes that address mean the VPS. Dailing
+	// before the unit exists deadlocks every retry.
+	if err := s.ensurePangolinTunnel(); err != nil {
+		return fmt.Errorf("pangolin: the CP tunnel stage: %w", err)
+	}
 	cl := &pangolin.Client{Base: base, Key: key}
 	site, created, err := cl.EnsureSite(context.Background(), p.Org, p.Site)
 	if err != nil {
@@ -536,6 +542,32 @@ func (s *Spec) pangolinEnsure(rec agenttools.AppRecord) error {
 		fmt.Fprintf(os.Stderr, "pangolin: resource %s created (%s)\n", rec.Name, res.FullDomain)
 	}
 	return nil
+}
+
+// ensurePangolinTunnel keeps the CP's side of the public path up: the VPS's
+// integration API binds LOOPBACK (the Bearer key never rides cleartext
+// internet), so the CP reaches it through an SSH forward to the VPS using
+// the CP-minted tunnel key (the VPS's authorized_keys carries its pub —
+// written by `freehold pangolin`) — a systemd unit on
+// the CP guest, restarted on every assert like every other stage. The
+// client's sealed base stays http://127.0.0.1:3003 — this unit IS what
+// makes that address mean the VPS.
+func (s *Spec) ensurePangolinTunnel() error {
+	if s.Pangolin == nil || s.Pangolin.DNSIP == "" {
+		return nil // no VPS address on record — nothing to forward to
+	}
+	vps := s.Pangolin.DNSIP
+	// The tunnel key: minted ON the CP guest (its private half never
+	// transits — the door key never leaves the box), the pub line the
+	// operator's `freehold pangolin` authorized on the VPS.
+	if _, err := s.runOut("pct exec "+fmt.Sprint(s.CpLxc)+" -- test -f /srv/data/cp/pangolin-tunnel.key", 30); err != nil {
+		return fmt.Errorf("the tunnel key is not on the CP guest (/srv/data/cp/pangolin-tunnel.key) — run `freehold pangolin` (it mints the key and authorizes it on the VPS)")
+	}
+	// The unit lives ON THE CP GUEST — the stage's execs run on the world
+	// host (the runner's target), so the script rides pct exec (the
+	// deployAgentTools pattern). Single quotes only OUTSIDE the script.
+	unit := fmt.Sprintf("pct exec %d -- sh -c 'set -e\ncat > /etc/systemd/system/pangolin-tunnel.service <<UNIT\n[Unit]\nDescription=Pangolin integration tunnel (freehold public path)\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nExecStart=/usr/bin/ssh -N -o ServerAliveInterval=30 -o ExitOnForwardFailure=yes -o StrictHostKeyChecking=accept-new -i /srv/data/cp/pangolin-tunnel.key -L 127.0.0.1:3003:127.0.0.1:3003 root@%s\nRestart=always\nRestartSec=5\n\n[Install]\nWantedBy=multi-user.target\nUNIT\nsystemctl daemon-reload\nsystemctl enable pangolin-tunnel >/dev/null 2>&1\nsystemctl restart pangolin-tunnel\nfor i in $(seq 1 30); do\n  curl -sf http://127.0.0.1:3003/v1/ >/dev/null 2>&1 && break\n  sleep 2\ndone\ncurl -sf http://127.0.0.1:3003/v1/ >/dev/null 2>&1 || { echo pangolin-tunnel-never-answered; exit 1; }'", s.CpLxc, vps)
+	return s.run(unit, 120)
 }
 
 // newtVersion pins the Newt release the gateway stage installs; newtURL is
