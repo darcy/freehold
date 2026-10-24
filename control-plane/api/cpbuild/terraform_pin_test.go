@@ -22,13 +22,16 @@ func readScript(t *testing.T, name string) string {
 func TestPinK3sBringup(t *testing.T) {
 	s := readScript(t, "k3s-bringup.sh")
 	for _, want := range []string{
-		"v1.36.4+k3s1",                 // pinned deterministic install
-		"server --disable traefik --disable servicelb --kubelet-arg", // flag AFTER subcommand + ingress/LB disabled (caddy binds 80/443)
+		"v1.36.4+k3s1", // pinned deterministic install
+		"server --disable traefik --disable servicelb --disable local-storage --kubelet-arg", // flags AFTER subcommand + ingress/LB/local-storage disabled (caddy binds 80/443; the carve-out is source-owned)
 		"KubeletInUserNamespace=true",
-		"/srv/data/k8s-volumes",        // durable local-path carve-out
-		"local-path-config",            // local-path provider ConfigMap
-		"get.k3s.io",                   // fetches the real installer
-		"DEFAULT_PATH_FOR_NON_LISTED_NODES", // k3s node wildcard (NOT "k3s" - a wrong node name fails provisioning)
+		"--disable local-storage",            // k3s must not own the local-path manifest
+		"/srv/data/k8s-volumes",              // durable local-path carve-out
+		"local-path-config",                  // local-path provider ConfigMap
+		"get.k3s.io",                         // fetches the real installer
+		"pct push",                           // stages the source manifest into the guest
+		"manifests/freehold-local-path.yaml", // source manifest
+		"/var/lib/rancher/k3s/server/manifests/freehold-local-path.yaml", // installed under a non-disabled addon name
 	} {
 		if !strings.Contains(s, want) {
 			t.Errorf("k3s-bringup.sh missing %q", want)
@@ -46,6 +49,50 @@ func TestPinK3sBringup(t *testing.T) {
 			if inner := s[openPos:closePos]; strings.Contains(inner, "'") {
 				t.Errorf("k3s-bringup.sh has an apostrophe inside the bash -c '...' wrapper")
 			}
+		}
+	}
+}
+
+// TestPinLocalStorageManifest pins the source-rendered local-path carve-out:
+// the manifest must point at the durable plane and must not carry the stock
+// rootfs path (the bundled addon is disabled, so this file is the sole owner).
+func TestPinLocalStorageManifest(t *testing.T) {
+	b, err := terraformFS.ReadFile("terraform/manifests/freehold-local-path.yaml")
+	if err != nil {
+		t.Fatalf("read freehold-local-path manifest: %v", err)
+	}
+	s := string(b)
+	for _, want := range []string{
+		"/srv/data/k8s-volumes",
+		"DEFAULT_PATH_FOR_NON_LISTED_NODES", // k3s node wildcard (NOT "k3s" - a wrong node name fails provisioning)
+		"local-path-config",
+		"local-path-provisioner",
+		"rancher.io/local-path",
+		"WaitForFirstConsumer",
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("freehold-local-path.yaml missing %q", want)
+		}
+	}
+	if strings.Contains(s, "/var/lib/rancher/k3s/storage") {
+		t.Error("freehold-local-path.yaml still carries the stock rootfs path")
+	}
+}
+
+// TestPinK3sBringupTriggers: the script and manifest hashes force a re-run
+// when the carve-out source changes, even when the guest vmid/IP are unchanged.
+func TestPinK3sBringupTriggers(t *testing.T) {
+	s, err := readTf(t, "main.tf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		`filesha256("${path.module}/scripts/k3s-bringup.sh")`,
+		`filesha256("${path.module}/manifests/freehold-local-path.yaml")`,
+		"timestamp()",
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("main.tf k3s_bringup triggers missing %q", want)
 		}
 	}
 }
@@ -179,4 +226,3 @@ func TestPlaneShArgsQuoted(t *testing.T) {
 		t.Error("plane.sh: vg var unquoted — an empty value shifts every positional")
 	}
 }
-
