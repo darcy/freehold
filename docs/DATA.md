@@ -36,7 +36,7 @@ rests on keeping the two halves on separate volumes.
     excluded half. The provisioner's default path is rendered from the terraform module's
     source manifest (`terraform/manifests/freehold-local-path.yaml`) at `/srv/data/k8s-volumes`,
     with k3s's bundled local-storage addon disabled so a guest boot cannot re-render the
-    stock rootfs path; disposable classes ride a `/srv/nobackup`-rooted storage class.
+    stock rootfs path.
 *   **Three verbs, all run from the box over root SSH, so they work with the CP down:**
     *   `freehold snapshot` — one name spans every mount; list / rm / guarded rollback.
         Proxmox-only (ZFS or LVM-thin primitives). Rollback takes a safety net first,
