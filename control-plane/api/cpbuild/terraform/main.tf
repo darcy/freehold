@@ -168,9 +168,19 @@ resource "null_resource" "lxc_k3s" {
 }
 
 # ---- k3s bring-up (install + durable carve-outs) — dies with the LXC ---------
+# The script + manifest hashes are triggers on purpose: a source change to the
+# carve-out must re-run this resource even when the guest vmid/IP are unchanged.
 resource "null_resource" "k3s_bringup" {
   depends_on = [null_resource.lxc_k3s]
-  triggers   = { vmid = var.vmid_k3s, ip = local.k3s_cidr }
+  triggers = {
+    vmid         = var.vmid_k3s
+    ip           = local.k3s_cidr
+    script_sha   = filesha256("${path.module}/scripts/k3s-bringup.sh")
+    manifest_sha = filesha256("${path.module}/manifests/freehold-local-path.yaml")
+    # Every build re-asserts the carve-out: a rebuilt k3s rootfs must get the
+    # source manifest even when the vmid/IP and source hashes are unchanged.
+    build_epoch = timestamp()
+  }
   provisioner "local-exec" {
     command = "${path.module}/scripts/k3s-bringup.sh ${var.vmid_k3s}"
   }

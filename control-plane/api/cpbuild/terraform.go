@@ -17,7 +17,7 @@ import (
 // the provisioning box and is driven through the co-located runner's tf.sh —
 // adopt-if-missing, plan-clean against the world the CP already created.
 //
-//go:embed terraform/*.tf terraform/scripts/*.sh
+//go:embed terraform/*.tf terraform/scripts/*.sh terraform/manifests/*.yaml
 var terraformFS embed.FS
 
 // tfDir is the LEGACY shared tf root: one dir per PVE host, used by every
@@ -80,8 +80,8 @@ func (s *Spec) stageDeployTf() error {
 	parts = append(parts,
 		"umask 077",
 		adopt,
-		"mkdir -p "+root+"/scripts",
-		"rm -f "+root+"/main.tf "+root+"/scripts/*")
+		"mkdir -p "+root+"/scripts "+root+"/manifests",
+		"rm -f "+root+"/main.tf "+root+"/scripts/* "+root+"/manifests/*")
 	err := fs.WalkDir(terraformFS, "terraform", func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
