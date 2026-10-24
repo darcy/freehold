@@ -20,6 +20,7 @@ DEPLOY=navidrome
 SEL=app.kubernetes.io/name=navidrome
 SIZE=5Gi
 CAP_TGZ="$CAP/navidrome-data.tgz"
+CAP_DONE="$CAP_TGZ.done"
 HELPER=pv-migrate-navidrome
 
 command -v kubectl >/dev/null 2>&1 || { echo "FATAL: no kubectl on the CP"; exit 1; }
@@ -182,6 +183,7 @@ capture_old() { # PV
   fi
   mv -f "$CAP_TGZ.tmp" "$CAP_TGZ"
   printf '%s\n' "$1" > "$CAP_TGZ.pv.tmp" && mv -f "$CAP_TGZ.pv.tmp" "$CAP_TGZ.pv"
+  rm -f "$CAP_DONE"
   echo "captured $(du -h "$CAP_TGZ" | cut -f1) -> $CAP_TGZ (from $1)"
   delete_helper
 }
@@ -194,6 +196,7 @@ write_back() {
     echo "FATAL: navidrome-data write-back failed"; exit 1
   fi
   delete_helper
+  touch "$CAP_DONE"
   echo "navidrome-data: capture written back"
 }
 
@@ -204,14 +207,23 @@ if claim_exists "$NS" "$CLAIM"; then
   if [ -z "$PPATH" ]; then
     echo "navidrome-data: claim unbound — binding it"
     heal_provisioner
-    if capture_valid "$CAP_TGZ"; then
-      write_back
-    fi
+    capture_valid "$CAP_TGZ" || {
+      echo "FATAL: navidrome-data's claim is unbound but its capture is missing or not a complete archive — no recoverable copy exists"
+      exit 1
+    }
+    write_back
     ensure_up
     assert_durable "$NS" "$CLAIM"
   else
     case "$PPATH" in
-      "$DURABLE"/*) echo "navidrome-data: already on $PPATH";;
+      "$DURABLE"/*)
+        echo "navidrome-data: already on $PPATH"
+        if capture_valid "$CAP_TGZ" && [ ! -f "$CAP_DONE" ]; then
+          write_back
+        fi
+        ensure_up
+        assert_durable "$NS" "$CLAIM"
+        ;;
       *)
         ensure_down
         if capture_valid "$CAP_TGZ" && [ -f "$CAP_TGZ.pv" ] && [ "$(cat "$CAP_TGZ.pv")" != "$PV" ]; then
@@ -220,6 +232,7 @@ if claim_exists "$NS" "$CLAIM"; then
           capture_old "$PV"
         fi
         heal_provisioner
+        rm -f "$CAP_DONE"
         swap_claim "$NS" "$CLAIM"
         write_back
         ensure_up
@@ -230,6 +243,7 @@ if claim_exists "$NS" "$CLAIM"; then
 elif capture_valid "$CAP_TGZ"; then
   echo "navidrome-data: claim absent but a capture survives — recreating"
   heal_provisioner
+  rm -f "$CAP_DONE"
   recreate_claim "$NS" "$CLAIM" "$SIZE"
   write_back
   ensure_up
