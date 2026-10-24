@@ -114,6 +114,8 @@ UNIT
       sleep 5
       $K get cm local-path-config -n kube-system -o jsonpath="{.data.config\.json}" 2>/dev/null | grep -q /srv/data/k8s-volumes \
         && [ -f /var/lib/rancher/k3s/server/manifests/freehold-local-path.yaml ] \
+        && $K -n kube-system get addons.k3s.cattle.io freehold-local-path >/dev/null 2>&1 \
+        && $K get deploy local-path-provisioner -n kube-system -o jsonpath="{.status.readyReplicas}" 2>/dev/null | grep -qx 1 \
         && exit 0
     fi
     sleep 5
