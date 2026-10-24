@@ -72,6 +72,7 @@ const (
 // killed-but-healthy run resumable.
 var longMigrations = map[string]time.Duration{
 	"1799960000.sh": 20 * time.Minute,
+	"1799970000.sh": 10 * time.Minute,
 }
 
 // scriptMigrationTimeout resolves the bound for one script.
