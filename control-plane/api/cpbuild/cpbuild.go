@@ -2925,6 +2925,18 @@ func BuildCreateAgentFn(spec *Spec) agent.CreateAgentFn {
 			// asker (today the operator — the CP cannot see chat threads) +
 			// the CPA. The CPA itself runs "anyone" (CPAManifestScript).
 			runner := spec.DepartmentRunners[name]
+			if len(runner) == 0 {
+				// The in-memory map only carries what THIS process's door
+				// stage accumulated — a console boot's revive renders pods
+				// before any world-build repopulates it, and a door-less
+				// department pod is a department with no exec until the next
+				// build. Fall back to the durable runner records (the same
+				// source the provision flow reads): the doors' coords
+				// survive every restart.
+				if store, serr := state.Open(spec.consoleStateDir()); serr == nil {
+					runner = spec.agentRunnerCoords(store, name)
+				}
+			}
 			manifest = agent.AgentManifestScript(spec.K3sVmid, spec.RelayWS, agents.SystemPrompt(name, purpose, spec.RepoURL, spec.operatorTZ()), spec.LitellmBaseURL, model, name, agent.KeySecretFor(name), spec.SelfURL, audience, "allowlist", spec.respondAllowlist(name), authTag, spec.operatorTZ(), spec.litellmProviderMaxTokens(), runner...)
 		}
 		if err := spec.run(manifest, 420); err != nil {
