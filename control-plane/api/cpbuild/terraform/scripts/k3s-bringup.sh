@@ -99,14 +99,19 @@ UNIT
   # CP resolver) - the split-horizon answer (the relay/cp public hosts ->
   # the edge IP) is what every pod wss dial rides; a public upstream answers
   # the relay host with the public IP, and behind a hosted gateway (Vultr)
-  # that hairpin DNATs back into the dialing guest and never answers. The
-  # restart below re-reads the node resolv.conf, so the build converges:
-  # bring-up pins public, worldDNS re-points the node, THIS re-run (the
-  # services-phase apply) restarts CoreDNS onto the CP resolver.
+  # that hairpin DNATs back into the dialing guest and never answers.
+  # Convergence needs TWO independent legs: the configmap rewrite (content
+  # guard - idempotent, skipped once the Corefile carries the node-resolver
+  # forward) and the RESTART (resolver guard - the coredns pod snapshots the
+  # node resolv.conf at START, so every build where the CP point is in force
+  # re-reads it; skipping the restart leaves the pods on the start-time
+  # public pin, the exact failure this exists to fix).
   $K get cm coredns -n kube-system -o jsonpath="{.data.Corefile}" > /tmp/corefile || true
   if [ -f /tmp/corefile ] && ! grep -q "forward . /etc/resolv.conf" /tmp/corefile; then
     sed -i -E "s|forward \..*|forward . /etc/resolv.conf|" /tmp/corefile
     $K create cm coredns -n kube-system --from-file=Corefile=/tmp/corefile --dry-run=client -o yaml | $K apply -f -
+  fi
+  if grep -qs "^nameserver $CPDNS" /etc/resolv.conf; then
     $K rollout restart deploy/coredns -n kube-system 2>/dev/null || true
   fi
   # The bundled local-storage addon is disabled above, so this source manifest

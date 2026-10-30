@@ -204,7 +204,7 @@ func (s *Spec) stageDepartmentRunners() error {
 	if s.RelayPK == "" {
 		pk, perr := s.resolveRelaySigningPubkey()
 		if perr != nil || pk == "" {
-			return fmt.Errorf("department runners: the world coords carry no relay_pubkey and the relay's signing key is unreadable (%v) — run `freehold update` once the relay is up (it re-captures the key into the world coords), then re-run the build", perr)
+			return fmt.Errorf("department runners: the world coords carry no relay_pubkey and the relay's signing key is unreadable in-guest (%v) — ensure the relay is up and re-run the build (the in-guest read resolves it), or record relay_pubkey in the profile config and run `freehold update` (the console binds its coords at serve start)", perr)
 		}
 		s.RelayPK = pk
 	}
