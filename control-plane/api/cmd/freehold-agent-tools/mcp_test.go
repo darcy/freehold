@@ -601,3 +601,98 @@ func TestFreeholdToolSchemasMatchServer(t *testing.T) {
 		}
 	}
 }
+
+// TestTaskCommentPublishesAsTheAgent pins the mention-watcher reply path:
+// task_comment signs a kind-1 note with the task as its root e tag and
+// publishes it to the agent's relay (BUZZ_RELAY_URL, wss dialed as https).
+func TestTaskCommentPublishesAsTheAgent(t *testing.T) {
+	var gotBody map[string]interface{}
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &gotBody)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer ts.Close()
+	t.Setenv("BUZZ_RELAY_URL", ts.URL) // http:// passes relayHTTPHost through
+
+	secret := [32]byte{}
+	secret[0] = 9
+	b := &mcpBridge{secret: secret, hc: ts.Client()}
+
+	input := `{"jsonrpc":"2.0","id":21,"method":"tools/call","params":{"name":"task_comment","arguments":{"issue_id":"` + strings.Repeat("a", 64) + `","content":"on it — the fix is in","mention":["` + strings.Repeat("b", 64) + `"]}}}` + "\n"
+	var out bytes.Buffer
+	if err := runBridge(strings.NewReader(input), &out, b); err != nil {
+		t.Fatalf("runBridge: %v", err)
+	}
+	if !strings.Contains(out.String(), "comment published") {
+		t.Fatalf("no confirmation: %s", out.String())
+	}
+	if gotBody == nil {
+		t.Fatal("nothing published")
+	}
+	if k := int(gotBody["kind"].(float64)); k != wire.TextNote {
+		t.Fatalf("kind = %d, want %d (kind:1)", k, wire.TextNote)
+	}
+	pk, err := crypto.PubkeyFromSecret(secret[:])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotBody["pubkey"] != pk {
+		t.Fatalf("signed as %q, want the agent's key %q", gotBody["pubkey"], pk)
+	}
+	tags := gotBody["tags"].([]interface{})
+	var root, mention string
+	for _, raw := range tags {
+		row := raw.([]interface{})
+		if len(row) >= 4 && row[0] == "e" && row[3] == "root" {
+			root = row[1].(string)
+		}
+		if len(row) >= 2 && row[0] == "p" {
+			mention = row[1].(string)
+		}
+	}
+	if root != strings.Repeat("a", 64) || mention != strings.Repeat("b", 64) {
+		t.Fatalf("tags wrong: root=%q mention=%q", root, mention)
+	}
+	if _, err := wire.VerifyEvent(pk, int64(gotBody["created_at"].(float64)), wire.TextNote,
+		nil, gotBody["content"].(string), gotBody["sig"].(string)); err == nil {
+		// tags are part of the id — verify via the raw shape below instead
+		_ = err
+	}
+	evJSON, _ := json.Marshal(gotBody)
+	var ev struct {
+		Pubkey    string     `json:"pubkey"`
+		CreatedAt int64      `json:"created_at"`
+		Kind      uint32     `json:"kind"`
+		Tags      [][]string `json:"tags"`
+		Content   string     `json:"content"`
+		Sig       string     `json:"sig"`
+	}
+	if err := json.Unmarshal(evJSON, &ev); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := wire.VerifyEvent(ev.Pubkey, ev.CreatedAt, ev.Kind, ev.Tags, ev.Content, ev.Sig); err != nil {
+		t.Fatalf("the published event does not verify: %v", err)
+	}
+	if ev.Content != "on it — the fix is in" {
+		t.Fatalf("content = %q", ev.Content)
+	}
+}
+
+// TestTaskCommentRefusesBadInput: a short issue id or empty content is a
+// tool-level error, never a publish.
+func TestTaskCommentRefusesBadInput(t *testing.T) {
+	secret := [32]byte{}
+	b := &mcpBridge{secret: secret, hc: http.DefaultClient}
+	if _, err := b.taskComment([]byte(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"task_comment","arguments":{"issue_id":"short","content":"x"}}}`)); err == nil {
+		t.Fatal("short issue id accepted")
+	}
+	if _, err := b.taskComment([]byte(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"task_comment","arguments":{"issue_id":"` + strings.Repeat("a", 64) + `","content":"  "}}}`)); err == nil {
+		t.Fatal("blank content accepted")
+	}
+	// No relay env: the publish fails loudly, nothing silent.
+	t.Setenv("BUZZ_RELAY_URL", "")
+	if _, err := b.taskComment([]byte(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"task_comment","arguments":{"issue_id":"` + strings.Repeat("a", 64) + `","content":"x"}}}`)); err == nil {
+		t.Fatal("missing relay accepted")
+	}
+}
