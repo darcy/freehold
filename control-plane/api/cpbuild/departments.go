@@ -26,6 +26,7 @@ import (
 	"freehold/control-plane/api/agent"
 	"freehold/control-plane/secret-management"
 	"freehold/control-plane/state"
+	"freehold/platform/provisioning/stages"
 )
 
 // Capability runners: the unit of grant is the RUNNER — one runner per
@@ -190,8 +191,22 @@ func (s *Spec) consoleStateDir() string {
 // every build, and relay channels re-sync. A no-op without relay +
 // co-located-runner wiring.
 func (s *Spec) stageDepartmentRunners() error {
-	if s.CpLxc == 0 || s.CpIP == "" || s.RelayHost == "" || s.RunnerTarget == "" || s.RelayPK == "" {
+	if s.CpLxc == 0 || s.CpIP == "" || s.RelayHost == "" || s.RunnerTarget == "" {
 		return nil
+	}
+	// The doors' roster reads filter the relay's kind-13534 list by its
+	// signing pubkey — without it every grant query fails closed. A world
+	// whose coords were rendered BEFORE the relay existed (every fresh
+	// install: the key is captured at the build tail, but the console binds
+	// its coords at serve start) carries an empty RelayPK here; resolve the
+	// key in-guest now rather than silently staging nothing while the build
+	// reports the runners reconciled.
+	if s.RelayPK == "" {
+		pk, perr := s.resolveRelaySigningPubkey()
+		if perr != nil || pk == "" {
+			return fmt.Errorf("department runners: the world coords carry no relay_pubkey and the relay's signing key is unreadable (%v) — run `freehold update` once the relay is up (it re-captures the key into the world coords), then re-run the build", perr)
+		}
+		s.RelayPK = pk
 	}
 	cpState := s.consoleStateDir()
 	store, err := state.Open(cpState)
@@ -234,6 +249,34 @@ func (s *Spec) stageDepartmentRunners() error {
 	// department never loses exec across the build.
 	s.retireRunner(store, "data-pve")
 	return nil
+}
+
+// resolveRelaySigningPubkey reads the relay's signing secret IN the relay
+// guest (through the co-located runner, the same transport every door stage
+// rides) and derives its pubkey — the deterministic source the box's
+// relaySigningPubkey uses at deploy-cp, run CP-side so a world whose coords
+// predate the relay's key still stages its doors on the next build. The
+// secret never leaves the relay guest; only the derived pubkey is returned.
+func (s *Spec) resolveRelaySigningPubkey() (string, error) {
+	if s.RelayLxc == 0 {
+		return "", fmt.Errorf("no relay guest recorded")
+	}
+	out, err := s.runOut(fmt.Sprintf(
+		`pct exec %d -- sh -c "sed -n 's/^BUZZ_RELAY_PRIVATE_KEY=//p' %s/.env 2>/dev/null"`,
+		s.RelayLxc, stages.RelayComposeDir), 30)
+	if err != nil {
+		return "", err
+	}
+	secret := strings.TrimSpace(out)
+	raw, derr := hex.DecodeString(secret)
+	if derr != nil || len(raw) != 32 {
+		return "", fmt.Errorf("the relay compose .env carries no 32-byte hex BUZZ_RELAY_PRIVATE_KEY")
+	}
+	pk, kerr := crypto.PubkeyFromSecret(raw)
+	if kerr != nil {
+		return "", kerr
+	}
+	return pk, nil
 }
 
 // cloudflareRunners derives one cloudflare-api-<domain> runner per DISTINCT
