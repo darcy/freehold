@@ -573,6 +573,18 @@ func TestExtractNip11Pubkey(t *testing.T) {
 	if _, ok := extractNip11Pubkey(`{"pubkey":"` + strings.Repeat("g", 64) + `"}`); ok {
 		t.Error("non-hex pubkey must be rejected")
 	}
+	// Newer Buzz documents publish "pubkey": null and carry the relay's
+	// identity in "self" — the same signing pubkey.
+	selfBody := `{"name":"x","pubkey":null,"self":"` + pk + `","supported_nips":[1]}`
+	if got, ok := extractNip11Pubkey(selfBody); !ok || got != pk {
+		t.Errorf("self fallback: pubkey = %q ok=%v", got, ok)
+	}
+	if _, ok := extractNip11Pubkey(`{"pubkey":null,"self":"short"}`); ok {
+		t.Error("short self must be rejected")
+	}
+	if _, ok := extractNip11Pubkey(`{"pubkey":null}`); ok {
+		t.Error("null pubkey with no self must be rejected")
+	}
 }
 
 func TestRegexEscape(t *testing.T) {

@@ -1619,7 +1619,10 @@ func (e *Engine) FinalSave() error {
 	// would make teardown say "skipped k3s LXC (not managed)" and leak the
 	// guest + its thin LV forever.
 	cfg.Managed = worldManaged(e.F.NoK3s, e.F.NoLitellm, cfg.Lxc.K3s.Vmid, cfg.Lxc.Gateway.Vmid)
-	if rpk, ok := e.relayPubkeyNip11(); ok {
+	// The relay's signing key is the deterministic in-guest read when the
+	// relay is up (the NIP-11 best-effort comes back empty on Buzz documents
+	// whose "pubkey" is null); the config value is the last-resort carry.
+	if rpk := e.relaySigningPubkey(); rpk != "" {
 		cfg.RelayPubkey = &rpk
 	}
 	return cfg.Save(e.F.ConfigPath)
@@ -2976,14 +2979,24 @@ func (e *Engine) relayPubkeyNip11() (string, bool) {
 }
 
 // extractNip11Pubkey pulls "pubkey" out of a NIP-11 JSON body without a
-// JSON dep: a minimal scan for the 64-hex value.
+// JSON dep: a minimal scan for the 64-hex value. Newer Buzz documents
+// publish "pubkey": null and carry the relay's identity in "self" — the
+// same 64-hex signing pubkey — so that field is the fallback.
 func extractNip11Pubkey(text string) (string, bool) {
-	const key = `"pubkey"`
-	i := strings.Index(text, key)
+	if pk, ok := nip11HexAfter(text, `"pubkey"`); ok {
+		return pk, true
+	}
+	return nip11HexAfter(text, `"self"`)
+}
+
+// nip11HexAfter scans for `field` and returns the 64-hex string that
+// immediately follows it, if any.
+func nip11HexAfter(text, field string) (string, bool) {
+	i := strings.Index(text, field)
 	if i < 0 {
 		return "", false
 	}
-	rest := text[i+len(key):]
+	rest := text[i+len(field):]
 	start := strings.Index(rest, `"`)
 	if start < 0 {
 		return "", false

@@ -32,6 +32,8 @@ func TestPinK3sBringup(t *testing.T) {
 		"pct push",                           // stages the source manifest into the guest
 		"manifests/freehold-local-path.yaml", // source manifest
 		"/var/lib/rancher/k3s/server/manifests/freehold-local-path.yaml", // installed under a non-disabled addon name
+		"nameserver $CPDNS",                // the bring-up must not clobber the build's CP-resolver point (the subnet .12)
+		`forward . /etc/resolv.conf`,       // CoreDNS forwards through the NODE resolver - the pods' split-horizon answer for the relay host
 	} {
 		if !strings.Contains(s, want) {
 			t.Errorf("k3s-bringup.sh missing %q", want)

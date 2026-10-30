@@ -33,10 +33,19 @@ pct exec "$VMID" -- bash -c '
   export PATH=/usr/local/bin:/root/.cargo/bin:$PATH
   # The fresh guest resolv.conf points at the LAN router (DHCP/PVE default),
   # which on home labs does not resolve - apt/curl then die with "Temporary
-  # failure resolving". Pin public resolvers before fetching (worldDNS
-  # reconfigures the guest to the CP resolver after bring-up).
-  echo nameserver 1.1.1.1 > /etc/resolv.conf
-  echo nameserver 8.8.8.8 >> /etc/resolv.conf
+  # failure resolving". Pin public resolvers before fetching - but NEVER
+  # clobber the CP resolver: this script re-runs on every build (build_epoch),
+  # and the services-phase re-run lands AFTER worldDNS has pointed this guest
+  # at the CP resolver (the subnet .12 convention) - a public rewrite there
+  # undoes the point, and the pods CoreDNS forwards through ride the node
+  # resolver for their answer to the relay host. A --cp-ip override outside
+  # the subnet falls back to today behavior (the point is re-applied next
+  # build, then clobbered again).
+  CPDNS=$(ip -4 addr show eth0 | awk "/inet /{split(\$2,a,\"/\"); print a[1]}" | head -1 | cut -d. -f1-3).12
+  if ! grep -qs "^nameserver $CPDNS" /etc/resolv.conf; then
+    echo nameserver 1.1.1.1 > /etc/resolv.conf
+    echo nameserver 8.8.8.8 >> /etc/resolv.conf
+  fi
   K="/usr/local/bin/kubectl --kubeconfig /etc/rancher/k3s/k3s.yaml"
   DEBIAN_FRONTEND=noninteractive apt-get update -qq
   DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl jq
@@ -86,13 +95,25 @@ UNIT
   done
   # durable volume root: the locked carve-out (never the default local-path root)
   mkdir -p /srv/data/k8s-volumes
-  # cluster DNS: public upstream (the LAN router hijacks some A records)
+  # cluster DNS: forward through the NODE resolver (worldDNS points it at the
+  # CP resolver) - the split-horizon answer (the relay/cp public hosts ->
+  # the edge IP) is what every pod wss dial rides; a public upstream answers
+  # the relay host with the public IP, and behind a hosted gateway (Vultr)
+  # that hairpin DNATs back into the dialing guest and never answers.
+  # Convergence needs TWO independent legs: the configmap rewrite (content
+  # guard - idempotent, skipped once the Corefile carries the node-resolver
+  # forward) and the RESTART (resolver guard - the coredns pod snapshots the
+  # node resolv.conf at START, so every build where the CP point is in force
+  # re-reads it; skipping the restart leaves the pods on the start-time
+  # public pin, the exact failure this exists to fix).
   $K get cm coredns -n kube-system -o jsonpath="{.data.Corefile}" > /tmp/corefile || true
-  grep -q "1.1.1.1" /tmp/corefile 2>/dev/null || {
-    sed -i "s|forward . /etc/resolv.conf|forward . 1.1.1.1 8.8.8.8|" /tmp/corefile
+  if [ -f /tmp/corefile ] && ! grep -q "forward . /etc/resolv.conf" /tmp/corefile; then
+    sed -i -E "s|forward \..*|forward . /etc/resolv.conf|" /tmp/corefile
     $K create cm coredns -n kube-system --from-file=Corefile=/tmp/corefile --dry-run=client -o yaml | $K apply -f -
+  fi
+  if grep -qs "^nameserver $CPDNS" /etc/resolv.conf; then
     $K rollout restart deploy/coredns -n kube-system 2>/dev/null || true
-  }
+  fi
   # The bundled local-storage addon is disabled above, so this source manifest
   # is the sole owner of the local-path provisioner and survives guest boots.
   # It uses a DIFFERENT addon name (freehold-local-path, not local-storage):
