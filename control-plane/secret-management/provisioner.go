@@ -189,6 +189,12 @@ func ProvisionRunner(store *state.StateStore, req *ProvisionRequest) (*Provision
 			return nil, fmt.Errorf("invalid agent pubkey %q: must be 64 hex chars", g)
 		}
 	}
+	// The address IS the door's endpoint: an empty one re-addresses the
+	// runner to nowhere (a re-run that omitted --address would wipe a live
+	// door). Only a local exec target runs without one.
+	if req.Kind != "local" && strings.TrimSpace(req.Address) == "" {
+		return nil, fmt.Errorf("runner %s: an empty address would wipe the door's endpoint (kind %q dials its address)", req.Name, req.Kind)
+	}
 	probe := ""
 	probeBody := ""
 	if p := strings.TrimSpace(req.Probe); p != "" {
