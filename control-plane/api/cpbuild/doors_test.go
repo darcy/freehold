@@ -46,13 +46,25 @@ func TestCapabilityRunnerTable(t *testing.T) {
 			}
 		}
 		switch r.kind {
-		case "ssh", "kubernetes", "litellm", "local":
+		case "ssh", "kubernetes", "litellm", "local", "browser":
 		default:
 			// dynamic dns-provider kinds (cloudflare) are appended at staging
 			t.Fatalf("runner %s has unexpected static kind %q", r.name, r.kind)
 		}
 		if r.kind == "kubernetes" && (r.tokenSecret == "" || r.tokenNS == "") {
 			t.Fatalf("kube door %s is missing its token secret/namespace", r.name)
+		}
+		// The browser door: its credential is the pool's shared token (the
+		// deployment's TOKEN env — one source, the CP's browser store), so
+		// the probe authenticates and /meta is the stable 200. It must never
+		// look like a kube door.
+		if r.kind == "browser" {
+			if r.tokenSecret != "" || r.tokenNS != "" {
+				t.Fatalf("browser door %s carries kube-door plumbing", r.name)
+			}
+			if !strings.Contains(r.probe, "bearer") {
+				t.Fatalf("browser door %s probe is unauthenticated: %q", r.name, r.probe)
+			}
 		}
 	}
 	// The shared host runner: one runner, three roster pubkeys.

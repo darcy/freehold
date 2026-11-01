@@ -192,7 +192,7 @@ func (s *Spec) tfRun(action string, targets, extraVars []string, requiresSecrets
 	// the staged kubeconfig are this world's, never another world's.
 	cmdline := "TF_ROOT=" + s.tfRoot() + " " + script + " " + strings.Join(args, " ")
 	if requiresSecrets {
-		if err := s.runSecrets(cmdline, 900, "litellm", "postgres-pw"); err != nil {
+		if err := s.runSecrets(cmdline, 900, "litellm", "postgres-pw", "browser-token"); err != nil {
 			return fmt.Errorf("tf %s: %w", action, err)
 		}
 		return nil

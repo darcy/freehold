@@ -17,6 +17,8 @@ import (
 	"strings"
 	"time"
 
+	"crypto/rand"
+
 	cert "freehold/platform/services/certificates/letsencrypt"
 
 	"freehold/contract/config"
@@ -123,6 +125,8 @@ func capabilityRunners() []capabilityRunner {
 			probe: kubernetesProbe, probeBody: kubernetesProbeBody},
 		{name: "litellm-api-admin", kind: "litellm", port: 8795,
 			rosters: []string{"ai"}, probe: "GET /health/liveliness bearer"},
+		{name: "browser-pool", kind: "browser", port: 8799,
+			rosters: []string{"ai"}, probe: "GET /meta bearer 200"},
 		{name: "dnsmasq-local-root", kind: "local", port: 8796,
 			rosters: []string{"network"}},
 		// cp-local-root: local exec ON the cp guest as root, for the data
@@ -591,6 +595,21 @@ func (s *Spec) runnerCredential(r capabilityRunner, hostAddr string) (runnerCred
 		// The credential is a placeholder by convention (secret name = runner
 		// name); the door IS the runner's own host.
 		return runnerCred{secret: []byte("local")}, nil
+	case "browser":
+		// The browser pool: browserless's LAN NodePort on the k3s node (the
+		// litellm 31400 pattern). The credential is the pool's shared token,
+		// minted once into the CP's browser store — the deployment's TOKEN
+		// env (via the tf secret mapping) and the door's credential read the
+		// SAME value, so they never drift. The AUDIT is the door: every agent
+		// exec names agent/session in the runner's audit log.
+		token, err := s.browserToken()
+		if err != nil {
+			return runnerCred{}, err
+		}
+		return runnerCred{
+			addr:   "http://" + config.StripCIDR(s.k3sIP()) + ":31401",
+			secret: token,
+		}, nil
 	default:
 		// A DNS-provider door (cloudflare today): the API token is the target
 		// credential (the runner's own self-check verifies it), the remaining
@@ -964,6 +983,54 @@ func (s *Spec) saveLitellmStoreEnv(path string, secret []byte, env map[string]st
 		return err
 	}
 	return cert.SaveCreds(path, "litellm", env, crypto.Seal, pub, "litellm")
+}
+
+// browserStorePath is the CP browser store's ONE home: the CONSOLE's
+// world-secrets — the same invariant as litellmStorePath (the agent-tools
+// root must never mint a second store).
+func (s *Spec) browserStorePath() (root, path string) {
+	root = s.consoleStateRoot()
+	return root, filepath.Join(root, "world-secrets", "browser.json")
+}
+
+// browserToken returns the browser pool's shared access token, minting the
+// store on first use. ONE token — the deployment's TOKEN env (the tf secret
+// mapping) and the browser door's credential both read it, so they never
+// drift. Plaintext lives in memory only; the store seals to the console
+// identity.
+func (s *Spec) browserToken() ([]byte, error) {
+	root, path := s.browserStorePath()
+	if cert.CredExists(path) {
+		secret, err := s.consoleEncSecretAt(root)
+		if err != nil {
+			return nil, err
+		}
+		open := func(sec, aad, blob []byte) ([]byte, error) { return crypto.Open(sec, aad, blob) }
+		_, env, err := cert.LoadCreds(path, open, secret)
+		if err != nil {
+			return nil, fmt.Errorf("open CP browser store: %w", err)
+		}
+		if t := env["token"]; t != "" {
+			return []byte(t), nil
+		}
+	}
+	token := make([]byte, 24)
+	if _, err := rand.Read(token); err != nil {
+		return nil, err
+	}
+	hexed := hex.EncodeToString(token)
+	secret, err := s.consoleEncSecretAt(root)
+	if err != nil {
+		return nil, err
+	}
+	pub, err := crypto.X25519PublicKey(secret)
+	if err != nil {
+		return nil, err
+	}
+	if err := cert.SaveCreds(path, "browser", map[string]string{"token": hexed}, crypto.Seal, pub, "browser"); err != nil {
+		return nil, fmt.Errorf("seal CP browser store: %w", err)
+	}
+	return []byte(hexed), nil
 }
 
 // ensureAgentLitellmKey returns the agent's own gateway virtual key: the

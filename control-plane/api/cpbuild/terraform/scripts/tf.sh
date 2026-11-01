@@ -5,11 +5,12 @@
 # the k3s node IP) lets the provider reach the k3s API.
 #
 # SECRET mapping (option A): the runner-injected env gives LITELLM (gateway
-# master) + POSTGRES_PW at these names (secret-name -> UPPER_ env). This script
-# maps them to TF_VAR_* IN ENV (never argv/tfvars), so they ride 0600 state.
-# No provider key is requested: model registration is stageLitellmAliases'
-# (it reads the CP's litellm store directly), never a terraform local-exec.
-# Everything non-secret rides -var argv.
+# master), POSTGRES_PW, and BROWSER_TOKEN (the browser pool's shared token) at
+# these names (secret-name -> UPPER_ env). This script maps them to TF_VAR_* IN
+# ENV (never argv/tfvars), so they ride 0600 state. No provider key is
+# requested: model registration is stageLitellmAliases' (it reads the CP's
+# litellm store directly), never a terraform local-exec. Everything non-secret
+# rides -var argv.
 #
 # Destroy needs neither the secret VALUES (they live in state) nor an early
 # kubeconfig gate (the provider connects only when k8s resources are present),
@@ -53,6 +54,7 @@ export TF_VAR_kubeconfig_path="${TF_VAR_kubeconfig_path:-$ROOT/kubeconfig}"
 
 export TF_VAR_litellm_master_key="${LITELLM:-}"
 export TF_VAR_postgres_password="${POSTGRES_PW:-}"
+export TF_VAR_browser_token="${BROWSER_TOKEN:-}"
 
 # Drop any backend record left by the old pinned shared-backend config: TF 1.9's
 # `-reconfigure` does NOT handle UNSETTING a backend, so init would otherwise
