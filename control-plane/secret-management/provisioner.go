@@ -199,7 +199,13 @@ func ProvisionRunner(store *state.StateStore, req *ProvisionRequest) (*Provision
 		if r.Status == state.RunnerRevoked {
 			return nil, fmt.Errorf("runner %s is revoked — provision a new service or restore it", req.Name)
 		}
-		return nil, fmt.Errorf("runner %s already exists", req.Name)
+		// A LIVE runner re-provisioned: the identity + sealed credential
+		// persist; the substrate ADDRESS may rotate (a re-adopt whose host
+		// was destroyed and recreated — the old address 404s the moment the
+		// CP's world-build dials it). Re-address the record + package when
+		// the request moves the runner; an unchanged address stays the
+		// caller's reuse error.
+		return readdressRunner(store, r, req)
 	}
 	// Refuse to clobber a dir already holding a package.
 	if _, err := os.Stat(filepath.Join(req.RunnerDir, identityFile)); err == nil {
@@ -282,6 +288,60 @@ func ProvisionRunner(store *state.StateStore, req *ProvisionRequest) (*Provision
 		NostrPubkey: nostrPubkey,
 		EncPubkey:   encPubkeyHex,
 		PackageDir:  req.RunnerDir,
+	}, nil
+}
+
+// readdressRunner updates a LIVE runner's substrate address — the re-adopt
+// path, where the runner identity and its sealed credential survive but the
+// host underneath rotated. The state's secret row and the package's targets
+// entry move together (the row is the CP's dial record, the package the
+// runner's own); the sealed blob is untouched. The runner's TOFU known_hosts
+// is keyed by address, so the new host is a fresh trust-on-first-use — no
+// stale entry rejects it.
+func readdressRunner(store *state.StateStore, r state.RunnerRecord, req *ProvisionRequest) (*ProvisionResult, error) {
+	sec, ok := store.GetSecret(req.Name)
+	if !ok {
+		return nil, fmt.Errorf("runner %s already exists but holds no secret record — revoke and re-provision it", req.Name)
+	}
+	if sec.Address == req.Address {
+		return nil, fmt.Errorf("runner %s already exists", req.Name)
+	}
+	pkg, err := wire.Load(r.PackageDir)
+	if err != nil {
+		return nil, fmt.Errorf("runner %s package: %w", req.Name, err)
+	}
+	t, ok := pkg.Targets[req.Name]
+	if !ok {
+		return nil, fmt.Errorf("runner %s package holds no target %q", req.Name, req.Name)
+	}
+	old := sec.Address
+	t.Address = req.Address
+	pkg.Targets[req.Name] = t
+	if err := pkg.WriteToDir(r.PackageDir); err != nil {
+		return nil, err
+	}
+	sec.Address = req.Address
+	store.InsertSecret(req.Name, sec)
+	if err := store.Save(); err != nil {
+		// Roll the package back — the row pre-existed, so restore its address
+		// rather than removing it.
+		t.Address = old
+		pkg.Targets[req.Name] = t
+		if p2, e2 := wire.Load(r.PackageDir); e2 == nil {
+			p2.Targets[req.Name] = t
+			_ = p2.WriteToDir(r.PackageDir)
+		}
+		sec.Address = old
+		store.InsertSecret(req.Name, sec)
+		_ = store.Save()
+		return nil, err
+	}
+	fmt.Printf("runner %s already exists — re-addressed %s -> %s (identity + credential unchanged)\n", req.Name, old, req.Address)
+	return &ProvisionResult{
+		Name:        req.Name,
+		NostrPubkey: r.NostrPubkey,
+		EncPubkey:   r.EncPubkey,
+		PackageDir:  r.PackageDir,
 	}, nil
 }
 

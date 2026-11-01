@@ -531,11 +531,21 @@ func EnsureGuestDocker(exec ExecFunc, vmid uint32) error {
 	// unavailable, fall back to download.docker.com's docker-compose-plugin.
 	// Retried 3x because pct start may succeed before the guest has a DHCP
 	// lease — apt against no network fails on the first attempt.
+	//
+	// The public-resolver pin is TRANSIENT by construction: captured and
+	// restored around the install. The pin exists only for the apt window
+	// (the CP build re-points guests at its resolver); a re-provision of an
+	// already-running guest (terraform re-apply, the plane ensure) ran the
+	// pin AFTER the build's DNS point and left the guest on public
+	// resolvers — its hostNetwork pods then dial the public edge name into
+	// the node's own DNAT (a martian drop) and the agents' relay connect
+	// dies with it.
 	install := `pct exec ` + vid + ` -- sh -c 'export DEBIAN_FRONTEND=noninteractive; ` +
 		// The fresh guest's resolv.conf points at the LAN router (DHCP/PVE
 		// default), which on home labs does NOT resolve — apt/curl then die
 		// with "Temporary failure resolving". Pin public resolvers for the
-		// install (worldDNS reconfigures the guest to the CP resolver later).
+		// install, then restore whatever the guest had.
+		`cp /etc/resolv.conf /tmp/freehold-resolv.bak; ` +
 		`echo nameserver 1.1.1.1 > /etc/resolv.conf; echo nameserver 8.8.8.8 >> /etc/resolv.conf; ` +
 		`if ! docker compose version >/dev/null 2>&1; then ` +
 		`apt-get update >/dev/null 2>&1; ` +
@@ -548,6 +558,7 @@ func EnsureGuestDocker(exec ExecFunc, vmid uint32) error {
 		`stable" > /etc/apt/sources.list.d/docker.list && ` +
 		`apt-get update >/dev/null 2>&1 && ` +
 		`apt-get install -y docker.io docker-compose-plugin >/dev/null; fi; fi; ` +
+		`cat /tmp/freehold-resolv.bak > /etc/resolv.conf; rm -f /tmp/freehold-resolv.bak; ` +
 		`docker compose version'`
 
 	var installErr error
