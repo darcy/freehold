@@ -64,7 +64,11 @@ resource "kubernetes_manifest" "browser_deploy" {
               limits   = { memory = "2Gi" }
             }
             readinessProbe = {
-              httpGet             = { path = "/meta", port = 3000 }
+              # TCP, not HTTP: browserless v2 auth-protects every route (the
+              # TOKEN), and a probe cannot carry the credential — an httpGet
+              # would 401 forever. The REAL health signal is the door's verify
+              # arm (GET /meta bearer 200), which knows the token.
+              tcpSocket = { port = 3000 }
               periodSeconds       = 10
               failureThreshold    = 12
               initialDelaySeconds = 15
