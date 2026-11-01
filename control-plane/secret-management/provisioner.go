@@ -322,6 +322,12 @@ func readdressRunner(store *state.StateStore, r state.RunnerRecord, req *Provisi
 	if !ok {
 		return nil, fmt.Errorf("runner %s already exists but holds no secret record — revoke and re-provision it", req.Name)
 	}
+	// The request's Kind is ignored on this path (the runner keeps its own) —
+	// so the empty-address guard keys on the kind the runner actually IS,
+	// not the caller's declared one.
+	if sec.Kind != "local" && strings.TrimSpace(req.Address) == "" {
+		return nil, fmt.Errorf("runner %s: an empty address would wipe the door's endpoint (the runner is a %q door)", req.Name, sec.Kind)
+	}
 	if sec.Address == req.Address {
 		return nil, fmt.Errorf("runner %s already exists", req.Name)
 	}

@@ -60,6 +60,15 @@ func TestProvisionReAddressRotatesTarget(t *testing.T) {
 		t.Fatalf("package target address = %q, want root@10.0.0.2", pkg.Targets["pve-ssh-root"].Address)
 	}
 
+	// A declared-kind swap cannot smuggle an empty address past the guard:
+	// the re-address keys on the kind the runner actually IS.
+	if _, err := ProvisionRunner(store, &ProvisionRequest{
+		Name: "pve-ssh-root", Kind: "local", Address: "",
+		Secret: []byte("x"), RunnerDir: dir,
+	}); err == nil || !strings.Contains(err.Error(), "wipe the door's endpoint") {
+		t.Fatalf("empty address via a local-declared kind: err %v, want refused", err)
+	}
+
 	// A capability door's record is the REBUILD source — its address moves
 	// with the re-address, or the next build re-asserts the old one.
 	cap := state.CapabilityRecord{Kind: "ssh", Address: "root@10.0.0.1", Port: 8811}
