@@ -16,12 +16,14 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
 
 	"freehold/contract/crypto"
 	"freehold/contract/version"
+	"freehold/contract/wire"
 	"freehold/control-plane/api/agenttools"
 	"freehold/control-plane/api/console"
 	"freehold/control-plane/api/cpbuild"
@@ -629,18 +631,29 @@ func cmdProvision(args []string) error {
 	fmt.Printf("  encryption pubkey: %s\n", res.EncPubkey)
 	fmt.Printf("  package:           %s\n", res.PackageDir)
 	if res.Readdressed {
+		// A re-address keeps the runner's EXISTING sealed credential — the
+		// generated keypair above was ignored (its private half exists
+		// nowhere). The door presents the OLD key still: the operator carries
+		// the runner's OWN public line to the new host. Unseal it from the
+		// package (the runner's identity is local) and print THAT line.
+		doorLine, err := existingDoorLine(res.PackageDir, name)
+		if err != nil {
+			fmt.Printf("  (re-addressed %s -> %s; the runner's existing door key could not be read: %v — carry the runner's public line to the new host by hand)\n", res.OldAddress, *address, err)
+		} else {
+			fmt.Printf("  PUBLIC KEY (the runner's EXISTING door credential — the generated one was not sealed) — add this line to %s's ~/.ssh/authorized_keys:\n  %s\n", *address, doorLine)
+		}
 		// The runner loads its package once at boot — a re-address is paper
 		// until its unit reloads. The CLI runs where the co-located unit is
-		// local (the CP guest) for the CP's own runner; elsewhere the unit
-		// does not exist and the printout names the owed restart.
-		if err := cpbuild.RestartCoLocatedRunner(""); err != nil {
+		// local (the CP guest) for the CP's own runner; a capability door's
+		// unit is freehold-runner-<name>; elsewhere the unit does not exist
+		// and the printout names the owed restart.
+		if err := restartRunnerUnitFor(store, name); err != nil {
 			fmt.Printf("  (re-addressed on disk — restart the runner serving %s to pick it up: %v)\n", name, err)
 		} else {
 			res.RunnerRestarted = true
-			fmt.Println("  restarted the local freehold-runner unit (the new address is live)")
+			fmt.Println("  restarted the local runner unit (the new address is live)")
 		}
-	}
-	if generatedPub != "" {
+	} else if generatedPub != "" {
 		fmt.Printf("  PUBLIC KEY — add this line to %s's ~/.ssh/authorized_keys:\n  %s\n", *address, generatedPub)
 		fmt.Println("  (the private half is the sealed credential — it never leaves this box)")
 	}
@@ -649,6 +662,59 @@ func cmdProvision(args []string) error {
 			return err
 		}
 		fmt.Printf("synced runner channel on the relay (%s)\n", *relayURL)
+	}
+	return nil
+}
+
+// existingDoorLine unseals the runner's own SSH credential from its package
+// (the runner's identity.json is local to the box that provisioned it) and
+// returns its authorized_keys line — the door line the NEW host needs on a
+// re-address, where the runner's key is kept and the generated one discarded.
+func existingDoorLine(runnerDir, name string) (string, error) {
+	pkg, err := wire.Load(runnerDir)
+	if err != nil {
+		return "", err
+	}
+	blob, err := hex.DecodeString(pkg.Secrets[name])
+	if err != nil {
+		return "", err
+	}
+	idRaw, err := os.ReadFile(filepath.Join(runnerDir, "identity.json"))
+	if err != nil {
+		return "", err
+	}
+	var id struct {
+		EncSecretHex string `json:"enc_secret_hex"`
+	}
+	if err := json.Unmarshal(idRaw, &id); err != nil {
+		return "", err
+	}
+	enc, err := hex.DecodeString(id.EncSecretHex)
+	if err != nil {
+		return "", err
+	}
+	plain, err := crypto.Open(enc, []byte(name), blob)
+	if err != nil {
+		return "", err
+	}
+	return crypto.ExtractED25519PublicKeyLine(plain)
+}
+
+// restartRunnerUnitFor restarts the unit that serves THIS runner, when that
+// unit is local to the caller: a capability door's own freehold-runner-<name>
+// unit (a recorded capability), else the co-located freehold-runner unit (the
+// world's target). A runner living elsewhere owes its own restart — returned
+// as an error naming it.
+func restartRunnerUnitFor(store *state.StateStore, name string) error {
+	if _, ok := store.GetCapability(name); ok {
+		return restartUnit("freehold-runner-"+name)
+	}
+	return cpbuild.RestartCoLocatedRunner("")
+}
+
+func restartUnit(unit string) error {
+	if out, err := exec.Command("systemctl", "restart", unit).CombinedOutput(); err != nil {
+		return fmt.Errorf("restart %s: %v: %s", unit, err, strings.TrimSpace(string(out)))
 	}
 	return nil
 }

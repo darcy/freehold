@@ -1224,15 +1224,25 @@ func (s *Server) provision(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// A re-addressed runner holds the new address on disk only — the runner
-	// loads its package once at boot. The serve runs ON the CP guest, where
-	// the co-located runner's unit is local: restart it (best-effort; a
-	// failed restart is reported, not swallowed — the caller re-provisions
-	// or restarts the unit by hand).
+	// loads its package once at boot. Which unit reloads it depends on WHAT
+	// the runner is: a capability door restarts its own unit, the
+	// co-located runner restarts the shared unit; a runner living elsewhere
+	// owes its own restart. Soft: reported, never swallowed.
 	if res.Readdressed {
-		if rerr := cpbuild.RestartCoLocatedRunner(""); rerr != nil {
-			log.Printf("provision %s re-addressed but the local runner restart failed: %v", req.Name, rerr)
+		if rec, ok := s.Store.GetCapability(req.Name); ok {
+			if rerr := s.restartDoor(req.Name, rec.Port); rerr != nil {
+				res.RestartError = rerr.Error()
+			} else {
+				res.RunnerRestarted = true
+			}
+		} else if s.Builder != nil && req.Name == s.Builder.RunnerTarget {
+			if rerr := cpbuild.RestartCoLocatedRunner(""); rerr != nil {
+				res.RestartError = rerr.Error()
+			} else {
+				res.RunnerRestarted = true
+			}
 		} else {
-			res.RunnerRestarted = true
+			res.RestartError = "the runner does not run on this guest — restart the unit serving it to pick up the new address"
 		}
 	}
 	var relayURL *string
@@ -1284,6 +1294,7 @@ func (s *Server) provision(w http.ResponseWriter, r *http.Request) {
 		"enc_pubkey": res.EncPubkey, "package_dir": res.PackageDir,
 		"granted": granted, "relay": relayURL, "capability": capability,
 		"readdressed": res.Readdressed, "runner_restarted": res.RunnerRestarted,
+		"restart_error": res.RestartError,
 	})
 }
 

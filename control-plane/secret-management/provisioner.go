@@ -39,9 +39,12 @@ type ProvisionResult struct {
 	// ships the corrected package at deploy-cp, whose restart reloads).
 	Readdressed bool
 	OldAddress  string
-	// RunnerRestarted is the CONSOLE's own bookkeeping: whether the local
-	// co-located runner unit was successfully restarted after a re-address.
+	// RunnerRestarted / RestartError are the CONSOLE's bookkeeping: whether
+	// the unit serving this runner was restarted after the re-address, and
+	// why not when it wasn't (a capability door's own unit, the co-located
+	// unit, or a runner that lives elsewhere and owes a manual restart).
 	RunnerRestarted bool
+	RestartError    string
 }
 
 // ProvisionRequest is the input to provision_runner.
