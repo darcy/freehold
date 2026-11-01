@@ -628,6 +628,18 @@ func cmdProvision(args []string) error {
 	fmt.Printf("  nostr pubkey:      %s\n", res.NostrPubkey)
 	fmt.Printf("  encryption pubkey: %s\n", res.EncPubkey)
 	fmt.Printf("  package:           %s\n", res.PackageDir)
+	if res.Readdressed {
+		// The runner loads its package once at boot — a re-address is paper
+		// until its unit reloads. The CLI runs where the co-located unit is
+		// local (the CP guest) for the CP's own runner; elsewhere the unit
+		// does not exist and the printout names the owed restart.
+		if err := cpbuild.RestartCoLocatedRunner(""); err != nil {
+			fmt.Printf("  (re-addressed on disk — restart the runner serving %s to pick it up: %v)\n", name, err)
+		} else {
+			res.RunnerRestarted = true
+			fmt.Println("  restarted the local freehold-runner unit (the new address is live)")
+		}
+	}
 	if generatedPub != "" {
 		fmt.Printf("  PUBLIC KEY — add this line to %s's ~/.ssh/authorized_keys:\n  %s\n", *address, generatedPub)
 		fmt.Println("  (the private half is the sealed credential — it never leaves this box)")

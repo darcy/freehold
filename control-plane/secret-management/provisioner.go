@@ -32,6 +32,16 @@ type ProvisionResult struct {
 	NostrPubkey string
 	EncPubkey   string
 	PackageDir  string
+	// Readdressed marks the re-adopt path: a live runner whose substrate
+	// address rotated. The record + package moved on disk; the RUNNER loads
+	// its package once at boot, so the caller owning the runner's unit must
+	// restart it (the console surfaces this itself; a box-side re-adopt
+	// ships the corrected package at deploy-cp, whose restart reloads).
+	Readdressed bool
+	OldAddress  string
+	// RunnerRestarted is the CONSOLE's own bookkeeping: whether the local
+	// co-located runner unit was successfully restarted after a re-address.
+	RunnerRestarted bool
 }
 
 // ProvisionRequest is the input to provision_runner.
@@ -342,6 +352,8 @@ func readdressRunner(store *state.StateStore, r state.RunnerRecord, req *Provisi
 		NostrPubkey: r.NostrPubkey,
 		EncPubkey:   r.EncPubkey,
 		PackageDir:  r.PackageDir,
+		Readdressed: true,
+		OldAddress:  old,
 	}, nil
 }
 

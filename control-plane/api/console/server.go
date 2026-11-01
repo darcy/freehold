@@ -1223,6 +1223,18 @@ func (s *Server) provision(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, statusForAction(err), err.Error())
 		return
 	}
+	// A re-addressed runner holds the new address on disk only — the runner
+	// loads its package once at boot. The serve runs ON the CP guest, where
+	// the co-located runner's unit is local: restart it (best-effort; a
+	// failed restart is reported, not swallowed — the caller re-provisions
+	// or restarts the unit by hand).
+	if res.Readdressed {
+		if rerr := cpbuild.RestartCoLocatedRunner(""); rerr != nil {
+			log.Printf("provision %s re-addressed but the local runner restart failed: %v", req.Name, rerr)
+		} else {
+			res.RunnerRestarted = true
+		}
+	}
 	var relayURL *string
 	snap := s.Store.Snapshot()
 	relayURL = snap.RelayURL
@@ -1271,6 +1283,7 @@ func (s *Server) provision(w http.ResponseWriter, r *http.Request) {
 		"ok": true, "name": res.Name, "nostr_pubkey": res.NostrPubkey,
 		"enc_pubkey": res.EncPubkey, "package_dir": res.PackageDir,
 		"granted": granted, "relay": relayURL, "capability": capability,
+		"readdressed": res.Readdressed, "runner_restarted": res.RunnerRestarted,
 	})
 }
 
