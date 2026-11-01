@@ -60,6 +60,19 @@ func TestProvisionReAddressRotatesTarget(t *testing.T) {
 		t.Fatalf("package target address = %q, want root@10.0.0.2", pkg.Targets["pve-ssh-root"].Address)
 	}
 
+	// A capability door's record is the REBUILD source — its address moves
+	// with the re-address, or the next build re-asserts the old one.
+	cap := state.CapabilityRecord{Kind: "ssh", Address: "root@10.0.0.1", Port: 8811}
+	if err := store.InsertCapability("pve-ssh-root", cap); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ProvisionRunner(store, req("root@10.0.0.4")); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := store.GetCapability("pve-ssh-root"); got.Address != "root@10.0.0.4" {
+		t.Fatalf("capability record address = %q, want root@10.0.0.4", got.Address)
+	}
+
 	// A revoked runner never re-addresses.
 	if _, err := RevokeRunner(store, "pve-ssh-root"); err != nil {
 		t.Fatal(err)

@@ -643,15 +643,16 @@ func cmdProvision(args []string) error {
 			fmt.Printf("  PUBLIC KEY (the runner's EXISTING door credential — the generated one was not sealed) — add this line to %s's ~/.ssh/authorized_keys:\n  %s\n", *address, doorLine)
 		}
 		// The runner loads its package once at boot — a re-address is paper
-		// until its unit reloads. The CLI runs where the co-located unit is
-		// local (the CP guest) for the CP's own runner; a capability door's
-		// unit is freehold-runner-<name>; elsewhere the unit does not exist
-		// and the printout names the owed restart.
+		// until its unit reloads. Only a CAPABILITY door's unit is nameable
+		// from here (freehold-runner-<name>, local when this guest runs the
+		// door); anything else — a static department door or the co-located
+		// runner on the CP guest while this runs on a box — owes a restart
+		// this verb will not guess at.
 		if err := restartRunnerUnitFor(store, name); err != nil {
-			fmt.Printf("  (re-addressed on disk — restart the runner serving %s to pick it up: %v)\n", name, err)
+			fmt.Printf("  (re-addressed on disk — restart the unit serving %s to pick it up: %v)\n", name, err)
 		} else {
 			res.RunnerRestarted = true
-			fmt.Println("  restarted the local runner unit (the new address is live)")
+			fmt.Printf("  restarted the local runner unit (the new address is live)\n")
 		}
 	} else if generatedPub != "" {
 		fmt.Printf("  PUBLIC KEY — add this line to %s's ~/.ssh/authorized_keys:\n  %s\n", *address, generatedPub)
@@ -701,15 +702,16 @@ func existingDoorLine(runnerDir, name string) (string, error) {
 }
 
 // restartRunnerUnitFor restarts the unit that serves THIS runner, when that
-// unit is local to the caller: a capability door's own freehold-runner-<name>
-// unit (a recorded capability), else the co-located freehold-runner unit (the
-// world's target). A runner living elsewhere owes its own restart — returned
-// as an error naming it.
+// unit is nameable AND local: a capability door's freehold-runner-<name> unit
+// (a recorded capability). Static department doors and the co-located runner
+// are runner records WITHOUT a capability row — restarting the shared
+// freehold-runner unit for those would reload the WRONG runner's package —
+// so anything else returns an error naming the owed restart.
 func restartRunnerUnitFor(store *state.StateStore, name string) error {
-	if _, ok := store.GetCapability(name); ok {
-		return restartUnit("freehold-runner-"+name)
+	if _, ok := store.GetCapability(name); !ok {
+		return fmt.Errorf("no local unit is known to serve %q (only a capability door's freehold-runner-%s unit restarts from here)", name, name)
 	}
-	return cpbuild.RestartCoLocatedRunner("")
+	return restartUnit("freehold-runner-" + name)
 }
 
 func restartUnit(unit string) error {

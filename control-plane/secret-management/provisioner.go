@@ -335,9 +335,26 @@ func readdressRunner(store *state.StateStore, r state.RunnerRecord, req *Provisi
 	}
 	sec.Address = req.Address
 	store.InsertSecret(req.Name, sec)
+	// The capability record is the REBUILD source for a door: the build's
+	// re-assert feeds rec.Address back into the package (reSealRotating →
+	// setTargetAddress) — a record left on the old address silently reverts
+	// this re-address on the next build. Move it with the rest.
+	if cap, ok := store.GetCapability(req.Name); ok && cap.Address != "" {
+		cap.Address = req.Address
+		if err := store.InsertCapability(req.Name, cap); err != nil {
+			// Roll the row back — the record pre-existed.
+			sec.Address = old
+			store.InsertSecret(req.Name, sec)
+			_ = store.Save()
+			t.Address = old
+			pkg.Targets[req.Name] = t
+			_ = pkg.WriteToDir(r.PackageDir)
+			return nil, fmt.Errorf("move capability record: %w", err)
+		}
+	}
 	if err := store.Save(); err != nil {
-		// Roll the package back — the row pre-existed, so restore its address
-		// rather than removing it.
+		// Roll the package + records back — they pre-existed, so restore
+		// their old addresses rather than removing anything.
 		t.Address = old
 		pkg.Targets[req.Name] = t
 		if p2, e2 := wire.Load(r.PackageDir); e2 == nil {
@@ -346,6 +363,10 @@ func readdressRunner(store *state.StateStore, r state.RunnerRecord, req *Provisi
 		}
 		sec.Address = old
 		store.InsertSecret(req.Name, sec)
+		if cap, ok := store.GetCapability(req.Name); ok && cap.Address == req.Address {
+			cap.Address = old
+			_ = store.InsertCapability(req.Name, cap)
+		}
 		_ = store.Save()
 		return nil, err
 	}
