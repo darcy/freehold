@@ -544,8 +544,11 @@ func EnsureGuestDocker(exec ExecFunc, vmid uint32) error {
 		// The fresh guest's resolv.conf points at the LAN router (DHCP/PVE
 		// default), which on home labs does NOT resolve — apt/curl then die
 		// with "Temporary failure resolving". Pin public resolvers for the
-		// install, then restore whatever the guest had.
-		`cp /etc/resolv.conf /tmp/freehold-resolv.bak; ` +
+		// install, then restore whatever the guest had. The capture is
+		// IDEMPOTENT across the retries: an attempt killed between the pin
+		// and the restore leaves the .bak holding the PINNED file — a retry
+		// that re-captured would destroy the original backup with it.
+		`[ -f /tmp/freehold-resolv.bak ] || cp /etc/resolv.conf /tmp/freehold-resolv.bak; ` +
 		`echo nameserver 1.1.1.1 > /etc/resolv.conf; echo nameserver 8.8.8.8 >> /etc/resolv.conf; ` +
 		`if ! docker compose version >/dev/null 2>&1; then ` +
 		`apt-get update >/dev/null 2>&1; ` +
