@@ -348,9 +348,14 @@ func readdressRunner(store *state.StateStore, r state.RunnerRecord, req *Provisi
 	if cap, ok := store.GetCapability(req.Name); ok && cap.Address != "" {
 		cap.Address = req.Address
 		if err := store.InsertCapability(req.Name, cap); err != nil {
-			// Roll the row back — the record pre-existed.
+			// Roll the rows back — they pre-existed. The capability may have
+			// moved before the error; restore it like the secret row.
 			sec.Address = old
 			store.InsertSecret(req.Name, sec)
+			if cap.Address == req.Address {
+				cap.Address = old
+				_ = store.InsertCapability(req.Name, cap)
+			}
 			_ = store.Save()
 			t.Address = old
 			pkg.Targets[req.Name] = t
