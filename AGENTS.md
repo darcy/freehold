@@ -273,7 +273,7 @@ shells (tmux/herdr panes included) via the `freehold` CLI / SSH / doors — the 
   identities, never to a custom agent that would then self-serve a second, ungoverned path to
   the exact capability the department exists to own and audit. **The one org-wide door is
   `browser-pool`** — the operator's explicit decision: every agent (custom agents included)
-  holds it, because the door's audit (agent/session on every exec) IS the containment for a
+  holds it, because the door's audit (the agent named on every exec) IS the containment for a
   shared browser. Service lifecycle is **not** a
   department: whichever agent created a service — a freehold-delegate or a custom agent — owns
   its install/config/operation, ad hoc and unvetted as before. The four departments are

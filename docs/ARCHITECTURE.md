@@ -486,10 +486,11 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     department's prompt is the first line of defense, the grant the second.
     **The one org-wide door is `browser-pool`** — the operator's explicit
     decision: every agent (custom agents included) holds it, because the
-    door's audit (agent/session on every exec) IS the containment for a
+    door's audit (the agent named on every exec) IS the containment for a
     shared browser.
     Today's enforcement is the existing grant model: custom agents hold no raw
-    capability grants on the build-time runners (`grant_agent` is
+    capability grants on the build-time runners other than the one org-wide
+    door (`grant_agent` is
     operator-scoped), and the CPA's `provision_runner` grants only onto
     NEW capability doors it stages — the department that gets the grant is
     named in the flow itself.

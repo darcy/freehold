@@ -165,7 +165,7 @@ action it causes is signed, authorized, and audited by machinery that cannot rea
     coords and never see exec — a capability grant attaches to a department identity, never
     to a custom agent that would self-serve an ungoverned path. **The one exception is the
     browser-pool door: it is org-wide** (every agent holds it — the operator's decision; the
-    audit names agent/session, which is the containment for a shared browser).
+    audit names the agent, which is the containment for a shared browser).
 
     | Runner | Kind | Port | Roster |
     | --- | --- | --- | --- |
@@ -292,7 +292,7 @@ action it causes is signed, authorized, and audited by machinery that cannot rea
 A shared headless-Chromium service (browserless, k3s namespace `browser`, LAN NodePort on
 the k3s node) reached through the **browser-pool** door. The door is **org-wide** — every
 agent (custom agents included) holds its coords and its roster membership, by the
-operator's decision: the AUDIT is the containment (each exec names agent/session in the
+operator's decision: the AUDIT is the containment (each exec names the agent in the
 runner's audit log), not the roster. AI owns the pool's health and the door's verify arm.
 The pool's access token is minted once into the CP's browser store
 (`world-secrets/browser.json`, sealed to the console identity) and carried by BOTH the

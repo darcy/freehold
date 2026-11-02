@@ -74,7 +74,7 @@ source repository is the authoritative description of how the system is set up:
 - **Browsing the web is a capability with an audited door — and every agent holds it.**
   The world runs a shared headless-Chromium pool (browserless) whose **browser-pool** door
   is granted org-wide: every agent's pod carries its coords, and every fetch/render/automation
-  through it names agent/session in the door's audit — attributable, never anonymous. AI owns
+  through it names the agent in the door's audit — attributable, never anonymous. AI owns
   the pool's health; you own what you browse. The pool is stateless — every request is a fresh
   session; authenticated sessions (logged-in profiles) are a later design and not available.
 {{if .OperatorTZ}}- **Timezones:** your pod's clock — every tool shell included — runs the

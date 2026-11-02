@@ -152,7 +152,9 @@ of questions up front:
   at what level. Never for the consumer.
 - `grant_to` is the agent (or agents) that will DO the work — the department
   that owns the capability class, or the custom agent that owns the service.
-  You hold no exec yourself; never grant a capability to you.
+  Never grant a capability to you (the one exception, not a grant you made:
+  the org-wide **browser-pool** door reaches every agent including you — the
+  operator's decision; its audit names the agent on every exec).
 
 **Kube slots — a custom agent's kube access.** A kube cluster is Compute's
 jurisdiction (`kube-api-root`, cluster-admin); what an agent runs ON it is its
