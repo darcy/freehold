@@ -3018,17 +3018,23 @@ func BuildCreateAgentFn(spec *Spec) agent.CreateAgentFn {	return func(name, purp
 			}
 		}
 		var manifest string
+		// Org-wide doors (the browser pool) reach the CPA too — the CPA is
+		// an agent; the operator's org-wide decision includes it.
+		orgWide, err := spec.orgWideRunnerCoords(name)
+		if err != nil {
+			return "", fmt.Errorf("create-agent %q: org-wide runners: %w", name, err)
+		}
 		if name == spec.CpaName {
-			manifest = agent.CPAManifestScript(spec.K3sVmid, spec.RelayWS, agents.CPASystemPrompt(spec.RepoURL, spec.operatorTZ()), name, spec.LitellmBaseURL, "", spec.SelfURL, audience, authTag, spec.operatorTZ(), spec.litellmProviderMaxTokens())
+			manifest = agent.CPAManifestScript(spec.K3sVmid, spec.RelayWS, agents.CPASystemPrompt(spec.RepoURL, spec.operatorTZ()), name, spec.LitellmBaseURL, "", spec.SelfURL, audience, authTag, spec.operatorTZ(), spec.litellmProviderMaxTokens(), orgWide...)
 		} else {
 			// A reserved department name selects that department's embedded
 			// prompt; any other name renders the custom template (agents.SystemPrompt).
 			// A department with capability runners gets their FREEHOLD_RUNNER_* env
-			// (the CPA and custom agents get none, so their bridge has no exec).
-			// The inbound author gate: a reserved department wakes for the
-			// operator + every core identity; a custom agent wakes for its
-			// asker (today the operator — the CP cannot see chat threads) +
-			// the CPA. The CPA itself runs "anyone" (CPAManifestScript).
+			// (plus every org-wide door — the CPA included). The inbound author
+			// gate: a reserved department wakes for the operator + every core
+			// identity; a custom agent wakes for its asker (today the operator —
+			// the CP cannot see chat threads) + the CPA. The CPA itself runs
+			// "anyone" (CPAManifestScript).
 			runner := spec.DepartmentRunners[name]
 			if len(runner) == 0 {
 				// The in-memory map only carries what THIS process's door
@@ -3041,14 +3047,6 @@ func BuildCreateAgentFn(spec *Spec) agent.CreateAgentFn {	return func(name, purp
 				if store, serr := state.Open(spec.consoleStateDir()); serr == nil {
 					runner = spec.agentRunnerCoords(store, name)
 				}
-			}
-			// An ORG-WIDE door (the browser pool) reaches agents created
-			// after the last stage too: compute their coords now and grant
-			// the channel membership live, so a fresh agent's exec
-			// authorizes on first use, not after the next build.
-			orgWide, err := spec.orgWideRunnerCoords(name)
-			if err != nil {
-				return "", fmt.Errorf("create-agent %q: org-wide runners: %w", name, err)
 			}
 			for _, c := range orgWide {
 				if !containsCoords(runner, c) {

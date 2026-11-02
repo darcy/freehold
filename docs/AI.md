@@ -163,7 +163,9 @@ action it causes is signed, authorized, and audited by machinery that cannot rea
     its own doors (`FREEHOLD_RUNNER_*`) and a scoped `exec`/`list` bridge that routes by
     target and signs as the department's own key. The CPA and custom agents hold no runner
     coords and never see exec — a capability grant attaches to a department identity, never
-    to a custom agent that would self-serve an ungoverned path.
+    to a custom agent that would self-serve an ungoverned path. **The one exception is the
+    browser-pool door: it is org-wide** (every agent holds it — the operator's decision; the
+    audit names agent/session, which is the containment for a shared browser).
 
     | Runner | Kind | Port | Roster |
     | --- | --- | --- | --- |

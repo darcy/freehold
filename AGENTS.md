@@ -271,7 +271,10 @@ shells (tmux/herdr panes included) via the `freehold` CLI / SSH / doors — the 
   department owns (external proxy, backup, compute/LXC, model registration, AI hardware) is
   executed by that department's identity, and the raw grant for it attaches to department
   identities, never to a custom agent that would then self-serve a second, ungoverned path to
-  the exact capability the department exists to own and audit. Service lifecycle is **not** a
+  the exact capability the department exists to own and audit. **The one org-wide door is
+  `browser-pool`** — the operator's explicit decision: every agent (custom agents included)
+  holds it, because the door's audit (agent/session on every exec) IS the containment for a
+  shared browser. Service lifecycle is **not** a
   department: whichever agent created a service — a freehold-delegate or a custom agent — owns
   its install/config/operation, ad hoc and unvetted as before. The four departments are
   **installed as part of the core build** (each a pod on the same harness as the CPA): all in

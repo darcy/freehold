@@ -484,6 +484,10 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     audit. A custom agent that self-serves a department-owned capability is a
     containment failure even if a grant would technically allow it — the
     department's prompt is the first line of defense, the grant the second.
+    **The one org-wide door is `browser-pool`** — the operator's explicit
+    decision: every agent (custom agents included) holds it, because the
+    door's audit (agent/session on every exec) IS the containment for a
+    shared browser.
     Today's enforcement is the existing grant model: custom agents hold no raw
     capability grants on the build-time runners (`grant_agent` is
     operator-scoped), and the CPA's `provision_runner` grants only onto
