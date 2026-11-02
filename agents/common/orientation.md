@@ -71,13 +71,12 @@ source repository is the authoritative description of how the system is set up:
   (`failed printing to stdout: Broken pipe`, exit 134). The data itself is fine —
   redirect to a file and read from the file; if a pipeline exits 134, rerun it
   unpiped.
-- **Browsing the web is a capability, not a tool you hold.** The world runs a shared
-  headless-Chromium pool (browserless) whose **browser-pool** door is owned by **AI**:
-  every fetch/render/automation request rides that audited door, and the audit names
-  agent/session — the browsing an agent does is attributable, never anonymous. Agents
-  without the door (every custom agent) ask **freehold**, which routes it to AI. The pool
-  is stateless — every request is a fresh session; authenticated sessions (logged-in
-  profiles) are a later design and not available to agents yet.
+- **Browsing the web is a capability with an audited door — and every agent holds it.**
+  The world runs a shared headless-Chromium pool (browserless) whose **browser-pool** door
+  is granted org-wide: every agent's pod carries its coords, and every fetch/render/automation
+  through it names the agent in the door's audit — attributable, never anonymous. AI owns
+  the pool's health; you own what you browse. The pool is stateless — every request is a fresh
+  session; authenticated sessions (logged-in profiles) are a later design and not available.
 {{if .OperatorTZ}}- **Timezones:** your pod's clock — every tool shell included — runs the
   operator's timezone (**{{.OperatorTZ}}**). Guest boxes you exec on report their own host clock,
   which may differ — check which clock you are reading (a quick `date` tells you) before stating

@@ -515,12 +515,12 @@ echo AGENT_LEG1_OK`,
 // CP toolset. The CPA's inbound author gate is "anyone" — relay membership is
 // the bound; the CPA is the system's main user touchpoint and every agent's
 // delegate.
-func CPAManifestScript(k3sVmid uint32, relayURL, systemPrompt, cpaName, litellmBaseURL, litellmKeySecret, agentToolsURL, agentToolsPubkey, authTag, operatorTZ string, maxOutputTokens int) string {
+func CPAManifestScript(k3sVmid uint32, relayURL, systemPrompt, cpaName, litellmBaseURL, litellmKeySecret, agentToolsURL, agentToolsPubkey, authTag, operatorTZ string, maxOutputTokens int, runner ...RunnerCoords) string {
 	keySec := litellmKeySecret
 	if keySec == "" {
 		keySec = sanitizePodName(cpaName) + "-litellm-key"
 	}
-	return AgentManifestScript(k3sVmid, relayURL, systemPrompt, litellmBaseURL, CoreLiteLLMModel, cpaName, keySec, agentToolsURL, agentToolsPubkey, "anyone", "", authTag, operatorTZ, maxOutputTokens)
+	return AgentManifestScript(k3sVmid, relayURL, systemPrompt, litellmBaseURL, CoreLiteLLMModel, cpaName, keySec, agentToolsURL, agentToolsPubkey, "anyone", "", authTag, operatorTZ, maxOutputTokens, runner...)
 }
 
 // AgentIdentityScript creates the agent's identity Secret (nsec + owner) in

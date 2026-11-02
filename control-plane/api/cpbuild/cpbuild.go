@@ -2765,8 +2765,91 @@ func litellmModelFor(cpaName, name, model string) string {
 // minted pubkey to Tools.CreateAgent (which registers the registry row). Branches
 // to the CPA manifest/prompt when the name is the CPA's, so stageCpa's dogfooded
 // create_agent produces the CPA.
-func BuildCreateAgentFn(spec *Spec) agent.CreateAgentFn {
-	return func(name, purpose string, channels []string, private bool, model string) (string, error) {
+// orgWideRunnerCoords resolves the ORG-WIDE doors' coords for ANY agent name
+// (they match everyone) and grants the channel membership live, so a freshly
+// created agent's exec authorizes on first use — before the next build's
+// stage/reconcile would wire it. Computed per create (DepartmentRunners only
+// carries staged names); the caller dedupes against what it already holds.
+func (s *Spec) orgWideRunnerCoords(name string) ([]agent.RunnerCoords, error) {
+	store, err := state.Open(s.consoleStateDir())
+	if err != nil {
+		return nil, err
+	}
+	pub, ok := "", false
+	if rec, exists := store.Snapshot().Agents[name]; exists && rec.Pubkey != "" {
+		pub, ok = rec.Pubkey, true
+	}
+	if !ok {
+		// First create: the identity was just minted; the pubkey lookup
+		// happens after RegisterAgent — resolve from the freshly minted
+		// identity instead.
+		dir := filepath.Join(s.agentIdentityDir(), "agents", sanitizeDir(name))
+		id, ierr := identity.Load(dir)
+		if ierr != nil {
+			return nil, fmt.Errorf("resolve identity: %w", ierr)
+		}
+		pk, ierr := id.NostrPubkeyHex()
+		if ierr != nil {
+			return nil, ierr
+		}
+		pub = pk
+	}
+	out := []agent.RunnerCoords{}
+	for _, r := range capabilityRunners() {
+		if !r.orgWide {
+			continue
+		}
+		rec, ok := store.GetRunner(r.name)
+		if !ok || rec.NostrPubkey == "" {
+			continue
+		}
+		dialHost := s.CpIP
+		coords := agent.RunnerCoords{
+			URL:    fmt.Sprintf("http://%s:%d", dialHost, r.port),
+			Pubkey: rec.NostrPubkey,
+			Target: r.name,
+			Secret: r.name,
+		}
+		if err := provisioner.PutUserMembership(store, s.relayDialURL(), s.relaySignURL(), r.name, pub, s.consoleStateDir()); err != nil {
+			return nil, fmt.Errorf("org-wide grant %s: %w", r.name, err)
+		}
+		out = append(out, coords)
+	}
+	return out, nil
+}
+
+// revokeOrgWideMemberships removes the agent's seat on every org-wide door —
+// the take-back leg of orgWideRunnerCoords' grant at create. Runs while the
+// agent's row (and identity dir) still exist, from the remove flow.
+func (s *Spec) revokeOrgWideMemberships(name string) error {
+	store, err := state.Open(s.consoleStateDir())
+	if err != nil {
+		return err
+	}
+	dir := filepath.Join(s.agentIdentityDir(), "agents", sanitizeDir(name))
+	id, err := identity.Load(dir)
+	if err != nil {
+		return fmt.Errorf("read the removed agent's identity: %w", err)
+	}
+	pub, err := id.NostrPubkeyHex()
+	if err != nil {
+		return err
+	}
+	for _, r := range capabilityRunners() {
+		if !r.orgWide {
+			continue
+		}
+		if _, ok := store.GetRunner(r.name); !ok {
+			continue
+		}
+		if err := provisioner.RemoveUserMembership(store, s.relayDialURL(), s.relaySignURL(), r.name, pub, s.consoleStateDir()); err != nil {
+			return fmt.Errorf("revoke %s: %w", r.name, err)
+		}
+	}
+	return nil
+}
+
+func BuildCreateAgentFn(spec *Spec) agent.CreateAgentFn {	return func(name, purpose string, channels []string, private bool, model string) (string, error) {
 		model = litellmModelFor(spec.CpaName, name, model)
 		if name == "" {
 			return "", fmt.Errorf("create-agent needs a non-empty name")
@@ -2966,28 +3049,40 @@ func BuildCreateAgentFn(spec *Spec) agent.CreateAgentFn {
 			}
 		}
 		var manifest string
+		// Org-wide doors (the browser pool) reach the CPA too — the CPA is
+		// an agent; the operator's org-wide decision includes it.
+		orgWide, err := spec.orgWideRunnerCoords(name)
+		if err != nil {
+			return "", fmt.Errorf("create-agent %q: org-wide runners: %w", name, err)
+		}
 		if name == spec.CpaName {
-			manifest = agent.CPAManifestScript(spec.K3sVmid, spec.RelayWS, agents.CPASystemPrompt(spec.RepoURL, spec.operatorTZ()), name, spec.LitellmBaseURL, "", spec.SelfURL, audience, authTag, spec.operatorTZ(), spec.litellmProviderMaxTokens())
+			manifest = agent.CPAManifestScript(spec.K3sVmid, spec.RelayWS, agents.CPASystemPrompt(spec.RepoURL, spec.operatorTZ()), name, spec.LitellmBaseURL, "", spec.SelfURL, audience, authTag, spec.operatorTZ(), spec.litellmProviderMaxTokens(), orgWide...)
 		} else {
 			// A reserved department name selects that department's embedded
 			// prompt; any other name renders the custom template (agents.SystemPrompt).
 			// A department with capability runners gets their FREEHOLD_RUNNER_* env
-			// (the CPA and custom agents get none, so their bridge has no exec).
-			// The inbound author gate: a reserved department wakes for the
-			// operator + every core identity; a custom agent wakes for its
-			// asker (today the operator — the CP cannot see chat threads) +
-			// the CPA. The CPA itself runs "anyone" (CPAManifestScript).
+			// (plus every org-wide door — the CPA included). The inbound author
+			// gate: a reserved department wakes for the operator + every core
+			// identity; a custom agent wakes for its asker (today the operator —
+			// the CP cannot see chat threads) + the CPA. The CPA itself runs
+			// "anyone" (CPAManifestScript).
 			runner := spec.DepartmentRunners[name]
-			if len(runner) == 0 {
-				// The in-memory map only carries what THIS process's door
-				// stage accumulated — a console boot's revive renders pods
-				// before any world-build repopulates it, and a door-less
-				// department pod is a department with no exec until the next
-				// build. Fall back to the durable runner records (the same
-				// source the provision flow reads): the doors' coords
-				// survive every restart.
-				if store, serr := state.Open(spec.consoleStateDir()); serr == nil {
-					runner = spec.agentRunnerCoords(store, name)
+			// The durable records MERGE unconditionally (not only when the
+			// in-memory map is empty): a door whose stage failed this build
+			// (a transient token read — logged, skipped) still has its coords
+			// on disk, and gating on emptiness would re-apply the pod without
+			// it — silent capability loss. Dedupe keeps the double-sourced
+			// door (department roster + org-wide + durable) to one entry.
+			if store, serr := state.Open(spec.consoleStateDir()); serr == nil {
+				for _, c := range spec.agentRunnerCoords(store, name) {
+					if !containsCoords(runner, c) {
+						runner = append(runner, c)
+					}
+				}
+			}
+			for _, c := range orgWide {
+				if !containsCoords(runner, c) {
+					runner = append(runner, c)
 				}
 			}
 			manifest = agent.AgentManifestScript(spec.K3sVmid, spec.RelayWS, agents.SystemPrompt(name, purpose, spec.RepoURL, spec.operatorTZ()), spec.LitellmBaseURL, model, name, agent.KeySecretFor(name), spec.SelfURL, audience, "allowlist", spec.respondAllowlist(name), authTag, spec.operatorTZ(), spec.litellmProviderMaxTokens(), runner...)

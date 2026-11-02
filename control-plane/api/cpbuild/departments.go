@@ -21,6 +21,7 @@ import (
 
 	cert "freehold/platform/services/certificates/letsencrypt"
 
+	"freehold/control-plane/api/agenttools"
 	"freehold/contract/config"
 	"freehold/contract/crypto"
 	"freehold/contract/litellm"
@@ -55,6 +56,13 @@ type capabilityRunner struct {
 	port int
 	// rosters are the departments granted onto this runner.
 	rosters []string
+	// orgWide marks a door EVERY agent holds (custom agents included): the
+	// operator's policy for a shared, audited surface (the browser pool) —
+	// the audit is the containment, not the roster. An org-wide door still
+	// names its OWNING department in rosters (the pool's health is AI's);
+	// the coords + channel grant reach every registered agent at stage and
+	// every new agent at create.
+	orgWide bool
 	// kubernetes doors only: the SA-token Secret (declared in doors.tf) the
 	// token is read back from, re-sealed every build (a k3s rebuild rotates
 	// the CA, so a stale token would fail closed).
@@ -127,7 +135,7 @@ func capabilityRunners() []capabilityRunner {
 		{name: "litellm-api-admin", kind: "litellm", port: 8795,
 			rosters: []string{"ai"}, probe: "GET /health/liveliness bearer"},
 		{name: "browser-pool", kind: "browser", port: 8799,
-			rosters: []string{"ai"}, probe: "GET /meta bearer 200"},
+			rosters: []string{"ai"}, orgWide: true, probe: "GET /meta bearer 200"},
 		{name: "dnsmasq-local-root", kind: "local", port: 8796,
 			rosters: []string{"network"}},
 		// cp-local-root: local exec ON the cp guest as root, for the data
@@ -532,7 +540,40 @@ func (s *Spec) ensureCapabilityRunner(store *state.StateStore, cpState string, r
 	for _, dept := range r.rosters {
 		s.DepartmentRunners[dept] = append(s.DepartmentRunners[dept], coords)
 	}
+	if r.orgWide {
+		// Every registered agent holds an org-wide door (the coords the pod
+		// re-apply consumes + the channel grant the reconcile's per-agent
+		// grantDepartmentRunner makes live).
+		reg, err := agenttools.OpenRegistry(filepath.Join(s.agentToolsRoot(), "registry.json"))
+		if err != nil {
+			return fmt.Errorf("org-wide %s: open agent registry: %w", r.name, err)
+		}
+		rows, err := reg.Agents()
+		if err != nil {
+			return fmt.Errorf("org-wide %s: list agents: %w", r.name, err)
+		}
+		for _, a := range rows {
+			if a.Name == "" {
+				continue
+			}
+			if !containsCoords(s.DepartmentRunners[a.Name], coords) {
+				s.DepartmentRunners[a.Name] = append(s.DepartmentRunners[a.Name], coords)
+			}
+		}
+	}
 	return nil
+}
+
+// containsCoords reports whether coords already holds a matching runner entry
+// (same target + pubkey) — the dedupe for a runner reaching one agent through
+// TWO paths (its department roster AND org-wide).
+func containsCoords(coords []agent.RunnerCoords, c agent.RunnerCoords) bool {
+	for _, x := range coords {
+		if x.Target == c.Target && x.Pubkey == c.Pubkey {
+			return true
+		}
+	}
+	return false
 }
 
 // reSealRotating is the build-time re-seal for every rotating-credential door

@@ -163,7 +163,9 @@ action it causes is signed, authorized, and audited by machinery that cannot rea
     its own doors (`FREEHOLD_RUNNER_*`) and a scoped `exec`/`list` bridge that routes by
     target and signs as the department's own key. The CPA and custom agents hold no runner
     coords and never see exec — a capability grant attaches to a department identity, never
-    to a custom agent that would self-serve an ungoverned path.
+    to a custom agent that would self-serve an ungoverned path. **The one exception is the
+    browser-pool door: it is org-wide** (every agent holds it — the operator's decision; the
+    audit names the agent, which is the containment for a shared browser).
 
     | Runner | Kind | Port | Roster |
     | --- | --- | --- | --- |
@@ -172,7 +174,7 @@ action it causes is signed, authorized, and audited by machinery that cannot rea
     | `kube-api-caddysa` | kubernetes (`caddy` ns SA) | 8793 | network |
     | `kube-api-litellmsa` | kubernetes (`litellm` ns SA) | 8794 | ai |
     | `litellm-api-admin` | litellm (master + provider key) | 8795 | ai |
-    | `browser-pool` | browser (browserless token; the pool's own NodePort) | 8799 | ai |
+    | `browser-pool` | browser (browserless token; the pool's own NodePort) | 8799 | **every agent** (org-wide); AI owns the pool's health |
     | `dnsmasq-local-root` | local (CP guest) | 8796 | network |
     | `cp-local-root` | local (CP guest) | 8797 | data |
     | `cloudflare-api-<zone>` | api, one per stored DNS zone | from 8798 | network |
@@ -288,15 +290,17 @@ action it causes is signed, authorized, and audited by machinery that cannot rea
 ## The browser pool
 
 A shared headless-Chromium service (browserless, k3s namespace `browser`, LAN NodePort on
-the k3s node) that agents drive through AI's **browser-pool** door. Browsing is a
-capability, never an agent-held tool: every fetch/render/automation rides the audited door
-(each exec names agent/session in the runner's audit log), and a custom agent's browsing is
-routed by the CPA to AI. The pool's access token is minted once into the CP's browser store
+the k3s node) reached through the **browser-pool** door. The door is **org-wide** — every
+agent (custom agents included) holds its coords and its roster membership, by the
+operator's decision: the AUDIT is the containment (each exec names the agent in the
+runner's audit log), not the roster. AI owns the pool's health and the door's verify arm.
+The pool's access token is minted once into the CP's browser store
 (`world-secrets/browser.json`, sealed to the console identity) and carried by BOTH the
-deployment's TOKEN env and the door's credential — one source, never drift. The pod is
-STATELESS: every request is a fresh session. The authenticated profile-borrowing design
-(sealed login profiles borrowed per-session, the one-time human login over a headed
-browser) is future work, not this.
+deployment's TOKEN env and the door's credential — one source, never drift. A freshly
+created agent is wired at create time (coords + a live roster grant), before the next
+build's stage/reconcile. The pod is STATELESS: every request is a fresh session. The
+authenticated profile-borrowing design (sealed login profiles borrowed per-session, the
+one-time human login over a headed browser) is future work, not this.
 
 ## Known gaps
 

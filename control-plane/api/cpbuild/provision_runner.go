@@ -567,7 +567,9 @@ func (s *Spec) agentRunnerCoords(store *state.StateStore, name string) []agent.R
 	runners = append(runners, dynamicRunners(store)...)
 	out := []agent.RunnerCoords{}
 	for _, r := range runners {
-		if !containsRoster(r.rosters, name) {
+		// An org-wide door matches EVERY agent (custom agents included —
+		// the operator's policy for the shared browser pool).
+		if !r.orgWide && !containsRoster(r.rosters, name) {
 			continue
 		}
 		rec, ok := store.GetRunner(r.name)
