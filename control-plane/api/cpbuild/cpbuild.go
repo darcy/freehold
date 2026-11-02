@@ -3067,16 +3067,17 @@ func BuildCreateAgentFn(spec *Spec) agent.CreateAgentFn {	return func(name, purp
 			// the CP cannot see chat threads) + the CPA. The CPA itself runs
 			// "anyone" (CPAManifestScript).
 			runner := spec.DepartmentRunners[name]
-			if len(runner) == 0 {
-				// The in-memory map only carries what THIS process's door
-				// stage accumulated — a console boot's revive renders pods
-				// before any world-build repopulates it, and a door-less
-				// department pod is a department with no exec until the next
-				// build. Fall back to the durable runner records (the same
-				// source the provision flow reads): the doors' coords
-				// survive every restart.
-				if store, serr := state.Open(spec.consoleStateDir()); serr == nil {
-					runner = spec.agentRunnerCoords(store, name)
+			// The durable records MERGE unconditionally (not only when the
+			// in-memory map is empty): a door whose stage failed this build
+			// (a transient token read — logged, skipped) still has its coords
+			// on disk, and gating on emptiness would re-apply the pod without
+			// it — silent capability loss. Dedupe keeps the double-sourced
+			// door (department roster + org-wide + durable) to one entry.
+			if store, serr := state.Open(spec.consoleStateDir()); serr == nil {
+				for _, c := range spec.agentRunnerCoords(store, name) {
+					if !containsCoords(runner, c) {
+						runner = append(runner, c)
+					}
 				}
 			}
 			for _, c := range orgWide {
