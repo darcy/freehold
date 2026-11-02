@@ -57,13 +57,17 @@ func TestCapabilityRunnerTable(t *testing.T) {
 		// The browser door: its credential is the pool's shared token (the
 		// deployment's TOKEN env — one source, the CP's browser store), so
 		// the probe authenticates and /meta is the stable 200. It must never
-		// look like a kube door.
+		// look like a kube door, and it is ORG-WIDE: every agent holds it
+		// (the operator's decision — the audit is the containment).
 		if r.kind == "browser" {
 			if r.tokenSecret != "" || r.tokenNS != "" {
 				t.Fatalf("browser door %s carries kube-door plumbing", r.name)
 			}
 			if !strings.Contains(r.probe, "bearer") {
 				t.Fatalf("browser door %s probe is unauthenticated: %q", r.name, r.probe)
+			}
+			if !r.orgWide {
+				t.Fatalf("browser door %s is not org-wide", r.name)
 			}
 		}
 	}

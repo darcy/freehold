@@ -2765,8 +2765,60 @@ func litellmModelFor(cpaName, name, model string) string {
 // minted pubkey to Tools.CreateAgent (which registers the registry row). Branches
 // to the CPA manifest/prompt when the name is the CPA's, so stageCpa's dogfooded
 // create_agent produces the CPA.
-func BuildCreateAgentFn(spec *Spec) agent.CreateAgentFn {
-	return func(name, purpose string, channels []string, private bool, model string) (string, error) {
+// orgWideRunnerCoords resolves the ORG-WIDE doors' coords for ANY agent name
+// (they match everyone) and grants the channel membership live, so a freshly
+// created agent's exec authorizes on first use — before the next build's
+// stage/reconcile would wire it. Computed per create (DepartmentRunners only
+// carries staged names); the caller dedupes against what it already holds.
+func (s *Spec) orgWideRunnerCoords(name string) ([]agent.RunnerCoords, error) {
+	store, err := state.Open(s.consoleStateDir())
+	if err != nil {
+		return nil, err
+	}
+	pub, ok := "", false
+	if rec, exists := store.Snapshot().Agents[name]; exists && rec.Pubkey != "" {
+		pub, ok = rec.Pubkey, true
+	}
+	if !ok {
+		// First create: the identity was just minted; the pubkey lookup
+		// happens after RegisterAgent — resolve from the freshly minted
+		// identity instead.
+		dir := filepath.Join(s.agentIdentityDir(), "agents", sanitizeDir(name))
+		id, ierr := identity.Load(dir)
+		if ierr != nil {
+			return nil, fmt.Errorf("resolve identity: %w", ierr)
+		}
+		pk, ierr := id.NostrPubkeyHex()
+		if ierr != nil {
+			return nil, ierr
+		}
+		pub = pk
+	}
+	out := []agent.RunnerCoords{}
+	for _, r := range capabilityRunners() {
+		if !r.orgWide {
+			continue
+		}
+		rec, ok := store.GetRunner(r.name)
+		if !ok || rec.NostrPubkey == "" {
+			continue
+		}
+		dialHost := s.CpIP
+		coords := agent.RunnerCoords{
+			URL:    fmt.Sprintf("http://%s:%d", dialHost, r.port),
+			Pubkey: rec.NostrPubkey,
+			Target: r.name,
+			Secret: r.name,
+		}
+		if err := provisioner.PutUserMembership(store, s.relayDialURL(), s.relaySignURL(), r.name, pub, s.consoleStateDir()); err != nil {
+			return nil, fmt.Errorf("org-wide grant %s: %w", r.name, err)
+		}
+		out = append(out, coords)
+	}
+	return out, nil
+}
+
+func BuildCreateAgentFn(spec *Spec) agent.CreateAgentFn {	return func(name, purpose string, channels []string, private bool, model string) (string, error) {
 		model = litellmModelFor(spec.CpaName, name, model)
 		if name == "" {
 			return "", fmt.Errorf("create-agent needs a non-empty name")
@@ -2988,6 +3040,19 @@ func BuildCreateAgentFn(spec *Spec) agent.CreateAgentFn {
 				// survive every restart.
 				if store, serr := state.Open(spec.consoleStateDir()); serr == nil {
 					runner = spec.agentRunnerCoords(store, name)
+				}
+			}
+			// An ORG-WIDE door (the browser pool) reaches agents created
+			// after the last stage too: compute their coords now and grant
+			// the channel membership live, so a fresh agent's exec
+			// authorizes on first use, not after the next build.
+			orgWide, err := spec.orgWideRunnerCoords(name)
+			if err != nil {
+				return "", fmt.Errorf("create-agent %q: org-wide runners: %w", name, err)
+			}
+			for _, c := range orgWide {
+				if !containsCoords(runner, c) {
+					runner = append(runner, c)
 				}
 			}
 			manifest = agent.AgentManifestScript(spec.K3sVmid, spec.RelayWS, agents.SystemPrompt(name, purpose, spec.RepoURL, spec.operatorTZ()), spec.LitellmBaseURL, model, name, agent.KeySecretFor(name), spec.SelfURL, audience, "allowlist", spec.respondAllowlist(name), authTag, spec.operatorTZ(), spec.litellmProviderMaxTokens(), runner...)
