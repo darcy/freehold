@@ -32,6 +32,19 @@ type ProvisionResult struct {
 	NostrPubkey string
 	EncPubkey   string
 	PackageDir  string
+	// Readdressed marks the re-adopt path: a live runner whose substrate
+	// address rotated. The record + package moved on disk; the RUNNER loads
+	// its package once at boot, so the caller owning the runner's unit must
+	// restart it (the console surfaces this itself; a box-side re-adopt
+	// ships the corrected package at deploy-cp, whose restart reloads).
+	Readdressed bool
+	OldAddress  string
+	// RunnerRestarted / RestartError are the CONSOLE's bookkeeping: whether
+	// the unit serving this runner was restarted after the re-address, and
+	// why not when it wasn't (a capability door's own unit, the co-located
+	// unit, or a runner that lives elsewhere and owes a manual restart).
+	RunnerRestarted bool
+	RestartError    string
 }
 
 // ProvisionRequest is the input to provision_runner.
@@ -176,6 +189,12 @@ func ProvisionRunner(store *state.StateStore, req *ProvisionRequest) (*Provision
 			return nil, fmt.Errorf("invalid agent pubkey %q: must be 64 hex chars", g)
 		}
 	}
+	// The address IS the door's endpoint: an empty one re-addresses the
+	// runner to nowhere (a re-run that omitted --address would wipe a live
+	// door). Only a local exec target runs without one.
+	if req.Kind != "local" && strings.TrimSpace(req.Address) == "" {
+		return nil, fmt.Errorf("runner %s: an empty address would wipe the door's endpoint (kind %q dials its address)", req.Name, req.Kind)
+	}
 	probe := ""
 	probeBody := ""
 	if p := strings.TrimSpace(req.Probe); p != "" {
@@ -199,7 +218,13 @@ func ProvisionRunner(store *state.StateStore, req *ProvisionRequest) (*Provision
 		if r.Status == state.RunnerRevoked {
 			return nil, fmt.Errorf("runner %s is revoked — provision a new service or restore it", req.Name)
 		}
-		return nil, fmt.Errorf("runner %s already exists", req.Name)
+		// A LIVE runner re-provisioned: the identity + sealed credential
+		// persist; the substrate ADDRESS may rotate (a re-adopt whose host
+		// was destroyed and recreated — the old address 404s the moment the
+		// CP's world-build dials it). Re-address the record + package when
+		// the request moves the runner; an unchanged address stays the
+		// caller's reuse error.
+		return readdressRunner(store, r, req)
 	}
 	// Refuse to clobber a dir already holding a package.
 	if _, err := os.Stat(filepath.Join(req.RunnerDir, identityFile)); err == nil {
@@ -282,6 +307,94 @@ func ProvisionRunner(store *state.StateStore, req *ProvisionRequest) (*Provision
 		NostrPubkey: nostrPubkey,
 		EncPubkey:   encPubkeyHex,
 		PackageDir:  req.RunnerDir,
+	}, nil
+}
+
+// readdressRunner updates a LIVE runner's substrate address — the re-adopt
+// path, where the runner identity and its sealed credential survive but the
+// host underneath rotated. The state's secret row and the package's targets
+// entry move together (the row is the CP's dial record, the package the
+// runner's own); the sealed blob is untouched. The runner's TOFU known_hosts
+// is keyed by address, so the new host is a fresh trust-on-first-use — no
+// stale entry rejects it.
+func readdressRunner(store *state.StateStore, r state.RunnerRecord, req *ProvisionRequest) (*ProvisionResult, error) {
+	sec, ok := store.GetSecret(req.Name)
+	if !ok {
+		return nil, fmt.Errorf("runner %s already exists but holds no secret record — revoke and re-provision it", req.Name)
+	}
+	// The request's Kind is ignored on this path (the runner keeps its own) —
+	// so the empty-address guard keys on the kind the runner actually IS,
+	// not the caller's declared one.
+	if sec.Kind != "local" && strings.TrimSpace(req.Address) == "" {
+		return nil, fmt.Errorf("runner %s: an empty address would wipe the door's endpoint (the runner is a %q door)", req.Name, sec.Kind)
+	}
+	if sec.Address == req.Address {
+		return nil, fmt.Errorf("runner %s already exists", req.Name)
+	}
+	pkg, err := wire.Load(r.PackageDir)
+	if err != nil {
+		return nil, fmt.Errorf("runner %s package: %w", req.Name, err)
+	}
+	t, ok := pkg.Targets[req.Name]
+	if !ok {
+		return nil, fmt.Errorf("runner %s package holds no target %q", req.Name, req.Name)
+	}
+	old := sec.Address
+	t.Address = req.Address
+	pkg.Targets[req.Name] = t
+	if err := pkg.WriteToDir(r.PackageDir); err != nil {
+		return nil, err
+	}
+	sec.Address = req.Address
+	store.InsertSecret(req.Name, sec)
+	// The capability record is the REBUILD source for a door: the build's
+	// re-assert feeds rec.Address back into the package (reSealRotating →
+	// setTargetAddress) — a record left on the old address silently reverts
+	// this re-address on the next build. Move it with the rest.
+	if cap, ok := store.GetCapability(req.Name); ok && cap.Address != "" {
+		cap.Address = req.Address
+		if err := store.InsertCapability(req.Name, cap); err != nil {
+			// Roll the rows back — they pre-existed. The capability may have
+			// moved before the error; restore it like the secret row.
+			sec.Address = old
+			store.InsertSecret(req.Name, sec)
+			if cap.Address == req.Address {
+				cap.Address = old
+				_ = store.InsertCapability(req.Name, cap)
+			}
+			_ = store.Save()
+			t.Address = old
+			pkg.Targets[req.Name] = t
+			_ = pkg.WriteToDir(r.PackageDir)
+			return nil, fmt.Errorf("move capability record: %w", err)
+		}
+	}
+	if err := store.Save(); err != nil {
+		// Roll the package + records back — they pre-existed, so restore
+		// their old addresses rather than removing anything.
+		t.Address = old
+		pkg.Targets[req.Name] = t
+		if p2, e2 := wire.Load(r.PackageDir); e2 == nil {
+			p2.Targets[req.Name] = t
+			_ = p2.WriteToDir(r.PackageDir)
+		}
+		sec.Address = old
+		store.InsertSecret(req.Name, sec)
+		if cap, ok := store.GetCapability(req.Name); ok && cap.Address == req.Address {
+			cap.Address = old
+			_ = store.InsertCapability(req.Name, cap)
+		}
+		_ = store.Save()
+		return nil, err
+	}
+	fmt.Printf("runner %s already exists — re-addressed %s -> %s (identity + credential unchanged)\n", req.Name, old, req.Address)
+	return &ProvisionResult{
+		Name:        req.Name,
+		NostrPubkey: r.NostrPubkey,
+		EncPubkey:   r.EncPubkey,
+		PackageDir:  r.PackageDir,
+		Readdressed: true,
+		OldAddress:  old,
 	}, nil
 }
 

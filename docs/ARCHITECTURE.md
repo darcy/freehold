@@ -700,8 +700,12 @@ resident-runner mode, the retired-name guard — is in `docs/AI.md` ("Runners an
     freehold-console grants-mode --mode off --state-dir /srv/data/cp/control-plane # deny the flow
     ```
 
-    Provision refuses to clobber: a name that exists, or a `--runner-dir` that
-    already holds a package, errors instead of destroying a runner's key.
+    Provision refuses to clobber: a `--runner-dir` that already holds a
+    package errors instead of destroying a runner's key. A name that exists
+    is the **re-address** path: an unchanged address errors (the reuse
+    refusal); a rotated address moves the runner's target (state row +
+    package together — identity and sealed credential untouched) and
+    restarts the unit that serves it, the re-adopt's substrate rotation.
 
     **The no-master-key recipe** — verify the property yourself: grep the CP's
     `state.json` (`/srv/data/cp/control-plane/state.json`) for a credential and

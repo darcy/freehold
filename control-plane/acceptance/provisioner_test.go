@@ -161,12 +161,27 @@ func TestDuplicateProvisionRejected(t *testing.T) {
 	base := t.TempDir()
 	store := openStore(t, filepath.Join(base, "state"))
 	runnerDir := filepath.Join(base, "runner")
-	provision(t, store, "vultr", []byte("key"), runnerDir)
+	before := provision(t, store, "vultr", []byte("key"), runnerDir)
+	// SAME address: the caller's reuse semantics — refused, never re-run.
 	_, err := provisioner.ProvisionRunner(store, &provisioner.ProvisionRequest{
-		Name: "vultr", Kind: "vultr", Address: "x", Secret: []byte("x"), RunnerDir: runnerDir,
+		Name: "vultr", Kind: "vultr", Address: "api.vultr.com", Secret: []byte("x"), RunnerDir: runnerDir,
 	})
 	if err == nil || !strings.Contains(err.Error(), "already exists") {
 		t.Fatalf("got %v", err)
+	}
+	// ROTATED address: the re-adopt path — the runner re-addresses in place
+	// (identity + sealed credential untouched, the target moves together).
+	after, err := provisioner.ProvisionRunner(store, &provisioner.ProvisionRequest{
+		Name: "vultr", Kind: "vultr", Address: "api2.vultr.com", Secret: []byte("x"), RunnerDir: runnerDir,
+	})
+	if err != nil {
+		t.Fatalf("re-address: %v", err)
+	}
+	if after.NostrPubkey != before.NostrPubkey || after.EncPubkey != before.EncPubkey {
+		t.Fatal("re-address must keep the runner identity")
+	}
+	if sec, _ := store.GetSecret("vultr"); sec.Address != "api2.vultr.com" {
+		t.Fatalf("secret row address = %q", sec.Address)
 	}
 }
 

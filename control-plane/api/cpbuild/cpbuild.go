@@ -1208,12 +1208,23 @@ func (s *Spec) reseedCoLocatedRunner() error {
 	// The runner loads its package at boot (in-memory keyring), so restart it.
 	// systemctl is LOCAL to the console's own CP guest — the runner cannot
 	// restart itself through the exec channel it is serving.
+	if err := RestartCoLocatedRunner(s.RunnerAddr); err != nil {
+		return err
+	}
+	return nil
+}
+
+// RestartCoLocatedRunner restarts the LOCAL freehold-runner unit and waits for
+// it to re-listen. The runner loads its package (target addresses included)
+// once at boot, so any on-disk package change — a re-seed, a re-address —
+// needs this to take effect on a live runner. systemctl is LOCAL to the
+// console's own CP guest; a box driving a remote CP must not call it.
+func RestartCoLocatedRunner(addr string) error {
 	if out, err := exec.Command("systemctl", "restart", "freehold-runner").CombinedOutput(); err != nil {
 		return fmt.Errorf("restart co-located runner: %v: %s", err, strings.TrimSpace(string(out)))
 	}
 	// `systemctl restart` returns before the runner has re-bound its port; wait
 	// so the next exec doesn't race a refused connection.
-	addr := s.RunnerAddr
 	if addr == "" {
 		addr = config.CoLocatedRunnerMCPAddr
 	}
@@ -1815,6 +1826,23 @@ func BuildWorldApply(spec *Spec) agent.WorldApply {
 		// 9. The release pulse: the CPA posts the world's RUNNING version to
 		// Pulse — a stable build its own release's notes + link, a dev build
 		// the updated sha. Deduped; best-effort.
+		// 9.25. Re-assert the guests' resolver point LAST — after every stage
+		// that boots or re-provisions a guest (the substrate's guest ensure
+		// re-runs the docker install, whose apt window pins public
+		// resolvers). A guest left on public resolvers dials the public edge
+		// name into the node's own DNAT — a martian drop where the gateway
+		// is the host — and the agents' relay connect dies with it. The
+		// resolve re-fills any vmid the early pass missed; the point is
+		// idempotent.
+		if err := spec.resolveGuestVmids(); err != nil {
+			return "", fmt.Errorf("world-build dns re-point resolve: %w", err)
+		}
+		if spec.CpLxc != 0 && spec.CpIP != "" {
+			if err := spec.pointGuestsAtResolver(); err != nil {
+				return "", fmt.Errorf("world-build dns re-point: %w", err)
+			}
+			report = append(report, "guest resolver point re-asserted")
+		}
 		report = spec.stageReleasePulse(report)
 		if len(report) == 0 {
 			return "", fmt.Errorf("world-build: no world coords recorded (k3s vmid / relay lxc)")

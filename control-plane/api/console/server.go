@@ -1223,6 +1223,28 @@ func (s *Server) provision(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, statusForAction(err), err.Error())
 		return
 	}
+	// A re-addressed runner holds the new address on disk only — the runner
+	// loads its package once at boot. Which unit reloads it depends on WHAT
+	// the runner is: a capability door restarts its own unit, the
+	// co-located runner restarts the shared unit; a runner living elsewhere
+	// owes its own restart. Soft: reported, never swallowed.
+	if res.Readdressed {
+		if rec, ok := s.Store.GetCapability(req.Name); ok {
+			if rerr := s.restartDoor(req.Name, rec.Port); rerr != nil {
+				res.RestartError = rerr.Error()
+			} else {
+				res.RunnerRestarted = true
+			}
+		} else if s.Builder != nil && req.Name == s.Builder.RunnerTarget {
+			if rerr := cpbuild.RestartCoLocatedRunner(""); rerr != nil {
+				res.RestartError = rerr.Error()
+			} else {
+				res.RunnerRestarted = true
+			}
+		} else {
+			res.RestartError = "the runner does not run on this guest — restart the unit serving it to pick up the new address"
+		}
+	}
 	var relayURL *string
 	snap := s.Store.Snapshot()
 	relayURL = snap.RelayURL
@@ -1271,6 +1293,8 @@ func (s *Server) provision(w http.ResponseWriter, r *http.Request) {
 		"ok": true, "name": res.Name, "nostr_pubkey": res.NostrPubkey,
 		"enc_pubkey": res.EncPubkey, "package_dir": res.PackageDir,
 		"granted": granted, "relay": relayURL, "capability": capability,
+		"readdressed": res.Readdressed, "runner_restarted": res.RunnerRestarted,
+		"restart_error": res.RestartError,
 	})
 }
 
