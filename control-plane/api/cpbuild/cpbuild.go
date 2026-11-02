@@ -1104,6 +1104,14 @@ var runnerLitellmSecrets = []struct{ name, env string }{
 // door package; nothing requests it from the provisioning runner anymore).
 var runnerLitellmRetiredSecrets = []string{"provider-key"}
 
+// runnerBrowserSecrets maps the CP store's browser env keys to the secret
+// NAMES the world-build requests from the co-located runner: the pool's
+// shared access token only (tf.sh's TF_VAR_ input; the door re-seals from
+// the same store itself).
+var runnerBrowserSecrets = []struct{ name, env string }{
+	{"browser-token", "token"},
+}
+
 // dropRetiredRunnerSecrets removes runnerLitellmRetiredSecrets entries from
 // the package in memory; the caller writes it back. Returns the names dropped.
 func dropRetiredRunnerSecrets(pkg *wire.SecretPackage) []string {
@@ -1142,6 +1150,11 @@ func (s *Spec) reseedCoLocatedRunner() error {
 	}
 	need := false
 	for _, m := range runnerLitellmSecrets {
+		if _, ok := pkg.Secrets[m.name]; !ok {
+			need = true
+		}
+	}
+	for _, m := range runnerBrowserSecrets {
 		if _, ok := pkg.Secrets[m.name]; !ok {
 			need = true
 		}
@@ -1189,6 +1202,18 @@ func (s *Spec) reseedCoLocatedRunner() error {
 					return fmt.Errorf("CP litellm store is missing the %q value", m.env)
 				}
 				if _, err := provisioner.AddSecret(store, s.RunnerTarget, m.name, []byte(v)); err != nil {
+					return fmt.Errorf("re-seed co-located runner %s: %w", m.name, err)
+				}
+			}
+			// The browser store is its OWN sealed record — the pool's token
+			// re-seeds from it the same way (the tf phase requests it by
+			// name; the door re-seals from the store itself).
+			btok, berr := s.browserToken()
+			if berr != nil {
+				return fmt.Errorf("browser store: %w", berr)
+			}
+			for _, m := range runnerBrowserSecrets {
+				if _, err := provisioner.AddSecret(store, s.RunnerTarget, m.name, btok); err != nil {
 					return fmt.Errorf("re-seed co-located runner %s: %w", m.name, err)
 				}
 			}

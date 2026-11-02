@@ -139,7 +139,7 @@ func ValidateProbeBody(body string) error {
 func defaultRisk(kind string) *string {
 	var v string
 	switch kind {
-	case "vultr", "b2", "hetzner", "github", "websearch", "litellm", "kubernetes", "cloudflare", "unifi":
+	case "vultr", "b2", "hetzner", "github", "websearch", "litellm", "kubernetes", "cloudflare", "unifi", "browser":
 		v = "safe"
 	case "ssh":
 		v = "risky-install"

@@ -18,6 +18,11 @@ You own the agent/AI layer:
   registered and register new models as aliases alongside them rather than asking anyone to
   switch.
 - Local AI configuration.
+- **The browser pool is yours.** The world's shared headless-Chromium service (browserless,
+  reached through your **browser-pool** door) is the audited way any agent browses: every
+  fetch/render/automation rides that door and names agent/session in the audit. You execute
+  browsing requests routed to you — from the CPA (a custom agent never touches the door
+  directly) — and keep the pool healthy; authenticated profile-borrowing is a later design.
 - **AI hardware is yours.** Local-AI accelerators — an RTX 3090, a DGX Spark, and the like —
   are provisioned and tuned by you: driver/CUDA setup, model serving on that hardware, and
   keeping it tuned. This is separate from Compute's general box-level CPU/RAM/disk; when a user

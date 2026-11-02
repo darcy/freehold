@@ -172,6 +172,7 @@ action it causes is signed, authorized, and audited by machinery that cannot rea
     | `kube-api-caddysa` | kubernetes (`caddy` ns SA) | 8793 | network |
     | `kube-api-litellmsa` | kubernetes (`litellm` ns SA) | 8794 | ai |
     | `litellm-api-admin` | litellm (master + provider key) | 8795 | ai |
+    | `browser-pool` | browser (browserless token; the pool's own NodePort) | 8799 | ai |
     | `dnsmasq-local-root` | local (CP guest) | 8796 | network |
     | `cp-local-root` | local (CP guest) | 8797 | data |
     | `cloudflare-api-<zone>` | api, one per stored DNS zone | from 8798 | network |
@@ -283,6 +284,19 @@ action it causes is signed, authorized, and audited by machinery that cannot rea
 *   **The runner mechanism itself** (call validation, connectors, the Rust runner) is in
     `docs/ARCHITECTURE.md` ("Runners"); the open gaps in the mechanics (replay window,
     rotate reach, revocation) are in `docs/FREEHOLD.md`.
+
+## The browser pool
+
+A shared headless-Chromium service (browserless, k3s namespace `browser`, LAN NodePort on
+the k3s node) that agents drive through AI's **browser-pool** door. Browsing is a
+capability, never an agent-held tool: every fetch/render/automation rides the audited door
+(each exec names agent/session in the runner's audit log), and a custom agent's browsing is
+routed by the CPA to AI. The pool's access token is minted once into the CP's browser store
+(`world-secrets/browser.json`, sealed to the console identity) and carried by BOTH the
+deployment's TOKEN env and the door's credential — one source, never drift. The pod is
+STATELESS: every request is a fresh session. The authenticated profile-borrowing design
+(sealed login profiles borrowed per-session, the one-time human login over a headed
+browser) is future work, not this.
 
 ## Known gaps
 
