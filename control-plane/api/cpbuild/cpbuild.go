@@ -2818,6 +2818,37 @@ func (s *Spec) orgWideRunnerCoords(name string) ([]agent.RunnerCoords, error) {
 	return out, nil
 }
 
+// revokeOrgWideMemberships removes the agent's seat on every org-wide door —
+// the take-back leg of orgWideRunnerCoords' grant at create. Runs while the
+// agent's row (and identity dir) still exist, from the remove flow.
+func (s *Spec) revokeOrgWideMemberships(name string) error {
+	store, err := state.Open(s.consoleStateDir())
+	if err != nil {
+		return err
+	}
+	dir := filepath.Join(s.agentIdentityDir(), "agents", sanitizeDir(name))
+	id, err := identity.Load(dir)
+	if err != nil {
+		return fmt.Errorf("read the removed agent's identity: %w", err)
+	}
+	pub, err := id.NostrPubkeyHex()
+	if err != nil {
+		return err
+	}
+	for _, r := range capabilityRunners() {
+		if !r.orgWide {
+			continue
+		}
+		if _, ok := store.GetRunner(r.name); !ok {
+			continue
+		}
+		if err := provisioner.RemoveUserMembership(store, s.relayDialURL(), s.relaySignURL(), r.name, pub, s.consoleStateDir()); err != nil {
+			return fmt.Errorf("revoke %s: %w", r.name, err)
+		}
+	}
+	return nil
+}
+
 func BuildCreateAgentFn(spec *Spec) agent.CreateAgentFn {	return func(name, purpose string, channels []string, private bool, model string) (string, error) {
 		model = litellmModelFor(spec.CpaName, name, model)
 		if name == "" {
