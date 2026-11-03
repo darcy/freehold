@@ -90,7 +90,7 @@ func registerBuildFlags(cmd *cobra.Command) {
 	cmd.Flags().String("thin-pool", "", "Plane placement: the thin pool the tenant LVs land in")
 	cmd.Flags().Bool("no-k3s", false, "Opt-out: do NOT boot/install the k3s substrate LXC")
 	cmd.Flags().Uint32("rootfs-gb", 16, "LXC rootfs size in GB")
-	cmd.Flags().Uint32("memory-mb", 2048, "LXC memory in MB")
+	cmd.Flags().Uint32("memory-mb", 4096, "LXC memory in MB")
 	cmd.Flags().String("relay-gw", "192.168.30.1", "Gateway for the proxy's STATIC guest IP (unused with DHCP)")
 	cmd.Flags().String("storage", "local-lvm", "PVE LXC storage (relay/k3s boots)")
 	cmd.Flags().String("bridge", "vmbr0", "PVE LXC network bridge (relay/k3s boots)")

@@ -61,7 +61,12 @@ resource "kubernetes_manifest" "browser_deploy" {
             ]
             resources = {
               requests = { memory = "512Mi", cpu = "250m" }
-              limits   = { memory = "2Gi" }
+              # Sized for a 3-worker pile on heavy pages (~2.7Gi measured
+              # live): the default k3s guest ships 4Gi (the pool is core —
+              # the browser needs real room, not a squeeze), with the node's
+              # remaining room for caddy/the agent pods. A smaller override
+              # node must size this limit down with its own memory.
+              limits   = { memory = "3Gi" }
             }
             readinessProbe = {
               # TCP, not HTTP: browserless v2 auth-protects every route (the
