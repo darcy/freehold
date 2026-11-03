@@ -547,7 +547,7 @@ func collectAnswers(ui *installerUI, seed *config.Config, flags box.Flags) (box.
 	if err != nil {
 		return box.Flags{}, err
 	}
-	memory, err := ui.askUint32("LXC memory (MB)", 2048)
+	memory, err := ui.askUint32("LXC memory (MB)", 4096)
 	if err != nil {
 		return box.Flags{}, err
 	}
@@ -815,7 +815,7 @@ func addInstallFlags(cmd *cobra.Command) {
 	cmd.Flags().String("operator-identity", "", "Operator identity dir to record (optional)")
 	cmd.Flags().String("display-name", "", "Operator display name in Buzz (default \"Operator\"; published as the kind:0 profile that skips the desktop app's first-run onboarding)")
 	cmd.Flags().Uint32("rootfs-gb", 16, "LXC rootfs size in GB")
-	cmd.Flags().Uint32("memory-mb", 2048, "LXC memory in MB")
+	cmd.Flags().Uint32("memory-mb", 4096, "LXC memory in MB")
 	// The substrate defaults (storage/bridge/relay-gw) belong to the
 	// PROVIDER (Defaults()) — the flags stay empty so an unset flag lets
 	// the provider govern (a flag default here would defeat it: vultr has

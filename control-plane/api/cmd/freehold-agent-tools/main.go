@@ -440,7 +440,7 @@ func cmdServe(args []string) {
 	fs.UintVar(&sizeGB, "size-gb", 10, "per-tenant LV size GB (LVM-thin)")
 	fs.UintVar(&poolSizeGB, "pool-size-gb", 40, "thin-pool size GB when carved")
 	rootfsGB := fs.Uint("rootfs-gb", 16, "LXC rootfs size GB (relay/k3s boots)")
-	memoryMB := fs.Uint("memory-mb", 2048, "LXC memory MB (relay/k3s boots)")
+	memoryMB := fs.Uint("memory-mb", 4096, "LXC memory MB (relay/k3s boots)")
 	storageName := fs.String("storage", "local-lvm", "PVE LXC storage (relay/k3s boots)")
 	relayGW := fs.String("relay-gw", "192.168.30.1", "gateway for the k3s STATIC guest IP")
 	bridge := fs.String("bridge", "vmbr0", "PVE LXC bridge (relay/k3s boots)")
