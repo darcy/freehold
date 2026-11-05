@@ -9,7 +9,9 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"hash/crc32"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -159,6 +161,90 @@ func IsPubkey(s string) bool {
 	}
 	_, err := hex.DecodeString(s)
 	return err == nil
+}
+
+// doorNameRe constrains runner names used to DERIVE a system username: the
+// name flows into `useradd` and `chown` as shell-free exec argv, and the
+// charset is pinned so a username can never smuggle option flags or
+// separators. Shape only — NO length cap: derived DNS-zone door names are
+// unbounded (cloudflareRunners), and length is irrelevant to the injection
+// guard. Same character shape as the provision flow's kebab-case rule.
+var doorNameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
+
+// DoorUser derives the per-door unprivileged system user an ssh/api
+// capability runner's unit runs as. A `local` door returns "" — a local door
+// IS root on its own host (the documented contract: its exec is the point),
+// so it keeps the root unit. An unparsable name is an error, never a silent
+// fall-back to root.
+//
+// The derivation is INJECTIVE by construction: verbatim (`fhd-<name>`) only
+// when the whole name body fits the truncation width (≤19), otherwise
+// `fhd-<name[:19]>-<crc32(name)>` (32 chars). A crafted short name can
+// therefore never re-derive a long name's truncated user — its own body
+// exceeds 19 chars and takes the truncated branch, where its crc32 differs —
+// so two doors can share a uid only on a crc32 collision over a shared
+// 19-char prefix. That matters because EnsureRunnerUser chowns the door's
+// package dir to this user: a shared uid would let one door's runner read
+// another door's identity.json (its Nostr/enc private keys + sealed
+// credential).
+func DoorUser(kind, name string) (string, error) {
+	if kind == "local" {
+		return "", nil
+	}
+	if !doorNameRe.MatchString(name) {
+		return "", fmt.Errorf("door user: name %q must be kebab-case [a-z0-9-]", name)
+	}
+	if len(name) <= 19 {
+		return "fhd-" + name, nil
+	}
+	return fmt.Sprintf("fhd-%s-%08x", name[:19], crc32.ChecksumIEEE([]byte(name))), nil
+}
+
+// EnsureRunnerUser idempotently creates a CP-guest capability door's
+// unprivileged system user and gives it the door's package dir. Every
+// re-seal (rotate, fill, the build's re-ship) writes the package root-owned
+// again, so callers run this before every (re)start of a non-root unit.
+// No-op for local doors (root contract) and for empty kind (the co-located
+// CP lifecycle runner, which is root by design).
+func EnsureRunnerUser(kind, name, pkgDir string) (string, error) {
+	user, err := DoorUser(kind, name)
+	if err != nil || user == "" {
+		return user, err
+	}
+	script := fmt.Sprintf("id -u %s >/dev/null 2>&1 || useradd -r -M -s /usr/sbin/nologin %s", user, user)
+	if out, err := exec.Command("sh", "-c", script).CombinedOutput(); err != nil {
+		return "", fmt.Errorf("create door user %s: %v: %s", user, err, strings.TrimSpace(string(out)))
+	}
+	if out, err := exec.Command("chown", "-R", user+":"+user, pkgDir).CombinedOutput(); err != nil {
+		return "", fmt.Errorf("chown %s package: %v: %s", user, err, strings.TrimSpace(string(out)))
+	}
+	return user, nil
+}
+
+// DoorSandbox renders the systemd sandbox lines for a non-root door unit:
+// the whole filesystem read-only except the door's own package dir (its
+// state, sealed package, audit spool), no privilege escalation, its own
+// /tmp. The ExecStartPre (the `+` prefix runs it with full privileges,
+// bypassing User= and the sandbox) re-asserts package ownership at EVERY
+// start: any re-ship (rotate, fill, grant, add-secret, re-address) lands
+// root-owned, and the next start — by the build, the console, the CLI, or a
+// host reboot — heals it. Nothing else needs to know. An empty user (local
+// doors, the co-located runner) renders "" — those run as root by contract.
+func DoorSandbox(user, pkgDir string) string {
+	if user == "" {
+		return ""
+	}
+	return fmt.Sprintf(`User=%s
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=%s
+PrivateTmp=yes
+ProtectHome=yes
+RestrictSUIDSGID=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ExecStartPre=+/usr/bin/chown -R %s %s`, user, pkgDir, user, pkgDir)
 }
 
 func hexToArr(s string) ([32]byte, error) {

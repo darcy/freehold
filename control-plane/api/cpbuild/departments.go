@@ -1508,20 +1508,27 @@ func (s *Spec) addRelayCommunityMember(pubkey string) error {
 // way — the module direction forbids a shared helper.
 // doorUnitText renders a capability door's systemd unit file — a REAL file
 // (Restart=on-failure, enabled): a crash or a guest reboot returns; a
-// --collect transient removed the unit on the first crash.
-func doorUnitText(description, name, bin, flags string) string {
+// --collect transient removed the unit on the first crash. sandbox carries
+// the unit's privilege lines (provisioner.DoorSandbox): an ssh/api door runs
+// as its own unprivileged user with a read-only-except-package filesystem —
+// an api door's exec is curl, never root; a local door passes "" and runs as
+// root (the documented contract: a local door IS root on its host).
+func doorUnitText(description, name, bin, flags, sandbox string) string {
+	if sandbox != "" {
+		sandbox += "\n"
+	}
 	return fmt.Sprintf(`[Unit]
 Description=%s
 After=network-online.target
 
 [Service]
-ExecStart=%s serve %s
+%sExecStart=%s serve %s
 Restart=on-failure
 RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
-`, description, bin, flags)
+`, description, sandbox, bin, flags)
 }
 
 func (s *Spec) startCapabilityRunner(r capabilityRunner, pkgDir string) error {
@@ -1536,7 +1543,19 @@ func (s *Spec) startCapabilityRunner(r capabilityRunner, pkgDir string) error {
 	flags := fmt.Sprintf("--state-dir %s --addr 0.0.0.0:%d --relay-url %s --relay-pubkey %s --relay-auth-url %s --allow-remote",
 		pkgDir, r.port, s.relayDialURL(), s.RelayPK, s.relaySignURL())
 	unit := "freehold-runner-" + r.name
-	unitFile := doorUnitText("freehold capability runner "+r.name, r.name, bin, flags)
+	// The unit's privilege level is the door's kind: ssh/api doors run as a
+	// per-door unprivileged user (their exec is ssh into the target or a
+	// local curl — root buys nothing) with the package dir as their only
+	// writable ground. EnsureRunnerUser creates the user + asserts the
+	// initial ownership; the unit's ExecStartPre re-asserts ownership at
+	// EVERY start, so any later root-owned re-ship (rotate, fill, grant,
+	// add-secret, re-address) self-heals at the next restart or reboot. A
+	// local door runs as root — root IS the job on its own host.
+	user, err := provisioner.EnsureRunnerUser(r.kind, r.name, pkgDir)
+	if err != nil {
+		return fmt.Errorf("stage %s door user: %w", r.name, err)
+	}
+	unitFile := doorUnitText("freehold capability runner "+r.name, r.name, bin, flags, provisioner.DoorSandbox(user, pkgDir))
 	script := fmt.Sprintf(
 		"echo %s | base64 -d > /etc/systemd/system/%s.service && systemctl daemon-reload && systemctl stop %s 2>/dev/null; systemctl enable --now %s",
 		base64.StdEncoding.EncodeToString([]byte(unitFile)), unit, unit, unit)

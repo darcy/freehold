@@ -1467,6 +1467,8 @@ func (s *Server) rotate(w http.ResponseWriter, r *http.Request) {
 	// runner holds its package in memory from boot) — the console runs on the
 	// same guest, so restart the unit + wait for the listen. The seal stands
 	// even when the restart fails (soft: reported, never blocks the rotate).
+	// Package ownership needs no re-assertion here: a sandboxed door's unit
+	// carries ExecStartPre=+chown, so every start heals a root-owned re-ship.
 	restarted := false
 	restartErr := ""
 	if rec, ok := fresh.GetCapability(req.Name); ok {

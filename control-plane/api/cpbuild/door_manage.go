@@ -95,6 +95,9 @@ func BuildFillDoor(spec *Spec) agent.FillDoorFn {
 
 // restartDoorUnit restarts a CP-guest door's runner unit on THIS guest (the
 // agent-tools serve runs there, as the console does) and waits for the listen.
+// Package ownership needs no re-assertion here: a sandboxed door's unit
+// carries ExecStartPre=+chown, so EVERY start (this one, the console's, the
+// CLI's, a host reboot) heals a root-owned re-ship itself.
 func restartDoorUnit(name string, port int) error {
 	unit := "freehold-runner-" + name
 	cmd := exec.Command("systemctl", "restart", unit)
