@@ -210,9 +210,13 @@ func EnsureRunnerUser(kind, name, pkgDir string) (string, error) {
 
 // DoorSandbox renders the systemd sandbox lines for a non-root door unit:
 // the whole filesystem read-only except the door's own package dir (its
-// state, its sealed package, its audit spool), no privilege escalation, its
-// own /tmp. An empty user (local doors, the co-located runner) renders "" —
-// those run as root by contract.
+// state, sealed package, audit spool), no privilege escalation, its own
+// /tmp. The ExecStartPre (the `+` prefix runs it with full privileges,
+// bypassing User= and the sandbox) re-asserts package ownership at EVERY
+// start: any re-ship (rotate, fill, grant, add-secret, re-address) lands
+// root-owned, and the next start — by the build, the console, the CLI, or a
+// host reboot — heals it. Nothing else needs to know. An empty user (local
+// doors, the co-located runner) renders "" — those run as root by contract.
 func DoorSandbox(user, pkgDir string) string {
 	if user == "" {
 		return ""
@@ -226,7 +230,8 @@ ProtectHome=yes
 RestrictSUIDSGID=yes
 ProtectKernelTunables=yes
 ProtectControlGroups=yes
-ProtectClock=yes`, user, pkgDir)
+ProtectClock=yes
+ExecStartPre=+/usr/bin/chown -R %s %s`, user, pkgDir, user, pkgDir)
 }
 
 func hexToArr(s string) ([32]byte, error) {

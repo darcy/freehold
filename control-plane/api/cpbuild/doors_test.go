@@ -182,6 +182,7 @@ func TestDoorUnitSandboxPinsLeastPrivilege(t *testing.T) {
 		"ReadWritePaths=" + pkgDir,
 		"PrivateTmp=yes",
 		"RestrictSUIDSGID=yes",
+		"ExecStartPre=+/usr/bin/chown -R fhd-litellm-api-admin " + pkgDir,
 		"ExecStart=",
 	} {
 		if !strings.Contains(s, want) {

@@ -1394,9 +1394,11 @@ func (s *Spec) startCapabilityRunner(r capabilityRunner, pkgDir string) error {
 	unit := "freehold-runner-" + r.name
 	// The unit's privilege level is the door's kind: ssh/api doors run as a
 	// per-door unprivileged user (their exec is ssh into the target or a
-	// local curl — root buys nothing), with the package dir their only
-	// writable ground. Every re-seal re-ships the package root-owned, so the
-	// user + ownership are (re)asserted HERE, before every (re)start. A
+	// local curl — root buys nothing) with the package dir as their only
+	// writable ground. EnsureRunnerUser creates the user + asserts the
+	// initial ownership; the unit's ExecStartPre re-asserts ownership at
+	// EVERY start, so any later root-owned re-ship (rotate, fill, grant,
+	// add-secret, re-address) self-heals at the next restart or reboot. A
 	// local door runs as root — root IS the job on its own host.
 	user, err := provisioner.EnsureRunnerUser(r.kind, r.name, pkgDir)
 	if err != nil {
