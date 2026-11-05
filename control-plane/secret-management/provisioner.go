@@ -151,17 +151,29 @@ func IsPubkey(s string) bool {
 }
 
 // doorNameRe constrains runner names used to DERIVE a system username: the
-// name flows into `useradd` and `chown` as a shell-free exec argv, but the
-// charset is pinned anyway so a username can never smuggle option flags or
-// separators. Same shape as the provision flow's kebab-case rule.
-var doorNameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
+// name flows into `useradd` and `chown` as shell-free exec argv, and the
+// charset is pinned so a username can never smuggle option flags or
+// separators. Shape only — NO length cap: derived DNS-zone door names are
+// unbounded (cloudflareRunners), and length is irrelevant to the injection
+// guard. Same character shape as the provision flow's kebab-case rule.
+var doorNameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
 
 // DoorUser derives the per-door unprivileged system user an ssh/api
-// capability runner's unit runs as: `fhd-<name>`, truncated with a crc32
-// disambiguator when the name would exceed the 32-char username limit. A
-// `local` door returns "" — a local door IS root on its own host (the
-// documented contract: its exec is the point), so it keeps the root unit.
-// An unparsable name is an error, never a silent fall-back to root.
+// capability runner's unit runs as. A `local` door returns "" — a local door
+// IS root on its own host (the documented contract: its exec is the point),
+// so it keeps the root unit. An unparsable name is an error, never a silent
+// fall-back to root.
+//
+// The derivation is INJECTIVE by construction: verbatim (`fhd-<name>`) only
+// when the whole name body fits the truncation width (≤19), otherwise
+// `fhd-<name[:19]>-<crc32(name)>` (32 chars). A crafted short name can
+// therefore never re-derive a long name's truncated user — its own body
+// exceeds 19 chars and takes the truncated branch, where its crc32 differs —
+// so two doors can share a uid only on a crc32 collision over a shared
+// 19-char prefix. That matters because EnsureRunnerUser chowns the door's
+// package dir to this user: a shared uid would let one door's runner read
+// another door's identity.json (its Nostr/enc private keys + sealed
+// credential).
 func DoorUser(kind, name string) (string, error) {
 	if kind == "local" {
 		return "", nil
@@ -169,9 +181,8 @@ func DoorUser(kind, name string) (string, error) {
 	if !doorNameRe.MatchString(name) {
 		return "", fmt.Errorf("door user: name %q must be kebab-case [a-z0-9-]", name)
 	}
-	user := "fhd-" + name
-	if len(user) <= 32 {
-		return user, nil
+	if len(name) <= 19 {
+		return "fhd-" + name, nil
 	}
 	return fmt.Sprintf("fhd-%s-%08x", name[:19], crc32.ChecksumIEEE([]byte(name))), nil
 }

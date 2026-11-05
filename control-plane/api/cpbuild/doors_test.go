@@ -1,6 +1,8 @@
 package cpbuild
 
 import (
+	"fmt"
+	"hash/crc32"
 	"strings"
 	"testing"
 
@@ -189,41 +191,69 @@ func TestDoorUnitSandboxPinsLeastPrivilege(t *testing.T) {
 }
 
 // TestDoorUserDerivation: local doors and the co-located runner stay root
-// (""); names derive deterministically; long names stay within the 32-char
-// username limit WITHOUT colliding (two long names sharing a prefix must
-// derive different users).
+// (""); short names derive verbatim; names over the 19-char truncation width
+// derive deterministically within the 32-char username limit; the derivation
+// is injective by construction — a crafted short name cannot re-derive a
+// long name's truncated user (two doors on one uid would merge the
+// isolation: each runner could read the other's identity.json private keys).
 func TestDoorUserDerivation(t *testing.T) {
 	if u, err := provisioner.DoorUser("local", "cp-local-root"); err != nil || u != "" {
 		t.Fatalf("local door must stay root, got %q, %v", u, err)
 	}
 	u, err := provisioner.DoorUser("api", "litellm-api-admin")
 	if err != nil || u != "fhd-litellm-api-admin" {
-		t.Fatalf("short name derives verbatim, got %q, %v", u, err)
+		t.Fatalf("verbatim short name derives fhd-<name>, got %q, %v", u, err)
 	}
+	// A name over the truncation width truncates: 32 chars max, deterministic.
 	long := "cloudflare-api-a-very-long-zone-name-exceeding-the-username-lim"
 	u1, err := provisioner.DoorUser("api", long)
 	if err != nil {
 		t.Fatalf("long name: %v", err)
 	}
+	if len(u1) != 32 || !strings.HasPrefix(u1, "fhd-"+long[:19]+"-") {
+		t.Fatalf("long name must derive fhd-<name[:19]>-<crc32>, got %q", u1)
+	}
 	u2, _ := provisioner.DoorUser("api", long)
 	if u1 != u2 {
 		t.Fatalf("derivation must be deterministic: %q vs %q", u1, u2)
-	}
-	if len(u1) > 32 {
-		t.Fatalf("derived user %q exceeds the 32-char username limit", u1)
 	}
 	long2 := long[:len(long)-1] + "x"
 	u3, _ := provisioner.DoorUser("api", long2)
 	if u3 == u1 {
 		t.Fatalf("two distinct long names must not collide on one user: %q", u1)
 	}
-	for _, u := range []string{u1, u3} {
+	// A mid-length name (20–28 chars) takes the TRUNCATED branch, not a
+	// verbatim form — that branch boundary is what keeps a crafted short
+	// name from re-deriving a long name's user.
+	mid := "cloudflare-api-zone-example-org"
+	midUser, err := provisioner.DoorUser("api", mid)
+	if err != nil || midUser != "fhd-"+mid[:19]+"-"+fmt.Sprintf("%08x", crc32.ChecksumIEEE([]byte(mid))) {
+		t.Fatalf("mid-length name must truncate, got %q, %v", midUser, err)
+	}
+	// The crafted-collision attack: a name whose verbatim form WOULD have
+	// equaled the long name's truncated user takes the truncated branch and
+	// lands elsewhere.
+	crafted := long[:19] + "-" + fmt.Sprintf("%08x", crc32.ChecksumIEEE([]byte(long)))
+	if craftedUser, _ := provisioner.DoorUser("api", crafted); craftedUser == u1 {
+		t.Fatalf("crafted name %q must not collide with %q's user %q", crafted, long, u1)
+	}
+	for _, u := range []string{u1, u3, midUser} {
+		if len(u) > 32 {
+			t.Fatalf("derived user %q exceeds the 32-char username limit", u)
+		}
 		if !strings.HasPrefix(u, "fhd-") {
 			t.Fatalf("derived user %q must carry the fhd- prefix", u)
 		}
 	}
 	if _, err := provisioner.DoorUser("api", "bad name; rm -rf"); err == nil {
 		t.Fatalf("an unsafe name must be refused, never silently run as root")
+	}
+	// Derived DNS-zone door names are unbounded — a name past the old 63-char
+	// cap must derive fine, not fail the build (cloudflareRunners dashes the
+	// zone: "cloudflare-api-" + zoneOf with dots replaced).
+	veryLong := "cloudflare-api-" + strings.Repeat("deep-sub-", 9) + "example-org"
+	if u, err := provisioner.DoorUser("api", veryLong); err != nil || len(u) != 32 {
+		t.Fatalf("unbounded derived name must truncate to a 32-char user, got %q, %v", u, err)
 	}
 }
 
