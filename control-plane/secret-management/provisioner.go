@@ -9,7 +9,9 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"hash/crc32"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -146,6 +148,74 @@ func IsPubkey(s string) bool {
 	}
 	_, err := hex.DecodeString(s)
 	return err == nil
+}
+
+// doorNameRe constrains runner names used to DERIVE a system username: the
+// name flows into `useradd` and `chown` as a shell-free exec argv, but the
+// charset is pinned anyway so a username can never smuggle option flags or
+// separators. Same shape as the provision flow's kebab-case rule.
+var doorNameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
+
+// DoorUser derives the per-door unprivileged system user an ssh/api
+// capability runner's unit runs as: `fhd-<name>`, truncated with a crc32
+// disambiguator when the name would exceed the 32-char username limit. A
+// `local` door returns "" — a local door IS root on its own host (the
+// documented contract: its exec is the point), so it keeps the root unit.
+// An unparsable name is an error, never a silent fall-back to root.
+func DoorUser(kind, name string) (string, error) {
+	if kind == "local" {
+		return "", nil
+	}
+	if !doorNameRe.MatchString(name) {
+		return "", fmt.Errorf("door user: name %q must be kebab-case [a-z0-9-]", name)
+	}
+	user := "fhd-" + name
+	if len(user) <= 32 {
+		return user, nil
+	}
+	return fmt.Sprintf("fhd-%s-%08x", name[:19], crc32.ChecksumIEEE([]byte(name))), nil
+}
+
+// EnsureRunnerUser idempotently creates a CP-guest capability door's
+// unprivileged system user and gives it the door's package dir. Every
+// re-seal (rotate, fill, the build's re-ship) writes the package root-owned
+// again, so callers run this before every (re)start of a non-root unit.
+// No-op for local doors (root contract) and for empty kind (the co-located
+// CP lifecycle runner, which is root by design).
+func EnsureRunnerUser(kind, name, pkgDir string) (string, error) {
+	user, err := DoorUser(kind, name)
+	if err != nil || user == "" {
+		return user, err
+	}
+	script := fmt.Sprintf("id -u %s >/dev/null 2>&1 || useradd -r -M -s /usr/sbin/nologin %s", user, user)
+	if out, err := exec.Command("sh", "-c", script).CombinedOutput(); err != nil {
+		return "", fmt.Errorf("create door user %s: %v: %s", user, err, strings.TrimSpace(string(out)))
+	}
+	if out, err := exec.Command("chown", "-R", user+":"+user, pkgDir).CombinedOutput(); err != nil {
+		return "", fmt.Errorf("chown %s package: %v: %s", user, err, strings.TrimSpace(string(out)))
+	}
+	return user, nil
+}
+
+// DoorSandbox renders the systemd sandbox lines for a non-root door unit:
+// the whole filesystem read-only except the door's own package dir (its
+// state, its sealed package, its audit spool), no privilege escalation, its
+// own /tmp. An empty user (local doors, the co-located runner) renders "" —
+// those run as root by contract.
+func DoorSandbox(user, pkgDir string) string {
+	if user == "" {
+		return ""
+	}
+	return fmt.Sprintf(`User=%s
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=%s
+PrivateTmp=yes
+ProtectHome=yes
+RestrictSUIDSGID=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+ProtectClock=yes`, user, pkgDir)
 }
 
 func hexToArr(s string) ([32]byte, error) {

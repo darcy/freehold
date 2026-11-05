@@ -84,9 +84,11 @@ func BuildFillDoor(spec *Spec) agent.FillDoorFn {
 		// A capability door picks a sealed credential up ONLY on restart (the
 		// runner holds its package in memory from boot). The seal stands even
 		// when the restart fails — reported soft, never blocking (the
-		// console's fill carries the same semantics).
+		// console's fill carries the same semantics). The restart re-asserts
+		// the door's unprivileged user + package ownership first: the seal
+		// re-shipped the package root-owned.
 		restartNote := "the unit was restarted to pick it up"
-		if err := restartDoorUnit(name, rec.Port); err != nil {
+		if err := restartDoorUnit(spec, name, rec.Kind, rec.Port); err != nil {
 			restartNote = "SEALED, but the restart did not verify: " + err.Error() + " — restart freehold-runner-" + name + " by hand before exec"
 		}
 		return fmt.Sprintf("fill_door: %s sealed (declared no-secret), %s. Verify by exec-probe before claiming the door is live.", name, restartNote), nil
@@ -95,7 +97,13 @@ func BuildFillDoor(spec *Spec) agent.FillDoorFn {
 
 // restartDoorUnit restarts a CP-guest door's runner unit on THIS guest (the
 // agent-tools serve runs there, as the console does) and waits for the listen.
-func restartDoorUnit(name string, port int) error {
+// The door's kind decides the privilege re-assertion: an ssh/api door's
+// package was just re-shipped root-owned by the seal, so its unprivileged
+// user + ownership are re-asserted before the restart; a local door is root.
+func restartDoorUnit(spec *Spec, name, kind string, port int) error {
+	if _, err := provisioner.EnsureRunnerUser(kind, name, runnerPackageDir(spec.consoleStateDir(), name)); err != nil {
+		return fmt.Errorf("re-assert %s door user: %w", name, err)
+	}
 	unit := "freehold-runner-" + name
 	cmd := exec.Command("systemctl", "restart", unit)
 	if out, err := cmd.CombinedOutput(); err != nil {

@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"freehold/agents"
+	provisioner "freehold/control-plane/secret-management"
 )
 
 // TestCapabilityRunnerTable pins the capability-runner model: unique names +
@@ -145,14 +146,84 @@ func TestCPACarriesGrantingSkill(t *testing.T) {
 // TestDoorUnitShapePinsResilience: the doors' staged units are REAL files —
 // Restart=on-failure + enabled (a crash or a guest reboot returns; a
 // --collect transient removed the unit on the first crash and the door's
-// port went dark with no reaper).
+// port went dark with no reaper). A LOCAL door runs as root — root IS the
+// job on its own host — so its unit carries no sandbox.
 func TestDoorUnitShapePinsResilience(t *testing.T) {
 	s := doorUnitText("freehold capability runner cp-local-root", "cp-local-root",
-		"/srv/data/cp/bin/freehold-runner", "--state-dir /x --addr 0.0.0.0:8797")
+		"/srv/data/cp/bin/freehold-runner", "--state-dir /x --addr 0.0.0.0:8797", "")
 	for _, want := range []string{"Restart=on-failure", "RestartSec=5", "WantedBy=multi-user.target", "ExecStart=/srv/data/cp/bin/freehold-runner serve --state-dir /x --addr 0.0.0.0:8797"} {
 		if !strings.Contains(s, want) {
 			t.Fatalf("door unit missing %q\n---\n%s", want, s)
 		}
+	}
+	for _, banned := range []string{"User=", "NoNewPrivileges", "ProtectSystem"} {
+		if strings.Contains(s, banned) {
+			t.Fatalf("local door unit must run as root (the documented contract); found %q\n---\n%s", banned, s)
+		}
+	}
+}
+
+// TestDoorUnitSandboxPinsLeastPrivilege: an ssh/api door's unit runs as its
+// own unprivileged user with a read-only filesystem except its own package
+// dir — an api door's exec is curl, never root; a compromised door must not
+// be root on the CP guest (which holds CP state, the console identity, and
+// the operator's sealed signing key).
+func TestDoorUnitSandboxPinsLeastPrivilege(t *testing.T) {
+	pkgDir := "/srv/data/cp/control-plane/runner/litellm-api-admin"
+	s := doorUnitText("freehold capability runner litellm-api-admin", "litellm-api-admin",
+		"/srv/data/cp/bin/freehold-runner", "--state-dir "+pkgDir+" --addr 0.0.0.0:8795",
+		provisioner.DoorSandbox("fhd-litellm-api-admin", pkgDir))
+	for _, want := range []string{
+		"User=fhd-litellm-api-admin",
+		"NoNewPrivileges=yes",
+		"ProtectSystem=strict",
+		"ReadWritePaths=" + pkgDir,
+		"PrivateTmp=yes",
+		"RestrictSUIDSGID=yes",
+		"ExecStart=",
+	} {
+		if !strings.Contains(s, want) {
+			t.Fatalf("sandboxed door unit missing %q\n---\n%s", want, s)
+		}
+	}
+}
+
+// TestDoorUserDerivation: local doors and the co-located runner stay root
+// (""); names derive deterministically; long names stay within the 32-char
+// username limit WITHOUT colliding (two long names sharing a prefix must
+// derive different users).
+func TestDoorUserDerivation(t *testing.T) {
+	if u, err := provisioner.DoorUser("local", "cp-local-root"); err != nil || u != "" {
+		t.Fatalf("local door must stay root, got %q, %v", u, err)
+	}
+	u, err := provisioner.DoorUser("api", "litellm-api-admin")
+	if err != nil || u != "fhd-litellm-api-admin" {
+		t.Fatalf("short name derives verbatim, got %q, %v", u, err)
+	}
+	long := "cloudflare-api-a-very-long-zone-name-exceeding-the-username-lim"
+	u1, err := provisioner.DoorUser("api", long)
+	if err != nil {
+		t.Fatalf("long name: %v", err)
+	}
+	u2, _ := provisioner.DoorUser("api", long)
+	if u1 != u2 {
+		t.Fatalf("derivation must be deterministic: %q vs %q", u1, u2)
+	}
+	if len(u1) > 32 {
+		t.Fatalf("derived user %q exceeds the 32-char username limit", u1)
+	}
+	long2 := long[:len(long)-1] + "x"
+	u3, _ := provisioner.DoorUser("api", long2)
+	if u3 == u1 {
+		t.Fatalf("two distinct long names must not collide on one user: %q", u1)
+	}
+	for _, u := range []string{u1, u3} {
+		if !strings.HasPrefix(u, "fhd-") {
+			t.Fatalf("derived user %q must carry the fhd- prefix", u)
+		}
+	}
+	if _, err := provisioner.DoorUser("api", "bad name; rm -rf"); err == nil {
+		t.Fatalf("an unsafe name must be refused, never silently run as root")
 	}
 }
 

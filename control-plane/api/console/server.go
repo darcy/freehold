@@ -1443,13 +1443,33 @@ func (s *Server) rotate(w http.ResponseWriter, r *http.Request) {
 	// runner holds its package in memory from boot) — the console runs on the
 	// same guest, so restart the unit + wait for the listen. The seal stands
 	// even when the restart fails (soft: reported, never blocks the rotate).
+	// The restart re-asserts the door's unprivileged user + package ownership
+	// first: the rotate re-shipped the package root-owned.
 	restarted := false
 	restartErr := ""
 	if rec, ok := fresh.GetCapability(req.Name); ok {
-		if err := s.restartDoor(req.Name, rec.Port); err != nil {
-			restartErr = err.Error()
+		// An INJECTED RestartDoor (tests, remote drivers) owns privilege
+		// itself; the real local restart re-asserts the door's unprivileged
+		// user + package ownership first — the rotate re-shipped the package
+		// root-owned, and a non-root unit must be able to read it again.
+		if s.RestartDoor != nil {
+			if err := s.RestartDoor(req.Name, rec.Port); err != nil {
+				restartErr = err.Error()
+			} else {
+				restarted = true
+			}
 		} else {
-			restarted = true
+			pkgDir := runnerRec.PackageDir
+			if pkgDir == "" {
+				pkgDir = filepath.Join(s.stateDir(), "runner", req.Name)
+			}
+			if _, err := provisioner.EnsureRunnerUser(rec.Kind, req.Name, pkgDir); err != nil {
+				restartErr = err.Error()
+			} else if err := s.restartDoor(req.Name, rec.Port); err != nil {
+				restartErr = err.Error()
+			} else {
+				restarted = true
+			}
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{
