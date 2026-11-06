@@ -345,7 +345,7 @@ func pangolinDynamicConf(worldDomain string) string {
         - badger
 
     next-router:
-      rule: "Host(~%[1]s~) && !PathPrefix(~\/api\/v1~)"
+      rule: "Host(~%[1]s~) && !PathPrefix(~/api/v1~)"
       service: next-service
       entryPoints:
         - websecure
@@ -355,7 +355,7 @@ func pangolinDynamicConf(worldDomain string) string {
         certResolver: letsencrypt
 
     api-router:
-      rule: "Host(~%[1]s~) && PathPrefix(~\/api\/v1~)"
+      rule: "Host(~%[1]s~) && PathPrefix(~/api/v1~)"
       service: api-service
       entryPoints:
         - websecure
