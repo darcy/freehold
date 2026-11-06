@@ -1257,6 +1257,17 @@ func mcpServiceManifest(rec state.MCPCapabilityRecord, saKeyJSON, brokerToken, c
 							"command": []string{"/bin/bash", "-c", bootstrap},
 							"env":     env,
 							"ports":   []map[string]any{{"containerPort": rec.ServicePort}},
+							// Non-root, no privilege escalation, ALL capabilities
+							// dropped, RuntimeDefault seccomp — the pod runs on
+							// the node's network, so its in-container privilege
+							// floor is pinned here.
+							"securityContext": map[string]any{
+								"runAsNonRoot":             true,
+								"runAsUser":                1000,
+								"allowPrivilegeEscalation": false,
+								"capabilities":             map[string]any{"drop": []string{"ALL"}},
+								"seccompProfile":           map[string]any{"type": "RuntimeDefault"},
+							},
 							"readinessProbe": map[string]any{
 								"httpGet":       map[string]any{"path": "/health", "port": rec.ServicePort},
 								"periodSeconds": 10, "failureThreshold": 6, "initialDelaySeconds": 5,

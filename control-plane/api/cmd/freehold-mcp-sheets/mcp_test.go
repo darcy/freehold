@@ -6,6 +6,7 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"encoding/pem"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -201,4 +202,38 @@ func TestNotificationGets202(t *testing.T) {
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("notification = %d, want 202", rec.Code)
 	}
+}
+
+// TestRangeTraversalRejected: a path-traversal range (or any character
+// outside A1's safe charset) is refused — it must never reach the URL, where
+// it would retarget the request at a different spreadsheet with the SA's
+// credential.
+func TestRangeTraversalRejected(t *testing.T) {
+	s, g := newServer(t, map[string]string{
+		"FREEHOLD_BROKER_TOKEN":   "tok-1",
+		"FREEHOLD_SPREADSHEET_ID": "sheet123",
+		"GOOGLE_SA_JSON":          "",
+	})
+	for _, bad := range []string{
+		"x/../../../../spreadsheets/other-id/values/A1",
+		"Sheet1!A1?x=1",
+		"Sheet1!A1#frag",
+		"Sheet1!A1%2F",
+		"Sheet.1!A1",
+	} {
+		_, body := postMCP(t, s, fmt.Sprintf(`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get_cells","arguments":{"range":%s}}}`, jsStr(bad)), "tok-1")
+		if !strings.Contains(body, "A1 notation only") {
+			t.Fatalf("range %q must be refused, got: %s", bad, body)
+		}
+	}
+	// Nothing reached the Sheets API.
+	if len(g.sheetsGet) != 0 {
+		t.Fatalf("a refused range must never reach the API, got %v", g.sheetsGet)
+	}
+}
+
+// jsStr quotes s as a JSON string literal for a request body.
+func jsStr(s string) string {
+	b, _ := json.Marshal(s)
+	return string(b)
 }

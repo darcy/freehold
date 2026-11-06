@@ -12,6 +12,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"regexp"
 	"strings"
 )
 
@@ -275,7 +276,11 @@ func (s *server) getCells(rng string) (string, error) {
 	if rng == "" {
 		rng = "A1:Z1000"
 	}
-	out, err := s.sheetsCall(http.MethodGet, "/values/"+urlPathEscape(rng), nil)
+	escaped := urlPathEscape(rng)
+	if escaped == "" {
+		return "", fmt.Errorf("range %q: A1 notation only (letters, digits, underscore, colon, apostrophe, hyphen, space)", rng)
+	}
+	out, err := s.sheetsCall(http.MethodGet, "/values/"+escaped, nil)
 	if err != nil {
 		return "", err
 	}
@@ -303,6 +308,9 @@ func (s *server) putValues(method, rng string, data [][]string) (string, error) 
 	if rng == "" {
 		return "", fmt.Errorf("a range is required ('Sheet1!A1' for update, 'Sheet1' for append)")
 	}
+	if urlPathEscape(rng) == "" {
+		return "", fmt.Errorf("range %q: A1 notation only (letters, digits, underscore, colon, apostrophe, hyphen, space)", rng)
+	}
 	path := "/values/" + urlPathEscape(rng)
 	if method == http.MethodPut {
 		path += "?valueInputOption=USER_ENTERED"
@@ -324,6 +332,19 @@ func (s *server) putValues(method, rng string, data [][]string) (string, error) 
 	return fmt.Sprintf("appended %d rows", res.UpdatedRowCount), nil
 }
 
-func urlPathEscape(s string) string { return strings.ReplaceAll(strings.TrimSpace(s), " ", "%20") }
+// rangeRe is A1 notation's SAFE charset (letters, digits, underscore, colon,
+// apostrophe, exclamation, space, hyphen): the agent-controlled range must
+// never reach the URL raw — a "../"-style range retargets the request at a
+// different spreadsheet with the SA's credential (servers normalize dot
+// segments). Dots are rejected too — rename tabs to avoid them; they are not
+// worth a path-traversal shape.
+var rangeRe = regexp.MustCompile(`^[A-Za-z0-9_:'!\- ]+$`)
+
+func urlPathEscape(s string) string {
+	if !rangeRe.MatchString(s) {
+		return ""
+	}
+	return strings.ReplaceAll(strings.TrimSpace(s), " ", "%20")
+}
 
 func osGetenv(k string) string { return os.Getenv(k) }
