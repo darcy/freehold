@@ -737,7 +737,11 @@ func TestRenameToleratesDeadToken(t *testing.T) {
 func provisionFixture(t *testing.T) (*Spec, *agenttools.Registry, *mcpKeyGateway, *state.StateStore) {
 	t.Helper()
 	dir := t.TempDir()
-	stateDir := dir + "/agent-tools"
+	// The REAL layout: the CP state lives at <root>/control-plane (what
+	// spec.consoleStateDir() opens) and the agent-tools server's own state
+	// at <root>/agent-tools — the flows open the console-rooted store
+	// themselves, so the fixture seeds it THERE.
+	stateDir := dir + "/control-plane"
 	litellmFixture(t, stateDir, "master-key", "provider-key", "openai", "gpt-4o")
 	store, err := state.Open(stateDir)
 	if err != nil {
@@ -754,14 +758,14 @@ func provisionFixture(t *testing.T) (*Spec, *agenttools.Registry, *mcpKeyGateway
 	store.InsertCapability("kube-api-mcp", state.CapabilityRecord{
 		Kind: "kubernetes", NS: "mcp", Port: 8801, Origin: state.OriginAgent,
 	})
-	reg, err := agenttools.OpenRegistry(filepath.Join(stateDir, "registry.json"))
+	reg, err := agenttools.OpenRegistry(filepath.Join(dir, "agent-tools", "registry.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	gw := newMCPKeyGateway()
 	srv := httptest.NewServer(gw.handler(t))
 	t.Cleanup(srv.Close)
-	spec := &Spec{StateDir: stateDir, LitellmBaseURL: srv.URL + "/v1"}
+	spec := &Spec{StateDir: dir + "/agent-tools", LitellmBaseURL: srv.URL + "/v1"}
 	return spec, reg, gw, store
 }
 
@@ -1014,5 +1018,71 @@ func TestRevokeCapabilityRunnerDelegates(t *testing.T) {
 	}
 	if calls != 1 || gotName != "some-door" || report != "delegated" {
 		t.Fatalf("delegation = %d call(s), name %q, report %q", calls, gotName, report)
+	}
+}
+
+// TestRenameFollowsMCPGrants: a rename rewrites the agent's NAME across the
+// MCP capability table's Grantees (the grants ride the name — a rename that
+// left them would strip the agent's MCP access at the next build), and the
+// reverse lands on the rollback path.
+func TestRenameFollowsMCPGrants(t *testing.T) {
+	spec, reg, _, store := provisionFixture(t)
+	if _, err := reg.RegisterAgent("Helper", strings.Repeat("a", 64), "#freehold"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := spec.provisionMCP(agent.ProvisionMCPArgs{
+		Name: "sheet-a-ro", Namespace: "mcp", ServicePort: 8000, GrantTo: []string{"Helper"},
+	}, false, reg, store); err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	if err := spec.renameMCPGranteeState("Helper", "Renamed"); err != nil {
+		t.Fatalf("rename grants: %v", err)
+	}
+	if err := store.Reload(); err != nil {
+		t.Fatal(err)
+	}
+	rec, ok := store.GetMCPCapability("sheet-a-ro")
+	if !ok || len(rec.Grantees) != 1 || rec.Grantees[0] != "Renamed" {
+		t.Fatalf("grantees after rename = %+v", rec)
+	}
+	// The reverse (the rollback path).
+	if err := spec.renameMCPGranteeState("Renamed", "Helper"); err != nil {
+		t.Fatalf("rename back: %v", err)
+	}
+	if err := store.Reload(); err != nil {
+		t.Fatal(err)
+	}
+	rec, _ = store.GetMCPCapability("sheet-a-ro")
+	if len(rec.Grantees) != 1 || rec.Grantees[0] != "Helper" {
+		t.Fatalf("grantees after rename-back = %+v", rec)
+	}
+}
+
+// TestRetireToleratesDeadGateway: a retirement whose DELETE 404s (a retry
+// after a later leg failed, or a wiped gateway DB) converges — the record
+// still drops under the guard.
+func TestRetireToleratesDeadGateway(t *testing.T) {
+	spec, reg, gw, store := provisionFixture(t)
+	seedAgents(t, store, "Helper")
+	if _, err := reg.RegisterAgent("Helper", strings.Repeat("a", 64), "#freehold"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := spec.provisionMCP(agent.ProvisionMCPArgs{
+		Name: "sheet-a-ro", Namespace: "mcp", ServicePort: 8000, GrantTo: []string{"Helper"},
+	}, false, reg, store); err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	// The registration is ALREADY gone (a wiped gateway DB / a prior leg).
+	gw.mu.Lock()
+	delete(gw.servers, "sheet-a-ro")
+	gw.mu.Unlock()
+	if _, err := spec.revokeCapability(agent.CapabilityGrantArgs{Name: "sheet-a-ro"}, false, reg, store, nil); err != nil {
+		t.Fatalf("the retire must converge through a 404 delete: %v", err)
+	}
+	if _, ok := store.GetMCPCapability("sheet-a-ro"); ok {
+		t.Fatal("the record must drop")
+	}
+	if _, retired := store.GetRetiredMCP("sheet-a-ro"); !retired {
+		t.Fatal("the guard must set")
 	}
 }

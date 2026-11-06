@@ -120,9 +120,19 @@ func BuildUpdateAgentFn(spec *Spec, reg *agenttools.Registry) agent.UpdateAgentF
 				if err := spec.moveLitellmKeyRecord(oldPod, newPod); err != nil {
 					return "", fmt.Errorf("%s: move the litellm key record: %w", verb, err)
 				}
+				// The MCP capability grants ride the agent NAME — they follow
+				// the rename (a rename that left them would strip the
+				// agent's MCP access at the next build's permission rewrite).
+				// Failure is reported + reversed by rekeyBack, never silent.
+				if err := spec.renameMCPGranteeState(name, newName); err != nil {
+					return "", fmt.Errorf("%s: move the MCP capability grants: %w", verb, err)
+				}
 				rekeyBack := func() string {
 					if rerr := spec.moveLitellmKeyRecord(newPod, oldPod); rerr != nil {
 						return fmt.Sprintf(" [UNVERIFIED] the minted-key record could not be re-keyed back (%v) — the store still holds agentkey-%s under the un-applied destination name; re-run the rename to converge it", rerr, newPod)
+					}
+					if rerr := spec.renameMCPGranteeState(newName, name); rerr != nil {
+						return fmt.Sprintf(" [UNVERIFIED] the MCP capability grants could not follow back (%v) — the records still grant %q; re-run the rename to converge it", rerr, newName)
 					}
 					return ""
 				}

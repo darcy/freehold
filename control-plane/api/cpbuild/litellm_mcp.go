@@ -759,9 +759,10 @@ func (s *Spec) provisionMCP(args agent.ProvisionMCPArgs, callerIsOperator bool, 
 	report := fmt.Sprintf("mcp capability %s (%s → %s) registered on the gateway and granted to [%s].",
 		name, transport, rec.URL, strings.Join(granted, ", "))
 	if slotted {
-		report += fmt.Sprintf("\nThe MCP service itself deploys into the %s slot (kube-api-%s) — its Secret carries the broker token sealed from the CP; the service owner stands the Deployment + Service up (manifests in the capability's record shape).", ns, ns)
 		if rec.SecretRef != "" {
-			report += fmt.Sprintf(" The broker token is sealed into kube-api-%s's package as %q.", ns, rec.SecretRef)
+			report += fmt.Sprintf("\nThe MCP service itself deploys into the %s slot (kube-api-%s) — its Secret carries the broker token sealed from the CP (sealed into kube-api-%s's package as %q); the service owner stands the Deployment + Service up (manifests in the capability's record shape).", ns, ns, ns, rec.SecretRef)
+		} else {
+			report += fmt.Sprintf("\nThe MCP service itself deploys into the %s slot (kube-api-%s); the service owner stands the Deployment + Service up (manifests in the capability's record shape). No broker token was declared for this capability (secret_ref empty) — the service answers unauthenticated on the cluster network.", ns, ns)
 		}
 	}
 	report += "\nVerify with the agent's MCP key (its object_permission now carries " + name + ") before claiming the capability is live."
@@ -912,14 +913,30 @@ func (s *Spec) revokeCapability(args agent.CapabilityGrantArgs, callerIsOperator
 		name, strings.Join(changed, " "), strings.Join(rec.Grantees, ", ")), nil
 }
 
+// renameMCPGranteeState rewrites a renamed agent's NAME across the MCP
+// capability table's Grantees: the grants ride the agent NAME, and a rename
+// that left them would strip the agent's MCP access at the next build's
+// permission rewrite (the new name matches nothing → the sentinel). Called
+// by the update_agent rename flow (with the reverse on its rollback path).
+func (s *Spec) renameMCPGranteeState(oldName, newName string) error {
+	store, err := state.Open(s.consoleStateDir())
+	if err != nil {
+		return err
+	}
+	return store.RenameMCPGrantee(oldName, newName)
+}
+
 // deleteLiteLLMMServer removes the gateway's registration for a retired
 // capability (the server stops serving tools through the broker).
+// Ensure-revoked: a 404 (already gone — a retry after a later leg failed, or
+// a wiped gateway DB) clears too, so retirement cannot be wedged by a leg
+// that already landed.
 func (s *Spec) deleteLiteLLMMServer(serverID string) error {
 	ls, err := s.openLitellmMCPStore()
 	if err != nil || ls == nil {
 		return err
 	}
-	if _, err := ls.call(http.MethodDelete, "/v1/mcp/server/"+url.PathEscape(serverID), nil); err != nil {
+	if _, status, err := ls.callStatus(http.MethodDelete, "/v1/mcp/server/"+url.PathEscape(serverID), nil); err != nil && status != http.StatusNotFound {
 		return fmt.Errorf("delete MCP server registration %s: %w", serverID, err)
 	}
 	return nil

@@ -574,6 +574,31 @@ func (s *StateStore) InsertMCPCapability(name string, rec MCPCapabilityRecord) e
 	return s.Save()
 }
 
+// RenameMCPGrantee rewrites a renamed agent's NAME across the MCP
+// capability table's Grantees (the grants ride the agent name — a rename
+// that left them would strip the agent's MCP access at the next build's
+// permission rewrite). Idempotent; a no-op when nothing references the name.
+func (s *StateStore) RenameMCPGrantee(oldName, newName string) error {
+	changed := false
+	for name, rec := range s.state.MCPCapabilities {
+		found := false
+		for i, g := range rec.Grantees {
+			if g == oldName {
+				rec.Grantees[i] = newName
+				found = true
+			}
+		}
+		if found {
+			s.state.MCPCapabilities[name] = rec
+			changed = true
+		}
+	}
+	if !changed {
+		return nil
+	}
+	return s.Save()
+}
+
 // RemoveMCPCapability drops an MCP capability record + saves.
 func (s *StateStore) RemoveMCPCapability(name string) error {
 	delete(s.state.MCPCapabilities, name)
