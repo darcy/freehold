@@ -1251,17 +1251,28 @@ func (s *Spec) moveLitellmKeyRecord(oldPod, newPod string) error {
 		return err
 	}
 	oldKey, newKey := litellmAgentKeyEnvKey(oldPod), litellmAgentKeyEnvKey(newPod)
-	v, ok := env[oldKey]
-	if !ok || v == "" {
-		return nil
+	movedModel := false
+	if v, ok := env[oldKey]; ok && v != "" {
+		delete(env, oldKey)
+		env[newKey] = v
+		movedModel = true
 	}
-	delete(env, oldKey)
-	env[newKey] = v
 	// The agent's MCP-only key follows the same rename (the record rides the
-	// agent, not the pod name).
+	// agent, not the pod name) — AND the gateway-side alias is rewritten:
+	// the MCP fleet sweep classifies keys by alias, so a stale alias reads
+	// as an orphaned key and would strip the renamed agent's MCP grants on
+	// every build (renameMCPKeyAlias fails the rename loudly instead). The
+	// mcptool record moves INDEPENDENT of the model key's.
 	if mv := mcptoolKeyEnvKey(oldPod); env[mv] != "" {
 		env[mcptoolKeyEnvKey(newPod)] = env[mv]
 		delete(env, mv)
+		if err := s.saveLitellmStoreEnv(path, secret, env); err != nil {
+			return err
+		}
+		return s.renameMCPKeyAlias(newPod)
+	}
+	if !movedModel {
+		return nil
 	}
 	return s.saveLitellmStoreEnv(path, secret, env)
 }

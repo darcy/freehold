@@ -102,6 +102,7 @@ func (g *mcpKeyGateway) handler(t *testing.T) http.Handler {
 		case r.Method == http.MethodPost && r.URL.Path == "/key/update":
 			var body struct {
 				Key              string                 `json:"key"`
+				KeyAlias         string                 `json:"key_alias"`
 				ObjectPermission map[string]interface{} `json:"object_permission"`
 			}
 			_ = json.Unmarshal(raw, &body)
@@ -110,7 +111,12 @@ func (g *mcpKeyGateway) handler(t *testing.T) http.Handler {
 				w.WriteHeader(http.StatusNotFound)
 				return
 			}
-			rec.perm = body.ObjectPermission
+			if body.KeyAlias != "" {
+				rec.alias = body.KeyAlias
+			}
+			if body.ObjectPermission != nil {
+				rec.perm = body.ObjectPermission
+			}
 			w.Write([]byte(`{"key_alias":` + js(rec.alias) + `,"object_permission":` + jsAny(rec.perm) + `}`))
 		case r.Method == http.MethodPost && r.URL.Path == "/key/delete":
 			var body struct {
@@ -179,6 +185,17 @@ func js(s string) string {
 func jsAny(v any) string {
 	b, _ := json.Marshal(v)
 	return string(b)
+}
+
+// keyInfoFor returns a token's stored permission record via the info path.
+func (g *mcpKeyGateway) keyInfoFor(token string) (string, map[string]interface{}, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	rec := g.byToken[token]
+	if !g.liveDB || rec == nil {
+		return "", nil, fmt.Errorf("HTTP 404")
+	}
+	return rec.alias, rec.perm, nil
 }
 
 // denyList reads a record's mcp_servers list (nil = absent/open).
@@ -554,5 +571,53 @@ func TestStageLitellmMCPWired(t *testing.T) {
 	}
 	if !strings.Contains(rep, "1 MCP servers ensured") {
 		t.Fatalf("stage report = %q", rep)
+	}
+}
+
+// TestRenameMCPKeyAliasFollowsAgent: a rename moves the store record AND
+// rewrites the gateway's key_alias — the fleet sweep classifies by alias, so
+// a stale alias would read as an orphaned key and strip the renamed agent's
+// MCP grants on every build.
+func TestRenameMCPKeyAliasFollowsAgent(t *testing.T) {
+	dir := t.TempDir()
+	stateDir := dir + "/agent-tools"
+	litellmFixture(t, stateDir, "master-key", "provider-key", "openai", "gpt-4o")
+	store := seededMCPStore(t, stateDir)
+	seedAgents(t, store, "Helper")
+	gw := newMCPKeyGateway()
+	srv := httptest.NewServer(gw.handler(t))
+	defer srv.Close()
+	spec := &Spec{StateDir: stateDir, LitellmBaseURL: srv.URL + "/v1"}
+
+	token, _, err := spec.ensureAgentMCPKey("Helper", store)
+	if err != nil {
+		t.Fatalf("mint: %v", err)
+	}
+	if err := spec.moveLitellmKeyRecord("helper", "renamed"); err != nil {
+		t.Fatalf("rename: %v", err)
+	}
+	// The store record moved...
+	if env := storeEnvForTest(t, stateDir); env[mcptoolKeyEnvKey("helper")] != "" || env[mcptoolKeyEnvKey("renamed")] != token {
+		t.Fatalf("the store record must move with the agent")
+	}
+	// ...and the gateway alias was rewritten to the new pod (found via a
+	// /key/info lookup by the token).
+	_, perm, err := gw.keyInfoFor(token)
+	if err != nil {
+		t.Fatalf("info after rename: %v", err)
+	}
+	if perm == nil {
+		t.Fatalf("the renamed key must stay live")
+	}
+	gw.mu.Lock()
+	alias := ""
+	for _, rec := range gw.byToken {
+		if rec.token == token {
+			alias = rec.alias
+		}
+	}
+	gw.mu.Unlock()
+	if alias != "mcptool-renamed" {
+		t.Fatalf("gateway alias = %q, want mcptool-renamed", alias)
 	}
 }

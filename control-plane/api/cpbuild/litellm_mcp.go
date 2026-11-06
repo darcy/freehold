@@ -265,6 +265,32 @@ func (s *Spec) ensureAgentMCPKey(name string, store *state.StateStore) (token, d
 	return token, "", nil
 }
 
+// renameMCPKeyAlias normalizes the gateway-side key_alias after an agent
+// rename. moveLitellmKeyRecord moves the STORE record (the token follows the
+// agent), but the gateway's copy keeps alias mcptool-<oldpod> — and the
+// fleet sweep classifies keys BY ALIAS, so a stale alias reads as an
+// orphaned key: the sweep would strip the renamed agent's MCP grants on
+// every build and report bogus drift. The rename therefore rewrites the
+// alias in the same breath; a gateway failure fails the rename loudly (a
+// silently stale alias would surface as the sweep's bogus drift instead).
+// No record / no gateway / a key never minted = a no-op.
+func (s *Spec) renameMCPKeyAlias(newPod string) error {
+	ls, err := s.openLitellmMCPStore()
+	if err != nil || ls == nil {
+		return err
+	}
+	token := ls.env[mcptoolKeyEnvKey(newPod)]
+	if token == "" {
+		return nil
+	}
+	if _, err := ls.call(http.MethodPost, "/key/update", map[string]interface{}{
+		"key": token, "key_alias": "mcptool-" + newPod,
+	}); err != nil {
+		return fmt.Errorf("rename mcptool key alias: %w", err)
+	}
+	return nil
+}
+
 // revokeAgentMCPKey deletes the agent's MCP-only gateway key by its stored
 // TOKEN and drops the store record (ensure-revoked: 200 or 404 both clear,
 // so a gateway that lost its DB cannot wedge a remove). A world without
