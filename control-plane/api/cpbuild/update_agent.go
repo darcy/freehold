@@ -260,6 +260,13 @@ func BuildRemoveAgentFn(spec *Spec) agent.RemoveAgentFn {
 		if err := spec.revokeAgentLitellmKey(name); err != nil {
 			return "", fmt.Errorf("%s %s: revoking the litellm key FAILED (%v) — the registry row is untouched; retry once the gateway answers", verb, name, err)
 		}
+		// The MCP-only key dies in the same breath: an orphaned mcptool key
+		// keeps its full MCP grant set live on the gateway until the next
+		// build's sweep stamps it — an unbounded window for a credential the
+		// agent's pod will never hold again.
+		if err := spec.revokeAgentMCPKey(name); err != nil {
+			return "", fmt.Errorf("%s %s: revoking the MCP key FAILED (%v) — the registry row is untouched; retry once the gateway answers", verb, name, err)
+		}
 		if err := spec.run(agent.AgentRetireScript(spec.K3sVmid, name), 120); err != nil {
 			return "", fmt.Errorf("%s %s: retiring the pod FAILED (%v) — the registry row is untouched; its gateway key is already revoked, and a later reconcile mints fresh and heals the pod's Secret; fix the k3s guest and retry, or drop the row from the console if the pod is already gone", verb, name, err)
 		}

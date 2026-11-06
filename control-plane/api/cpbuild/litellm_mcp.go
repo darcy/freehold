@@ -495,7 +495,12 @@ func (s *Spec) sweepLitellmMCPAccess(store *state.StateStore) (string, error) {
 	for _, hash := range list.Keys {
 		alias, perm, err := ls.keyInfo(hash)
 		if err != nil {
-			continue // a dead hash (wiped row mid-sweep) — skip, never fail the sweep
+			// A dead hash (a wiped row mid-sweep) is skippable; a LIVE key
+			// that reads back 5xx could be holding widened MCP grants — say
+			// so in the report rather than skipping silently (the sweep
+			// re-runs next build).
+			report = append(report, fmt.Sprintf("key %s… UNREADABLE (%v) — the sweep re-runs next build", hash[:8], err))
+			continue
 		}
 		switch {
 		case strings.HasPrefix(alias, "agentkey-"):
