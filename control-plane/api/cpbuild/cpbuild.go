@@ -2849,7 +2849,8 @@ func (s *Spec) revokeOrgWideMemberships(name string) error {
 	return nil
 }
 
-func BuildCreateAgentFn(spec *Spec) agent.CreateAgentFn {	return func(name, purpose string, channels []string, private bool, model string) (string, error) {
+func BuildCreateAgentFn(spec *Spec) agent.CreateAgentFn {
+	return func(name, purpose string, channels []string, private bool, model string) (string, error) {
 		model = litellmModelFor(spec.CpaName, name, model)
 		if name == "" {
 			return "", fmt.Errorf("create-agent needs a non-empty name")
