@@ -819,6 +819,15 @@ func (s *Spec) grantCapability(args agent.CapabilityGrantArgs, callerIsOperator 
 		}
 	}
 	if len(changes) == 0 {
+		// The record already holds the desired roster — but a PRIOR call may
+		// have failed at its key-rewrite leg (the record landed, the key
+		// write didn't): a retry must converge the NAMED agents' keys, not
+		// just report the no-op.
+		for _, g := range dedupNonBlank(append(append([]string(nil), add...), drop...)) {
+			if _, _, err := s.ensureAgentMCPKey(g, store); err != nil {
+				return "", fmt.Errorf("rewrite %s's MCP key: %w", g, err)
+			}
+		}
 		return fmt.Sprintf("grant_capability %s: nothing to change (the roster is [%s])", name, strings.Join(rec.Grantees, ", ")), nil
 	}
 	rec.Grantees = sortedKeys(grants)
