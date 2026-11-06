@@ -39,6 +39,7 @@ type DeployCpSpec struct {
 	AgentToolsPubkey *string
 	WorldConfig      *string // cpbuild.Coords JSON (bounds the console as the CP build executor)
 	AgentToolsBinary *string // local freehold-agent-tools binary, shipped so the console's world_build can deploy it
+	MCPSheetsBinary  *string // local freehold-mcp-sheets binary, shipped for the MCP capability plane's services
 	// The VERB SURFACE: the freehold CLI + the profile config + a cp-verb SSH
 	// key, shipped so the data verbs (`freehold snapshot`/`export`) run ON the
 	// CP guest — the cp-local-root runner execs them for the data department.
@@ -285,8 +286,15 @@ func shipConsoleBins(t Transport, spec *DeployCpSpec) error {
 	if err := stopBinary(t, spec, "freehold-agent-tools", "stop agent-tools process"); err != nil {
 		return err
 	}
-	return shipFile(t, spec, *spec.AgentToolsBinary,
-		spec.BinDir+"/freehold-agent-tools", "agent-tools binary")
+	if err := shipFile(t, spec, *spec.AgentToolsBinary,
+		spec.BinDir+"/freehold-agent-tools", "agent-tools binary"); err != nil {
+		return err
+	}
+	if spec.MCPSheetsBinary == nil || *spec.MCPSheetsBinary == "" {
+		return nil
+	}
+	return shipFile(t, spec, *spec.MCPSheetsBinary,
+		spec.BinDir+"/freehold-mcp-sheets", "mcp-sheets binary")
 }
 
 // seedOperatorTZ writes this box's timezone (the operator's, since the CLI

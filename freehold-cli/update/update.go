@@ -126,6 +126,7 @@ func run(ctx context.Context, o options) error {
 		ReleaseConsole:    set.Console,
 		ReleaseRun:        set.Runner,
 		ReleaseAgentTools: set.AgentTools,
+		ReleaseMCPSheets:  set.MCPSheets,
 	}
 
 	eng, err := box.NewEngine(box.FlagsFromConfig(cfg), bins)

@@ -719,6 +719,15 @@ func (s *Spec) provisionMCP(args agent.ProvisionMCPArgs, callerIsOperator bool, 
 		if args.ServicePort <= 0 || args.ServicePort > 65535 {
 			return "", fmt.Errorf("provision_mcp %s: service_port is required for a slotted capability (the MCP service's port)", name)
 		}
+		// The service pod is hostNetwork — its port is the NODE's port
+		// space, shared across every slotted capability (and the node's own
+		// listeners). A second capability claiming the same port would bind
+		// second and crash-loop.
+		for other, orec := range store.MCPCapabilityRecords() {
+			if other != name && orec.Namespace != "" && orec.ServicePort == args.ServicePort {
+				return "", fmt.Errorf("provision_mcp %s: service_port %d is already %s's (the service pods are hostNetwork — the port space is the node's, shared across capabilities)", name, args.ServicePort, other)
+			}
+		}
 		if strings.TrimSpace(args.SecretRef) == "" {
 			return "", fmt.Errorf("provision_mcp %s: secret_ref is required for a slotted capability — the broker token's secret name in the slot runner's package (the service MUST answer only its broker; the CP generates + seals the token, credential-blind)", name)
 		}
@@ -777,18 +786,10 @@ func (s *Spec) provisionMCP(args agent.ProvisionMCPArgs, callerIsOperator bool, 
 		pending[g] = true
 	}
 	rec.Grantees = append([]string(nil), grantTo...)
-	if err := store.InsertMCPCapability(name, rec); err != nil {
-		return "", fmt.Errorf("record MCP capability: %w", err)
-	}
-
-	if err := s.registerLiteLLMMServer(store, rec); err != nil {
-		return "", err
-	}
-
-	// Grant each grantee — and take back from every FORMER grantee the
-	// narrowed roster dropped (a re-provision's take-back lands WITH the
-	// call, not at the next build's sweep; the record narrows silently
-	// otherwise while the dropped agent keeps access).
+	// Compute the take-back set HERE and save it with THIS record write: a
+	// re-granted pending agent clears; a narrowed roster's drops land
+	// PENDING. The re-save after the legs persists the OUTCOME
+	// (stillPending) whenever legs ran.
 	dropped := []string{}
 	for _, g := range prevGrantees {
 		if !containsRoster(grantTo, g) && !pending[g] {
@@ -803,6 +804,18 @@ func (s *Spec) provisionMCP(args agent.ProvisionMCPArgs, callerIsOperator bool, 
 		}
 	}
 	rec.PendingTakeBacks = append([]string(nil), dropped...)
+	if err := store.InsertMCPCapability(name, rec); err != nil {
+		return "", fmt.Errorf("record MCP capability: %w", err)
+	}
+
+	if err := s.registerLiteLLMMServer(store, rec); err != nil {
+		return "", err
+	}
+
+	// Grant each grantee — and take back from every FORMER grantee the
+	// narrowed roster dropped (the dropped set was computed + persisted
+	// above; a take-back lands WITH the call, not at the next build's
+	// sweep).
 	granted := []string{}
 	for _, g := range grantTo {
 		if _, _, err := s.ensureAgentMCPKey(g, store); err != nil {
