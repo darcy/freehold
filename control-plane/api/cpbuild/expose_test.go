@@ -845,7 +845,7 @@ func TestExposePangolinSealsTheNewtSecret(t *testing.T) {
 		case "/v1/org/freehold/sites":
 			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"sites":[]}}`))
 		case "/v1/org/freehold/site":
-			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"siteId":5,"name":"librem","type":"newt","newtId":"noo9","newtSecret":"one-time-sek","address":"100.90.0.0/16"}}`))
+			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"siteId":5,"name":"librem","type":"newt","newtId":"noo9","secret":"one-time-sek","address":"100.90.0.0/16"}}`))
 		case "/v1/org/freehold/domains":
 			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"domains":[{"domainId":"domain1","baseDomain":"librem.example.test","verified":true}]}}`))
 		case "/v1/org/freehold/resources":
