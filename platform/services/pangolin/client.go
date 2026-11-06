@@ -426,6 +426,9 @@ func (c *Client) EnsureRole(ctx context.Context, orgID, name string) (int, error
 // SetAccessControl sets a resource's auth posture: SSO on/off, the roles
 // allowed, and (SSO) the IdP to skip straight to. Idempotent.
 func (c *Client) SetAccessControl(ctx context.Context, resourceID int, sso bool, roleIDs []int, skipToIDPID int) error {
+	if roleIDs == nil {
+		roleIDs = []int{} // the API requires an array, never null
+	}
 	body := map[string]interface{}{"sso": sso, "userIds": []string{}, "roleIds": roleIDs}
 	if skipToIDPID != 0 {
 		body["skipToIdpId"] = skipToIDPID
