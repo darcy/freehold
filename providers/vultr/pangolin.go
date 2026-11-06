@@ -46,11 +46,11 @@ mkdir -p /srv/pangolin/config/traefik /srv/pangolin/config/letsencrypt
 # shell from command-substituting them (an unquoted one ran the host as a
 # command and emitted Host() — no router, no cert, no tunnel). Re-rendered
 # every run, so a payload fix lands on an existing instance.
-cat > /srv/pangolin/docker-compose.yaml <<'COMPOSE'
+cat > /srv/pangolin/docker-compose.yaml <<"COMPOSE"
 %sCOMPOSE
-cat > /srv/pangolin/config/traefik/traefik_config.yml <<'TRK'
+cat > /srv/pangolin/config/traefik/traefik_config.yml <<"TRK"
 %sTRK
-cat > /srv/pangolin/config/traefik/dynamic_config.yml <<'DYN'
+cat > /srv/pangolin/config/traefik/dynamic_config.yml <<"DYN"
 %sDYN
 if [ -f /srv/pangolin/root-key.env ] && docker ps --format "{{.Names}}" 2>/dev/null | grep -q pangolin && curl -sf http://localhost:3003/v1/org/freehold/sites -H "Authorization: Bearer $(cat /srv/pangolin/root-key.env)" >/dev/null 2>&1; then
   echo "PANGOLIN_ROOT_KEY=$(cat /srv/pangolin/root-key.env)"
