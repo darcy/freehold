@@ -46,13 +46,22 @@ jobs:
       contents: read
     steps:
       # The explored repo AND the executed code — under `pull_request_target`
-      # this checkout IS the base repo's default branch (trusted main). No
-      # second checkout exists: there is nothing to separate it from.
-      # persist-credentials: false — the default writes the token into this
-      # tree's .git/config, a file inside the harness's read scope; the rule
-      # holds regardless of what is checked out.
+      # this checkout is the PR's BASE BRANCH: the default branch for an
+      # ordinary PR, or the integration branch a PR targets (e.g. a long-lived
+      # `mcp` branch). A base branch is TRUSTED code — it holds only
+      # previously-reviewed + merged content — so the invariant is unchanged:
+      # nothing from an unreviewed head is ever checked out, let alone
+      # executed. (Checking out the base rather than ALWAYS the default
+      # branch is what lets a PR against an integration branch review against
+      # a tree that carries the PRs it builds on — a default-branch-only
+      # checkout would compile-fail on any symbol that exists only on the
+      # integration branch.) No second checkout exists: there is nothing to
+      # separate it from. persist-credentials: false — the default writes the
+      # token into this tree's .git/config, a file inside the harness's read
+      # scope; the rule holds regardless of what is checked out.
       - uses: actions/checkout@v6
         with:
+          ref: ${{ github.event.pull_request.base.ref }}
           fetch-depth: 1
           persist-credentials: false
 
