@@ -380,9 +380,18 @@ func (c *Client) EnsureOIDCIDP(ctx context.Context, name, clientID, clientSecret
 // mapping (a JMESPath expression; "'family'" maps every admitted key to the
 // family role). Idempotent (PUT).
 func (c *Client) AssignIDPOrg(ctx context.Context, idpID int, orgID, roleMapping string) error {
-	return c.do(ctx, http.MethodPut, fmt.Sprintf("/v1/idp/%d/org/%s", idpID, orgID), map[string]string{
-		"roleMapping": roleMapping,
-	}, nil)
+	path := fmt.Sprintf("/v1/idp/%d/org/%s", idpID, orgID)
+	body := map[string]string{"roleMapping": roleMapping}
+	err := c.do(ctx, http.MethodPut, path, body, nil)
+	if err == nil {
+		return nil
+	}
+	// PUT is create-only: an existing policy is updated with POST (the ensure
+	// runs every build).
+	if !strings.Contains(err.Error(), "already exists") {
+		return err
+	}
+	return c.do(ctx, http.MethodPost, path, body, nil)
 }
 
 // Role is one org role (the access unit for resources).
