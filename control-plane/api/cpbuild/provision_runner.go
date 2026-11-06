@@ -170,11 +170,16 @@ func BuildProvisionRunner(spec *Spec, reg *agenttools.Registry) agent.ProvisionR
 		if strings.HasPrefix(name, "cloudflare-api-") {
 			return "", fmt.Errorf("provision_runner %s: the cloudflare-api- prefix is reserved (per-zone DNS doors are operator-owned)", name)
 		}
-
 		cpState := spec.consoleStateDir()
 		store, err := state.Open(cpState)
 		if err != nil {
 			return "", fmt.Errorf("open CP state: %w", err)
+		}
+		// The one-plane rule, symmetric with provision_mcp's: a name that is
+		// already an MCP capability cannot also be a runner door (the
+		// grant/revoke surface would resolve it ambiguously).
+		if _, isMCP := store.GetMCPCapability(name); isMCP {
+			return "", fmt.Errorf("provision_runner %s: the name is already an MCP capability — pick a different name (a capability name lives on one plane)", name)
 		}
 		// A retired door's name is refused to the agent surface, read BEFORE the
 		// runner-row guards: after a retire the row survives as REVOKED, so the

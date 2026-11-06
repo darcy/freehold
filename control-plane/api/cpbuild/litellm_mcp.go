@@ -784,6 +784,9 @@ func (s *Spec) provisionMCP(args agent.ProvisionMCPArgs, callerIsOperator bool, 
 
 	report := fmt.Sprintf("mcp capability %s (%s → %s) registered on the gateway and granted to [%s].",
 		name, transport, rec.URL, strings.Join(granted, ", "))
+	if len(dropped) > 0 {
+		report += fmt.Sprintf("\nTaken back from [%s] (the narrowed roster) — their keys were rewritten with the call.", strings.Join(dropped, ", "))
+	}
 	if slotted {
 		if rec.SecretRef != "" {
 			report += fmt.Sprintf("\nThe MCP service itself deploys into the %s slot (kube-api-%s) — its Secret carries the broker token sealed from the CP (sealed into kube-api-%s's package as %q); the service owner stands the Deployment + Service up (manifests in the capability's record shape).", ns, ns, ns, rec.SecretRef)
