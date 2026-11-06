@@ -2,10 +2,10 @@ name: Bot Review
 
 on:
   # `pull_request_target` ONLY — for every PR (same-repo, fork, Dependabot's;
-  # no routing `if:`). Under this event the workflow YAML that runs always
-  # comes from the base repo's default branch, so a PR can never rewrite the
-  # `run:` blocks that review it — a `pull_request` trigger would re-open
-  # exactly that hole (its YAML is the PR's merge-ref copy). The event context
+  # no routing `if:`). Under this event the workflow YAML that runs comes from
+  # the PR's BASE branch (the default branch for an ordinary PR), so a PR can
+  # never rewrite the `run:` blocks that review it — a `pull_request` trigger
+  # would re-open exactly that hole (its YAML is the PR's merge-ref copy). The event context
   # carries the base repo's secrets, which review.mjs needs to post; a
   # fork/Dependabot-initiated `pull_request` run would get a read-only token
   # and no secrets, so there is nothing to route back to it for.
