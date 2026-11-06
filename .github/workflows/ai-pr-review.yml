@@ -9,7 +9,9 @@ on:
   # carries the base repo's secrets, which review.mjs needs to post; a
   # fork/Dependabot-initiated `pull_request` run would get a read-only token
   # and no secrets, so there is nothing to route back to it for.
-  # The event checkout below is the default branch (trusted main) — the
+  # The event checkout below is the PR's base branch (trusted: it holds only
+  # previously-reviewed + merged content — the default branch for an ordinary
+  # PR, the integration branch for one that targets it) — the
   # scripts, npm deps, and prompt template all run from it, and the agent
   # explores that same tree with read-only tools. The reviewed diff is fetched
   # over the API (`pulls.listFiles`). Nothing from an unreviewed head is ever
@@ -80,9 +82,10 @@ jobs:
       # surface. The package's postinstall downloads the platform binary —
       # npm's allowScripts gate must permit it or the shim exits 1 with no
       # binary behind it.
-      # working-directory is the checked-out default branch: npm reads
-      # ./.npmrc from the cwd, so the checkout this runs against must stay a
-      # trusted-main checkout (it is — see the checkout step above).
+      # working-directory is the checked-out base branch (trusted — see the
+      # checkout step above): npm reads ./.npmrc from the cwd, so the checkout
+      # this runs against must stay a trusted, previously-reviewed tree (it
+      # is — a base branch holds only merged content).
       - name: Install opencode
         working-directory: .github/scripts/ai-review
         run: npm install -g --allow-scripts=@opencode/cli @opencode/cli@2.0.18
