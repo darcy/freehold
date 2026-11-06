@@ -53,6 +53,15 @@ cat > /srv/pangolin/config/traefik/traefik_config.yml <<"TRK"
 cat > /srv/pangolin/config/traefik/dynamic_config.yml <<"DYN"
 %sDYN
 if [ -f /srv/pangolin/root-key.env ] && docker ps --format "{{.Names}}" 2>/dev/null | grep -q pangolin && curl -sf http://localhost:3003/v1/org/freehold/sites -H "Authorization: Bearer $(cat /srv/pangolin/root-key.env)" >/dev/null 2>&1; then
+  # Re-assert the key's actions: the payload's grant list grows over time, and
+  # a re-run must heal an existing instance (a key without the SSO/policy
+  # actions fails the world's public-path ensure with 403s).
+  if [ -f /srv/pangolin/admin.env ]; then
+    . /srv/pangolin/admin.env
+    LOGIN=$(curl -s -c /srv/pangolin/admin.cookies -X POST http://localhost:3000/api/v1/auth/login -H "Content-Type: application/json" -H "X-CSRF-Token: x-csrf-protection" -d "{\"email\":\"$ADMIN_EMAIL\",\"password\":\"$ADMIN_PW\"}")
+    echo "$LOGIN" | grep -q "\"success\":true" && KEY_ID=$(cut -d. -f1 /srv/pangolin/root-key.env) && curl -sf -b /srv/pangolin/admin.cookies -X POST http://localhost:3000/api/v1/api-key/$KEY_ID/actions -H "Content-Type: application/json" -H "X-CSRF-Token: x-csrf-protection" -d "{\"actionIds\":[\"createOrg\",\"createSite\",\"deleteSite\",\"createResource\",\"deleteResource\",\"createTarget\",\"deleteTarget\",\"getSite\",\"getResource\",\"listSites\",\"listResources\",\"listTargets\",\"getDomain\",\"listOrgDomains\",\"generateAccessToken\",\"updateResource\",\"createRole\",\"listRoles\",\"createIdp\",\"createIdpOrg\",\"setResourcePolicyUsers\",\"setResourcePolicyRoles\",\"createResourceRule\",\"listResourceRules\"]}" >/dev/null 2>&1 || true
+    rm -f /srv/pangolin/admin.cookies
+  fi
   echo "PANGOLIN_ROOT_KEY=$(cat /srv/pangolin/root-key.env)"
   echo pangolin-install-ok
   exit 0
@@ -103,7 +112,7 @@ KEY_JSON=$(curl -s -b /srv/pangolin/admin.cookies -X PUT http://localhost:3000/a
 KEY_ID=$(echo "$KEY_JSON" | tr ",{}" "\n" | grep apiKeyId | sed "s/.*://; s/\"//g")
 KEY_SECRET=$(echo "$KEY_JSON" | tr ",{}" "\n" | grep -w apiKey | sed "s/.*://; s/\"//g")
 if [ -z "$KEY_ID" ] || [ -z "$KEY_SECRET" ]; then echo "PANGOLIN_KEY_JSON=$KEY_JSON"; echo pangolin-key-mint-failed; exit 1; fi
-GRANT=$(curl -sf -b /srv/pangolin/admin.cookies -X POST http://localhost:3000/api/v1/api-key/$KEY_ID/actions -H "Content-Type: application/json" -H "X-CSRF-Token: x-csrf-protection" -d "{\"actionIds\":[\"createOrg\",\"createSite\",\"deleteSite\",\"createResource\",\"deleteResource\",\"createTarget\",\"deleteTarget\",\"getSite\",\"getResource\",\"listSites\",\"listResources\",\"listTargets\",\"getDomain\",\"listOrgDomains\",\"generateAccessToken\",\"updateResource\"]}") || { echo pangolin-actions-grant-failed; exit 1; }
+GRANT=$(curl -sf -b /srv/pangolin/admin.cookies -X POST http://localhost:3000/api/v1/api-key/$KEY_ID/actions -H "Content-Type: application/json" -H "X-CSRF-Token: x-csrf-protection" -d "{\"actionIds\":[\"createOrg\",\"createSite\",\"deleteSite\",\"createResource\",\"deleteResource\",\"createTarget\",\"deleteTarget\",\"getSite\",\"getResource\",\"listSites\",\"listResources\",\"listTargets\",\"getDomain\",\"listOrgDomains\",\"generateAccessToken\",\"updateResource\",\"createRole\",\"listRoles\",\"createIdp\",\"createIdpOrg\",\"setResourcePolicyUsers\",\"setResourcePolicyRoles\",\"createResourceRule\",\"listResourceRules\"]}") || { echo pangolin-actions-grant-failed; exit 1; }
 echo "$GRANT" | grep -q "\"success\":true" || { echo "PANGOLIN_GRANT_JSON=$GRANT"; echo pangolin-actions-grant-failed; exit 1; }
 ORG_JSON=$(curl -s -X PUT http://localhost:3003/v1/org -H "Authorization: Bearer $KEY_ID.$KEY_SECRET" -H "Content-Type: application/json" -d "{\"orgId\":\"freehold\",\"name\":\"freehold\",\"subnet\":\"100.90.0.0/16\",\"utilitySubnet\":\"100.91.0.0/24\"}")
 if ! echo "$ORG_JSON" | grep -q orgId; then
