@@ -38,6 +38,13 @@ func TestPangolinInstallScriptRendersTheWorld(t *testing.T) {
 	}
 	// The edge's own dashboard/API routers: without them Traefik has no
 	// router for pangolin.<world>, issues no cert, and Newt never connects.
+	// QUOTED heredocs: the YAML's rule backticks are literal — an unquoted
+	// heredoc command-substitutes them and emits Host() (no router).
+	for _, want := range []string{"<<'DYN'", "<<'TRK'", "<<'COMPOSE'"} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("the static renders must use a quoted heredoc: missing %q", want)
+		}
+	}
 	for _, want := range []string{
 		"main-app-router-redirect", "next-router", "api-router", "ws-router",
 		"Host(`pangolin.librem.example.test`)", "certResolver: letsencrypt",

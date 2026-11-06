@@ -41,6 +41,17 @@ func PangolinInstallScript(worldDomain, email string) string {
 	traefik := pangolinTraefikConf(email)
 	dynamic := pangolinDynamicConf(worldDomain)
 	return fmt.Sprintf(`set -e
+mkdir -p /srv/pangolin/config/traefik /srv/pangolin/config/letsencrypt
+# The static renders carry Traefik rule BACKTICKS: a QUOTED heredoc keeps the
+# shell from command-substituting them (an unquoted one ran the host as a
+# command and emitted Host() — no router, no cert, no tunnel). Re-rendered
+# every run, so a payload fix lands on an existing instance.
+cat > /srv/pangolin/docker-compose.yaml <<'COMPOSE'
+%sCOMPOSE
+cat > /srv/pangolin/config/traefik/traefik_config.yml <<'TRK'
+%sTRK
+cat > /srv/pangolin/config/traefik/dynamic_config.yml <<'DYN'
+%sDYN
 if [ -f /srv/pangolin/root-key.env ] && docker ps --format "{{.Names}}" 2>/dev/null | grep -q pangolin && curl -sf http://localhost:3003/v1/org/freehold/sites -H "Authorization: Bearer $(cat /srv/pangolin/root-key.env)" >/dev/null 2>&1; then
   echo "PANGOLIN_ROOT_KEY=$(cat /srv/pangolin/root-key.env)"
   echo pangolin-install-ok
@@ -55,17 +66,10 @@ echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.
 apt-get update -qq >/dev/null 2>&1 || true
 apt-get install -y -qq docker-ce docker-compose-plugin >/dev/null 2>&1
 systemctl enable --now docker >/dev/null 2>&1 || true
-mkdir -p /srv/pangolin/config/traefik /srv/pangolin/config/letsencrypt
-cat > /srv/pangolin/docker-compose.yaml <<COMPOSE
-%sCOMPOSE
 if [ ! -f /srv/pangolin/config/config.yml ]; then
 cat > /srv/pangolin/config/config.yml <<CONF
 %sCONF
 fi
-cat > /srv/pangolin/config/traefik/traefik_config.yml <<TRK
-%sTRK
-cat > /srv/pangolin/config/traefik/dynamic_config.yml <<DYN
-%sDYN
 cd /srv/pangolin && docker compose up -d 2>/dev/null || docker-compose up -d
 for i in $(seq 1 60); do
   curl -sf http://localhost:3000/api/v1/ >/dev/null 2>&1 && break
