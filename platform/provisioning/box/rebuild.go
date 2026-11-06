@@ -1482,6 +1482,10 @@ func mergeFromAnswers(ans *config.Config, prev *config.Config) *config.Config {
 	cfg.WorldDomain = prev.WorldDomain
 	cfg.Edge = prev.Edge
 	cfg.Pangolin = prev.Pangolin
+	// The Pangolin VPS handle is the BILL's record: dropping it on a build
+	// orphans a live, billing instance (the next `freehold pangolin` mints a
+	// second one beside it, and uninstall can no longer destroy it).
+	cfg.PangolinHost = prev.PangolinHost
 	// The post-world recorder (recordPostWorld) persists the coords + sections
 	// world_build established to disk; finalSave rebuilds from answers and must
 	// keep them (like Plane) or it would silently erase them on every run —
