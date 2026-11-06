@@ -53,9 +53,9 @@ cat > /srv/pangolin/config/traefik/traefik_config.yml <<"TRK"
 cat > /srv/pangolin/config/traefik/dynamic_config.yml <<"DYN"
 %sDYN
 if [ -f /srv/pangolin/root-key.env ] && docker ps --format "{{.Names}}" 2>/dev/null | grep -q pangolin && curl -sf http://localhost:3003/v1/org/freehold/sites -H "Authorization: Bearer $(cat /srv/pangolin/root-key.env)" >/dev/null 2>&1; then
-  # Re-assert the key's actions: the payload's grant list grows over time, and
+  # Re-assert the key actions: the payload grant list grows over time, and
   # a re-run must heal an existing instance (a key without the SSO/policy
-  # actions fails the world's public-path ensure with 403s).
+  # actions fails the world public-path ensure with 403s).
   if [ -f /srv/pangolin/admin.env ]; then
     . /srv/pangolin/admin.env
     LOGIN=$(curl -s -c /srv/pangolin/admin.cookies -X POST http://localhost:3000/api/v1/auth/login -H "Content-Type: application/json" -H "X-CSRF-Token: x-csrf-protection" -d "{\"email\":\"$ADMIN_EMAIL\",\"password\":\"$ADMIN_PW\"}")
