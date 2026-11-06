@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"freehold/control-plane/api/agent"
+	"freehold/control-plane/api/agenttools"
 	provisioner "freehold/control-plane/secret-management"
 	"freehold/control-plane/state"
 )
@@ -620,4 +621,358 @@ func (s *Spec) stageLitellmMCP(store *state.StateStore) (string, error) {
 		report = append(report, "MCP DRIFT overwritten:\n"+drift)
 	}
 	return strings.Join(report, "\n"), nil
+}
+
+// provision_mcp — the MCP plane's grant-giving flow, the sibling of
+// provision_runner: the operator/CPA asks in conversation ("give Wanda my
+// Q4 sheet, read-only"), the CPA calls this, and the capability is
+// registered + granted in one auditable step. The guards mirror the runner
+// flow's: kebab-case name, the transport/URL/secret shapes per slotted vs
+// external, grantees must be registry agents, an operator-origin record is
+// not the CPA's to re-provision, and a retired name is refused until an
+// operator re-enables it. The credential-blind rule holds: NO secret rides
+// the call — the broker token is CP-generated and sealed; the service's own
+// Google SA key never enters this flow at all.
+//
+// The SLOTTED shape's URL is CP-DERIVED — an agent-stated endpoint would
+// hand the broker token to a server the agent controls (the kube-slot
+// rule). The EXTERNAL shape's URL is the thing being stated, and it carries
+// no freehold credential (secret_ref is refused with it).
+func (s *Spec) provisionMCP(args agent.ProvisionMCPArgs, callerIsOperator bool, reg *agenttools.Registry, store *state.StateStore) (string, error) {
+	name := strings.TrimSpace(args.Name)
+	if !runnerNameRe.MatchString(name) {
+		return "", fmt.Errorf("provision_mcp: name must be kebab-case [a-z0-9-] (got %q)", args.Name)
+	}
+	transport := strings.ToLower(strings.TrimSpace(args.Transport))
+	if transport == "" {
+		transport = "http"
+	}
+	if transport != "http" && transport != "sse" {
+		return "", fmt.Errorf("provision_mcp %s: transport must be \"http\" or \"sse\" (got %q)", name, args.Transport)
+	}
+	ns := strings.TrimSpace(args.Namespace)
+	slotted := ns != ""
+
+	// The retired guard reads FIRST (the mirror of provision_runner's): an
+	// agent may not re-mint a capability it was just told to take away.
+	if _, retired := store.GetRetiredMCP(name); retired && !callerIsOperator {
+		return "", fmt.Errorf("provision_mcp %s: this capability was retired by revoke_capability — an agent may not re-mint a capability it was just told to take away; the operator re-enables the name by provisioning it again", name)
+	}
+
+	var rec state.MCPCapabilityRecord
+	if prev, ok := store.GetMCPCapability(name); ok {
+		// Re-provision: the shape is fixed at first provision (a different
+		// shape is a NEW capability, new name); an operator-origin record is
+		// not the CPA's to re-provision.
+		if !prev.AgentProvisioned() && !callerIsOperator {
+			return "", fmt.Errorf("provision_mcp %s: this capability was provisioned by the operator — it is not yours to re-provision", name)
+		}
+		if prev.Namespace != ns {
+			return "", fmt.Errorf("provision_mcp %s: namespace %q is fixed (first provisioned as %q) — a different namespace is a NEW capability (new name)", name, ns, prev.Namespace)
+		}
+		rec = prev
+	} else if !callerIsOperator {
+		if _, retired := store.GetRetiredMCP(name); retired {
+			return "", fmt.Errorf("provision_mcp %s: this capability was retired — the operator re-enables the name", name)
+		}
+	}
+
+	// The shape resolution: slotted derives its URL; external states it.
+	urlPath := "/mcp"
+	if transport == "sse" {
+		urlPath = "/sse"
+	}
+	if slotted {
+		if args.URL != "" {
+			return "", fmt.Errorf("provision_mcp %s: url is refused for a slotted capability — the CP derives it from the namespace (an agent-stated endpoint would hand the broker token to a server the agent controls)", name)
+		}
+		if err := validateKubeNS(ns); err != nil {
+			return "", fmt.Errorf("provision_mcp %s: %w", name, err)
+		}
+		if args.ServicePort <= 0 || args.ServicePort > 65535 {
+			return "", fmt.Errorf("provision_mcp %s: service_port is required for a slotted capability (the MCP service's port)", name)
+		}
+		if _, ok := store.GetRunner("kube-api-" + ns); !ok {
+			return "", fmt.Errorf("provision_mcp %s: no kube-api-%s slot door — carve the mcp slot first (Compute applies the slot manifest through kube-api-root, then provision the door)", name, ns)
+		}
+		rec.URL = fmt.Sprintf("http://%s.%s.svc.cluster.local:%d%s", name, ns, args.ServicePort, urlPath)
+		rec.Namespace = ns
+		rec.ServicePort = args.ServicePort
+		rec.SecretRef = strings.TrimSpace(args.SecretRef)
+	} else {
+		if strings.TrimSpace(args.URL) == "" {
+			return "", fmt.Errorf("provision_mcp %s: url is required for an external capability (the MCP server's endpoint)", name)
+		}
+		if strings.TrimSpace(args.SecretRef) != "" {
+			return "", fmt.Errorf("provision_mcp %s: secret_ref is a SLOTTED field — an external server carries no freehold-sealed credential", name)
+		}
+		rec.URL = strings.TrimSpace(args.URL)
+		rec.Namespace = ""
+		rec.ServicePort = 0
+		rec.SecretRef = ""
+	}
+	rec.ServerName = name
+	rec.Transport = transport
+	rec.Scope = strings.TrimSpace(args.Scope)
+	rec.Tools = dedupNonBlank(args.Tools)
+	rec.Origin = state.OriginOperator
+	if !callerIsOperator {
+		rec.Origin = state.OriginAgent
+	}
+	if rec.CreatedAt == 0 {
+		rec.CreatedAt = uint64(time.Now().Unix())
+	}
+
+	// Resolve EVERY grantee up front (the runner rule: a typo'd name must
+	// not leave a live registration + record behind).
+	grantTo := dedupNonBlank(args.GrantTo)
+	if len(grantTo) == 0 {
+		return "", fmt.Errorf("provision_mcp %s: grant_to is required (which agent does this capability belong to?)", name)
+	}
+	for _, g := range grantTo {
+		if _, err := registryRow(reg, g); err != nil {
+			return "", fmt.Errorf("provision_mcp %s: %w", name, err)
+		}
+	}
+
+	// Record BEFORE the side effects so a failure after this point heals on
+	// the next build (the record re-registers + re-grants).
+	rec.Grantees = append([]string(nil), grantTo...)
+	if err := store.InsertMCPCapability(name, rec); err != nil {
+		return "", fmt.Errorf("record MCP capability: %w", err)
+	}
+
+	if err := s.registerLiteLLMMServer(store, rec); err != nil {
+		return "", err
+	}
+
+	// Grant each grantee (their MCP key's object_permission is rewritten
+	// from CP state — which now includes this capability).
+	granted := []string{}
+	for _, g := range grantTo {
+		if _, _, err := s.ensureAgentMCPKey(g, store); err != nil {
+			return "", fmt.Errorf("grant %s → %s: %w", name, g, err)
+		}
+		granted = append(granted, g)
+	}
+
+	report := fmt.Sprintf("mcp capability %s (%s → %s) registered on the gateway and granted to [%s].",
+		name, transport, rec.URL, strings.Join(granted, ", "))
+	if slotted {
+		report += fmt.Sprintf("\nThe MCP service itself deploys into the %s slot (kube-api-%s) — its Secret carries the broker token sealed from the CP; the service owner stands the Deployment + Service up (manifests in the capability's record shape).", ns, ns)
+		if rec.SecretRef != "" {
+			report += fmt.Sprintf(" The broker token is sealed into kube-api-%s's package as %q.", ns, rec.SecretRef)
+		}
+	}
+	report += "\nVerify with the agent's MCP key (its object_permission now carries " + name + ") before claiming the capability is live."
+	return report, nil
+}
+
+// grant_capability / revoke_capability — the MCP plane's grant surface. The
+// RUNNER plane is refused with routing: a door's roster grants stay
+// operator-scoped on their existing audited surfaces (the console's grant
+// page, grant_agent, provision_runner's union-on-re-provision) — a second
+// grant path for exec seats would duplicate an audited surface for no new
+// capability. revoke_capability's runner case DELEGATES to revoke_runner's
+// audited path unchanged.
+func (s *Spec) grantCapability(args agent.CapabilityGrantArgs, callerIsOperator bool, reg *agenttools.Registry, store *state.StateStore, revoke agent.RevokeRunnerFn) (string, error) {
+	name := strings.TrimSpace(args.Name)
+	add := dedupNonBlank(args.GrantTo)
+	drop := dedupNonBlank(args.RevokeFrom)
+	if len(add) == 0 && len(drop) == 0 {
+		return "", fmt.Errorf("grant_capability %s: name at least one of grant_to / revoke_from", name)
+	}
+	if _, isRunner := store.GetCapability(name); isRunner {
+		return "", fmt.Errorf("grant_capability %s: a RUNNER door's roster grants stay operator-scoped — use the console's grant page, grant_agent (operator), or re-provision with the widened roster (the CPA's union rule); this tool grants MCP capabilities", name)
+	}
+	rec, ok := store.GetMCPCapability(name)
+	if !ok {
+		return "", fmt.Errorf("grant_capability %s: no such capability (neither an MCP capability nor a runner door)", name)
+	}
+	if !rec.AgentProvisioned() && !callerIsOperator {
+		return "", fmt.Errorf("grant_capability %s: this capability was provisioned by the operator — grants onto it stay operator-scoped", name)
+	}
+	for _, g := range append(append([]string(nil), add...), drop...) {
+		if _, err := registryRow(reg, g); err != nil {
+			return "", fmt.Errorf("grant_capability %s: %w", name, err)
+		}
+	}
+
+	grants := map[string]bool{}
+	for _, g := range rec.Grantees {
+		grants[g] = true
+	}
+	changes := []string{}
+	for _, g := range drop {
+		if grants[g] {
+			delete(grants, g)
+			changes = append(changes, "-"+g)
+		} else {
+			return "", fmt.Errorf("grant_capability %s: %s holds no grant (the roster is [%s]) — removing a non-grantee is a no-op that must be named, not a silent pass", name, g, strings.Join(rec.Grantees, ", "))
+		}
+	}
+	for _, g := range add {
+		if !grants[g] {
+			grants[g] = true
+			changes = append(changes, "+"+g)
+		}
+	}
+	if len(changes) == 0 {
+		return fmt.Sprintf("grant_capability %s: nothing to change (the roster is [%s])", name, strings.Join(rec.Grantees, ", ")), nil
+	}
+	rec.Grantees = sortedKeys(grants)
+	if err := store.InsertMCPCapability(name, rec); err != nil {
+		return "", fmt.Errorf("record grant: %w", err)
+	}
+	// Every CHANGED grantee's MCP key is rewritten from CP state (the
+	// removed agent's key drops the capability; the added one gains it).
+	affected := map[string]bool{}
+	for _, g := range append(append([]string(nil), add...), drop...) {
+		affected[g] = true
+	}
+	for g := range affected {
+		if _, _, err := s.ensureAgentMCPKey(g, store); err != nil {
+			return "", fmt.Errorf("rewrite %s's MCP key: %w", g, err)
+		}
+	}
+	return fmt.Sprintf("mcp capability %s granted [%s] (roster now [%s]); every changed grantee's MCP key was rewritten from CP state.",
+		name, strings.Join(changes, " "), strings.Join(rec.Grantees, ", ")), nil
+}
+
+func (s *Spec) revokeCapability(args agent.CapabilityGrantArgs, callerIsOperator bool, reg *agenttools.Registry, store *state.StateStore, revoke agent.RevokeRunnerFn) (string, error) {
+	name := strings.TrimSpace(args.Name)
+	// The runner plane delegates to revoke_runner's audited path unchanged.
+	if _, isRunner := store.GetCapability(name); isRunner {
+		return revoke(agent.RetireArgs{Name: name, RevokeFrom: args.RevokeFrom})
+	}
+	rec, ok := store.GetMCPCapability(name)
+	if !ok {
+		if _, retired := store.GetRetiredMCP(name); retired {
+			return "", fmt.Errorf("revoke_capability %s: already retired — the name stays refused until the operator re-enables it by provisioning the capability again", name)
+		}
+		return "", fmt.Errorf("revoke_capability %s: no such capability", name)
+	}
+	if !rec.AgentProvisioned() && !callerIsOperator {
+		return "", fmt.Errorf("revoke_capability %s: this capability was provisioned by the operator — revoking it stays operator-scoped", name)
+	}
+
+	drop := dedupNonBlank(args.RevokeFrom)
+	// Whole retirement: the record drops, the gateway registration is
+	// deleted, every grantee's MCP key is re-stamped, and the guard note
+	// keeps the name out of the agent surface until an operator re-enables
+	// it. The MCP SERVICE deployment is the owner's to remove (reported).
+	if len(drop) == 0 {
+		if err := s.deleteLiteLLMMServer(rec.ServerName); err != nil {
+			return "", err
+		}
+		formerGrantees := append([]string(nil), rec.Grantees...)
+		if err := store.RemoveMCPCapability(name); err != nil {
+			return "", err
+		}
+		if err := store.InsertRetiredMCP(name, state.RetiredCapability{
+			RevokedAt: uint64(time.Now().Unix()), RetiredBy: retiredBy(callerIsOperator),
+			LastRoster: formerGrantees,
+		}); err != nil {
+			return "", err
+		}
+		report := []string{}
+		for _, g := range formerGrantees {
+			if _, _, err := s.ensureAgentMCPKey(g, store); err != nil {
+				return "", fmt.Errorf("re-stamp %s's MCP key: %w", g, err)
+			}
+			report = append(report, "-"+g)
+		}
+		return fmt.Sprintf("mcp capability %s RETIRED: the gateway registration is deleted, the grantees' keys re-stamped [%s], the record dropped under a re-enablable guard note. The MCP service's deployment is the owner's to remove — the capability plane no longer reaches it, but a running service with its SA key is a known state, not a silent one.",
+			name, strings.Join(report, " ")), nil
+	}
+
+	// A from-the-roster removal.
+	grants := map[string]bool{}
+	for _, g := range rec.Grantees {
+		grants[g] = true
+	}
+	changed := []string{}
+	for _, g := range drop {
+		if !grants[g] {
+			return "", fmt.Errorf("revoke_capability %s: %s holds no grant (the roster is [%s]) — a no-op removal must be named, not a silent pass", name, g, strings.Join(rec.Grantees, ", "))
+		}
+		delete(grants, g)
+		changed = append(changed, "-"+g)
+	}
+	rec.Grantees = sortedKeys(grants)
+	if err := store.InsertMCPCapability(name, rec); err != nil {
+		return "", err
+	}
+	for _, g := range drop {
+		if _, _, err := s.ensureAgentMCPKey(g, store); err != nil {
+			return "", fmt.Errorf("rewrite %s's MCP key: %w", g, err)
+		}
+	}
+	return fmt.Sprintf("mcp capability %s revoked [%s] (roster now [%s]); every removed grantee's MCP key was rewritten from CP state.",
+		name, strings.Join(changed, " "), strings.Join(rec.Grantees, ", ")), nil
+}
+
+// deleteLiteLLMMServer removes the gateway's registration for a retired
+// capability (the server stops serving tools through the broker).
+func (s *Spec) deleteLiteLLMMServer(serverID string) error {
+	ls, err := s.openLitellmMCPStore()
+	if err != nil || ls == nil {
+		return err
+	}
+	if _, err := ls.call(http.MethodDelete, "/v1/mcp/server/"+url.PathEscape(serverID), nil); err != nil {
+		return fmt.Errorf("delete MCP server registration %s: %w", serverID, err)
+	}
+	return nil
+}
+
+func retiredBy(callerIsOperator bool) string {
+	if callerIsOperator {
+		return state.OriginOperator
+	}
+	return state.OriginAgent
+}
+
+// sortedKeys returns the map's keys sorted (the roster convention).
+func sortedKeys(m map[string]bool) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// BuildProvisionMCP binds provision_mcp to a Spec + the agent registry.
+func BuildProvisionMCP(spec *Spec, reg *agenttools.Registry) agent.ProvisionMCPFn {
+	return func(args agent.ProvisionMCPArgs, callerIsOperator bool) (string, error) {
+		store, err := state.Open(spec.consoleStateDir())
+		if err != nil {
+			return "", fmt.Errorf("open CP state: %w", err)
+		}
+		return spec.provisionMCP(args, callerIsOperator, reg, store)
+	}
+}
+
+// BuildGrantCapability binds grant_capability to a Spec + the agent registry.
+func BuildGrantCapability(spec *Spec, reg *agenttools.Registry) agent.CapabilityGrantFn {
+	return func(args agent.CapabilityGrantArgs, callerIsOperator bool) (string, error) {
+		store, err := state.Open(spec.consoleStateDir())
+		if err != nil {
+			return "", fmt.Errorf("open CP state: %w", err)
+		}
+		return spec.grantCapability(args, callerIsOperator, reg, store, nil)
+	}
+}
+
+// BuildRevokeCapability binds revoke_capability to a Spec + the agent
+// registry + the runner plane's audited take-away path (the runner case
+// delegates to it unchanged).
+func BuildRevokeCapability(spec *Spec, reg *agenttools.Registry, revoke agent.RevokeRunnerFn) agent.CapabilityRevokeFn {
+	return func(args agent.CapabilityGrantArgs, callerIsOperator bool) (string, error) {
+		store, err := state.Open(spec.consoleStateDir())
+		if err != nil {
+			return "", fmt.Errorf("open CP state: %w", err)
+		}
+		return spec.revokeCapability(args, callerIsOperator, reg, store, revoke)
+	}
 }

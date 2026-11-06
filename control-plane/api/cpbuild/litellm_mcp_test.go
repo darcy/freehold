@@ -7,11 +7,14 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
 	"testing"
 
+	"freehold/control-plane/api/agent"
+	"freehold/control-plane/api/agenttools"
 	provisioner "freehold/control-plane/secret-management"
 	"freehold/control-plane/state"
 )
@@ -157,6 +160,14 @@ func (g *mcpKeyGateway) handler(t *testing.T) http.Handler {
 			}
 			g.servers[id] = body
 			w.Write([]byte(`{"server_id":` + js(id) + `}`))
+		case r.Method == http.MethodDelete && strings.HasPrefix(r.URL.Path, "/v1/mcp/server/"):
+			id := strings.TrimPrefix(r.URL.Path, "/v1/mcp/server/")
+			if _, exists := g.servers[id]; !exists {
+				w.WriteHeader(http.StatusNotFound)
+				return
+			}
+			delete(g.servers, id)
+			w.Write([]byte(`{"deleted":` + js(id) + `}`))
 		case r.Method == http.MethodPut && r.URL.Path == "/v1/mcp/server":
 			var body map[string]interface{}
 			_ = json.Unmarshal(raw, &body)
@@ -716,5 +727,292 @@ func TestRenameToleratesDeadToken(t *testing.T) {
 	}
 	if env := storeEnvForTest(t, stateDir); env[mcptoolKeyEnvKey("renamed")] == "" {
 		t.Fatalf("the store record must still move")
+	}
+}
+
+// --- Phase 3: provision_mcp / grant_capability / revoke_capability ---
+
+// provisionFixture wires a Spec + agent registry + fake gateway + CP state
+// (the seeded slotted capability) for the grant-surface tests.
+func provisionFixture(t *testing.T) (*Spec, *agenttools.Registry, *mcpKeyGateway, *state.StateStore) {
+	t.Helper()
+	dir := t.TempDir()
+	stateDir := dir + "/agent-tools"
+	litellmFixture(t, stateDir, "master-key", "provider-key", "openai", "gpt-4o")
+	store, err := state.Open(stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The mcp SLOT's door exists (Compute carved it): a real package dir +
+	// runner row + capability record — the broker-token seal target.
+	if _, err := provisioner.ProvisionRunner(store, &provisioner.ProvisionRequest{
+		Name: "kube-api-mcp", Kind: "kubernetes", Address: "https://k3s:6443",
+		Secret: []byte("slot-token"), RunnerDir: stateDir + "/runner/kube-api-mcp",
+	}); err != nil {
+		t.Fatalf("provision slot package: %v", err)
+	}
+	store.InsertCapability("kube-api-mcp", state.CapabilityRecord{
+		Kind: "kubernetes", NS: "mcp", Port: 8801, Origin: state.OriginAgent,
+	})
+	reg, err := agenttools.OpenRegistry(filepath.Join(stateDir, "registry.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	gw := newMCPKeyGateway()
+	srv := httptest.NewServer(gw.handler(t))
+	t.Cleanup(srv.Close)
+	spec := &Spec{StateDir: stateDir, LitellmBaseURL: srv.URL + "/v1"}
+	return spec, reg, gw, store
+}
+
+// TestProvisionMCPSlotted: the URL derives CP-side (a caller URL is
+// REFUSED), the broker token is sealed into the slot package, the
+// registration POSTs with static_headers, the grantee's MCP key carries the
+// capability, and the record persists with agent provenance.
+func TestProvisionMCPSlotted(t *testing.T) {
+	spec, reg, gw, store := provisionFixture(t)
+	seedAgents(t, store, "Helper")
+	store.InsertAgent("Helper", state.AgentRecord{Pubkey: strings.Repeat("a", 64), CreatedAt: 1})
+	// The registry row the grant surface resolves against.
+	if _, err := reg.RegisterAgent("Helper", strings.Repeat("a", 64), "#freehold"); err != nil {
+		t.Fatal(err)
+	}
+
+	report, err := spec.provisionMCP(agent.ProvisionMCPArgs{
+		Name: "sheet-a-ro", Namespace: "mcp", ServicePort: 8000,
+		URL:   "http://evil.example/mcp", // refused for a slotted capability
+		Tools: []string{"read_thing"}, GrantTo: []string{"Helper"},
+		Scope: "spreadsheet:abc:readonly", SecretRef: "sheet-a-ro-token",
+	}, false, reg, store)
+	if err == nil || !strings.Contains(err.Error(), "url is refused") {
+		t.Fatalf("a caller URL on a slotted capability must be refused, got %v", err)
+	}
+
+	report, err = spec.provisionMCP(agent.ProvisionMCPArgs{
+		Name: "sheet-a-ro", Namespace: "mcp", ServicePort: 8000,
+		Tools: []string{"read_thing"}, GrantTo: []string{"Helper"},
+		Scope: "spreadsheet:abc:readonly", SecretRef: "sheet-a-ro-token",
+	}, false, reg, store)
+	if err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	if !strings.Contains(report, "sheet-a-ro.mcp.svc.cluster.local:8000/mcp") {
+		t.Fatalf("the derived URL must be in the report:\n%s", report)
+	}
+	rec, ok := store.GetMCPCapability("sheet-a-ro")
+	if !ok || !rec.AgentProvisioned() || rec.URL != "http://sheet-a-ro.mcp.svc.cluster.local:8000/mcp" {
+		t.Fatalf("record = %+v", rec)
+	}
+	// The registration POSTed with the broker token as a static header.
+	gw.mu.Lock()
+	regBody := gw.regBodies[len(gw.regBodies)-1]
+	gw.mu.Unlock()
+	headers, _ := regBody["static_headers"].(map[string]interface{})
+	if headers == nil || headers["Authorization"] == "" {
+		t.Fatalf("registration must carry the broker token, got %v", regBody)
+	}
+	// The broker token is sealed into the slot runner's package.
+	pkgRaw, err := os.ReadFile(filepathJoin(store.Dir(), "runner", "kube-api-mcp") + "/secrets.json")
+	if err != nil {
+		t.Fatalf("read slot package: %v", err)
+	}
+	if !strings.Contains(string(pkgRaw), "sheet-a-ro-token") {
+		t.Fatalf("the broker token must be sealed into the slot package")
+	}
+	// The grantee's MCP key carries the capability.
+	env := storeEnvForTest(t, spec.StateDir)
+	helperKey := env[mcptoolKeyEnvKey("helper")]
+	if denied := gw.denyList(t, helperKey); len(denied) != 1 || denied[0] != "sheet-a-ro" {
+		t.Fatalf("helper's MCP key = %v, want [sheet-a-ro]", denied)
+	}
+	_ = report
+}
+
+// TestProvisionMCPExternal: an external capability states its URL and
+// carries no freehold credential (secret_ref refused).
+func TestProvisionMCPExternal(t *testing.T) {
+	spec, reg, _, store := provisionFixture(t)
+	seedAgents(t, store, "Helper")
+	if _, err := reg.RegisterAgent("Helper", strings.Repeat("a", 64), "#freehold"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := spec.provisionMCP(agent.ProvisionMCPArgs{
+		Name: "ext", URL: "https://mcp.example.com/mcp", SecretRef: "nope",
+		GrantTo: []string{"Helper"},
+	}, false, reg, store); err == nil || !strings.Contains(err.Error(), "secret_ref is a SLOTTED field") {
+		t.Fatalf("secret_ref on an external capability must be refused, got %v", err)
+	}
+	report, err := spec.provisionMCP(agent.ProvisionMCPArgs{
+		Name: "ext", URL: "https://mcp.example.com/mcp", GrantTo: []string{"Helper"},
+	}, false, reg, store)
+	if err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	if !strings.Contains(report, "https://mcp.example.com/mcp") {
+		t.Fatalf("report = %s", report)
+	}
+	rec, _ := store.GetMCPCapability("ext")
+	if rec.SecretRef != "" || rec.Namespace != "" {
+		t.Fatalf("external record = %+v", rec)
+	}
+}
+
+// TestGrantCapabilityMCPDelta: grant_to/revoke_from rewrite the record and
+// each changed grantee's key; a non-grantee removal is refused (named, not
+// a silent pass); a runner capability is refused with routing.
+func TestGrantCapabilityMCPDelta(t *testing.T) {
+	spec, reg, gw, store := provisionFixture(t)
+	seedAgents(t, store, "Helper", "Writer")
+	for _, n := range []string{"Helper", "Writer"} {
+		if _, err := reg.RegisterAgent(n, strings.Repeat("a", 64), "#freehold"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := spec.provisionMCP(agent.ProvisionMCPArgs{
+		Name: "sheet-a-ro", Namespace: "mcp", ServicePort: 8000,
+		GrantTo: []string{"Helper"}, Tools: []string{"read_thing"},
+	}, false, reg, store); err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+
+	// A runner capability is refused with routing.
+	if err := store.InsertCapability("some-door", state.CapabilityRecord{
+		Kind: "ssh", Address: "root@h", Port: 8800, Rosters: []string{"data"}, Origin: state.OriginOperator,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := spec.grantCapability(agent.CapabilityGrantArgs{Name: "some-door", GrantTo: []string{"Helper"}}, false, reg, store, nil); err == nil || !strings.Contains(err.Error(), "operator-scoped") {
+		t.Fatalf("a runner capability must be refused with routing, got %v", err)
+	}
+
+	// Grant Writer.
+	if _, err := spec.grantCapability(agent.CapabilityGrantArgs{Name: "sheet-a-ro", GrantTo: []string{"Writer"}}, false, reg, store, nil); err != nil {
+		t.Fatalf("grant: %v", err)
+	}
+	env := storeEnvForTest(t, spec.StateDir)
+	if denied := gw.denyList(t, env[mcptoolKeyEnvKey("writer")]); len(denied) != 1 || denied[0] != "sheet-a-ro" {
+		t.Fatalf("writer's key = %v", denied)
+	}
+	// Revoke Helper: their key drops the capability; the record keeps Writer.
+	if _, err := spec.grantCapability(agent.CapabilityGrantArgs{Name: "sheet-a-ro", RevokeFrom: []string{"Helper"}}, false, reg, store, nil); err != nil {
+		t.Fatalf("revoke: %v", err)
+	}
+	if denied := gw.denyList(t, env[mcptoolKeyEnvKey("helper")]); len(denied) != 1 || denied[0] != "no-mcp-servers" {
+		t.Fatalf("helper's key must drop to the sentinel, got %v", denied)
+	}
+	rec, _ := store.GetMCPCapability("sheet-a-ro")
+	if len(rec.Grantees) != 1 || rec.Grantees[0] != "Writer" {
+		t.Fatalf("roster = %v", rec.Grantees)
+	}
+	// A non-grantee removal is refused (named, not a silent pass).
+	if _, err := spec.grantCapability(agent.CapabilityGrantArgs{Name: "sheet-a-ro", RevokeFrom: []string{"Helper"}}, false, reg, store, nil); err == nil || !strings.Contains(err.Error(), "holds no grant") {
+		t.Fatalf("a non-grantee removal must be refused, got %v", err)
+	}
+}
+
+// TestRevokeCapabilityRetire: a whole retirement deletes the gateway
+// registration, re-stamps every grantee's key, drops the record under the
+// re-enablable guard, and the name is refused to the agent surface until an
+// operator re-enables it.
+func TestRevokeCapabilityRetire(t *testing.T) {
+	spec, reg, gw, store := provisionFixture(t)
+	seedAgents(t, store, "Helper")
+	if _, err := reg.RegisterAgent("Helper", strings.Repeat("a", 64), "#freehold"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := spec.provisionMCP(agent.ProvisionMCPArgs{
+		Name: "sheet-a-ro", Namespace: "mcp", ServicePort: 8000, GrantTo: []string{"Helper"},
+	}, false, reg, store); err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	env := storeEnvForTest(t, spec.StateDir)
+	helperKey := env[mcptoolKeyEnvKey("helper")]
+
+	report, err := spec.revokeCapability(agent.CapabilityGrantArgs{Name: "sheet-a-ro"}, false, reg, store, nil)
+	if err != nil {
+		t.Fatalf("retire: %v", err)
+	}
+	if !strings.Contains(report, "RETIRED") || !strings.Contains(report, "owner's to remove") {
+		t.Fatalf("retire report must name the legs + the service custody:\n%s", report)
+	}
+	if _, ok := store.GetMCPCapability("sheet-a-ro"); ok {
+		t.Fatal("the record must be dropped")
+	}
+	if _, retired := store.GetRetiredMCP("sheet-a-ro"); !retired {
+		t.Fatal("the guard note must be set")
+	}
+	if denied := gw.denyList(t, helperKey); len(denied) != 1 || denied[0] != "no-mcp-servers" {
+		t.Fatalf("the grantee's key must be re-stamped to the sentinel, got %v", denied)
+	}
+	gw.mu.Lock()
+	_, live := gw.servers["sheet-a-ro"]
+	gw.mu.Unlock()
+	if live {
+		t.Fatal("the gateway registration must be deleted")
+	}
+	// The agent surface may not re-provision the retired name.
+	if _, err := spec.provisionMCP(agent.ProvisionMCPArgs{
+		Name: "sheet-a-ro", Namespace: "mcp", ServicePort: 8000, GrantTo: []string{"Helper"},
+	}, false, reg, store); err == nil || !strings.Contains(err.Error(), "retired") {
+		t.Fatalf("a retired name must be refused to the agent, got %v", err)
+	}
+	// The OPERATOR re-enables by provisioning again (the guard clears).
+	if _, err := spec.provisionMCP(agent.ProvisionMCPArgs{
+		Name: "sheet-a-ro", Namespace: "mcp", ServicePort: 8000, GrantTo: []string{"Helper"},
+	}, true, reg, store); err != nil {
+		t.Fatalf("operator re-enable: %v", err)
+	}
+	if _, retired := store.GetRetiredMCP("sheet-a-ro"); retired {
+		t.Fatal("the re-provision must clear the guard")
+	}
+}
+
+// TestCapabilityOperatorOriginGuard: an operator-provisioned MCP capability
+// is not the CPA's to grant or revoke; the operator's own calls pass.
+func TestCapabilityOperatorOriginGuard(t *testing.T) {
+	spec, reg, _, store := provisionFixture(t)
+	seedAgents(t, store, "Helper")
+	if _, err := reg.RegisterAgent("Helper", strings.Repeat("a", 64), "#freehold"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := spec.provisionMCP(agent.ProvisionMCPArgs{
+		Name: "sheet-a-ro", Namespace: "mcp", ServicePort: 8000, GrantTo: []string{"Helper"},
+	}, true, reg, store); err != nil {
+		t.Fatalf("operator provision: %v", err)
+	}
+	if _, err := spec.grantCapability(agent.CapabilityGrantArgs{Name: "sheet-a-ro", GrantTo: []string{"Writer"}}, false, reg, store, nil); err == nil || !strings.Contains(err.Error(), "operator-scoped") {
+		t.Fatalf("the CPA must be refused on an operator-origin capability, got %v", err)
+	}
+	if _, err := spec.revokeCapability(agent.CapabilityGrantArgs{Name: "sheet-a-ro"}, false, reg, store, nil); err == nil || !strings.Contains(err.Error(), "operator-scoped") {
+		t.Fatalf("the CPA must be refused the take-away too, got %v", err)
+	}
+	// The operator's own grant passes.
+	if _, err := spec.grantCapability(agent.CapabilityGrantArgs{Name: "sheet-a-ro", GrantTo: []string{"Helper"}}, true, reg, store, nil); err != nil {
+		t.Fatalf("operator grant: %v", err)
+	}
+}
+
+// TestRevokeCapabilityRunnerDelegates: a runner capability delegates to
+// revoke_runner's audited path unchanged.
+func TestRevokeCapabilityRunnerDelegates(t *testing.T) {
+	spec, reg, _, store := provisionFixture(t)
+	calls := 0
+	gotName := ""
+	delegatingRevoke := func(args agent.RetireArgs) (string, error) {
+		calls++
+		gotName = args.Name
+		return "delegated", nil
+	}
+	if err := store.InsertCapability("some-door", state.CapabilityRecord{
+		Kind: "ssh", Address: "root@h", Port: 8800, Rosters: []string{"data"}, Origin: state.OriginAgent,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	report, err := spec.revokeCapability(agent.CapabilityGrantArgs{Name: "some-door", RevokeFrom: []string{"data"}}, false, reg, store, delegatingRevoke)
+	if err != nil {
+		t.Fatalf("delegate: %v", err)
+	}
+	if calls != 1 || gotName != "some-door" || report != "delegated" {
+		t.Fatalf("delegation = %d call(s), name %q, report %q", calls, gotName, report)
 	}
 }

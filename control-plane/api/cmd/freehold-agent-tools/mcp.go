@@ -102,6 +102,29 @@ func freeholdToolDefs(hasRunner bool, targets []string) []map[string]interface{}
 				"name":        map[string]interface{}{"type": "string"},
 				"revoke_from": map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
 			}, []string{"name"})},
+		{"name": "provision_mcp", "description": "Register an MCP capability and grant it (the MCP plane's grant-giving flow, the sibling of provision_runner): an MCP server registered on the LiteLLM gateway + the named agents' MCP keys granted its tools. The tool is CREDENTIAL-BLIND — no secret field exists (the broker token is CP-generated and sealed; the MCP service's own Google SA key never enters this flow). Two shapes: SLOTTED (namespace + service_port — the URL DERIVES as http://<name>.<namespace>.svc.cluster.local:<port>/{/mcp|/sse}; url is REFUSED — an agent-stated endpoint would hand the broker token to a server the agent controls; the mcp slot's door (kube-api-<namespace>) must exist — Compute carves it through kube-api-root) and EXTERNAL (url required; secret_ref refused — an external server carries no freehold-sealed credential). transport: http (streamable, default) | sse. tools (optional) pins the capability's allowed tool subset. scope (optional) documents the bound. The confirmation discipline + granting skill are the same as provision_runner's; the agent_grants kill switch governs this too.",
+			"inputSchema": i(map[string]interface{}{
+				"name":         map[string]interface{}{"type": "string"},
+				"transport":    map[string]interface{}{"type": "string", "enum": []string{"http", "sse"}},
+				"namespace":    map[string]interface{}{"type": "string"},
+				"service_port": map[string]interface{}{"type": "integer"},
+				"url":          map[string]interface{}{"type": "string"},
+				"scope":        map[string]interface{}{"type": "string"},
+				"tools":        map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
+				"grant_to":     map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
+				"secret_ref":   map[string]interface{}{"type": "string"},
+			}, []string{"name", "grant_to"})},
+		{"name": "grant_capability", "description": "Grant agents onto an MCP capability (grant_to adds agent names, revoke_from removes them — one call can do both). Each grant is a KEY-PERMISSION write on the granted agent's MCP key (the capability's server + tools appear in /mcp tools/list for that agent) — not an exec seat. Runner DOORS are refused with routing: a runner's roster grants stay operator-scoped (the console's grant page, grant_agent, or a re-provision's unioned roster). An operator-provisioned MCP capability is not the CPA's to grant. The agent_grants kill switch governs this.",
+			"inputSchema": i(map[string]interface{}{
+				"name":        map[string]interface{}{"type": "string"},
+				"grant_to":    map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
+				"revoke_from": map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
+			}, []string{"name"})},
+		{"name": "revoke_capability", "description": "Take an MCP capability away. With revoke_from set, those agent NAMES lose the capability (their MCP keys are rewritten without it) while the capability keeps serving the rest of its roster; with revoke_from empty the capability is RETIRED: the gateway registration is deleted, every grantee's key re-stamped, the record dropped under a re-enablable guard note (the operator re-enables by provisioning again). The MCP service's DEPLOYMENT is the owner's to remove — a retired capability whose service still runs with its SA key is a known state, never a silent one: relay that verbatim. A RUNNER door delegates to revoke_runner's audited path unchanged. The agent_grants kill switch governs this.",
+			"inputSchema": i(map[string]interface{}{
+				"name":        map[string]interface{}{"type": "string"},
+				"revoke_from": map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
+			}, []string{"name"})},
 		{"name": "fill_door", "description": "Seal a NON-SECRET credential value into a door you provisioned with no_secret=true — config you stated in conversation (an address, a public token). A door WITHOUT that declaration is refused: its credential is operator-sealed (the console's fill is the only path), and \"is this one secret?\" is never your judgment call — the declaration at provision time is. The value rides the same seal path the console uses (sealed to the door's own key, never plaintext on disk); a CP-guest door restarts to pick it up, a resident door's grantee then fetches the package with door_package.",
 			"inputSchema": i(map[string]interface{}{
 				"name":  map[string]interface{}{"type": "string"},
@@ -187,6 +210,7 @@ func isFreeholdTool(name string) bool {
 	// door_package is the grantee's fetch — advertised to every agent, refused
 	// server-side to anyone off the door's live roster.
 	case "create_agent", "update_agent", "manage_agent", "provision_runner", "revoke_runner",
+		"provision_mcp", "grant_capability", "revoke_capability",
 		"fill_door", "door_package",
 		"expose_app", "unexpose_app",
 		"create_job", "list_jobs", "delete_job", "pause_job":
