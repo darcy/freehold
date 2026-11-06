@@ -138,30 +138,37 @@ func (ls *litellmMCPStore) save(s *Spec) error {
 // call issues one admin request and reads the response; non-200 is an error
 // carrying the body.
 func (ls *litellmMCPStore) call(method, path string, body any) ([]byte, error) {
+	out, _, err := ls.callStatus(method, path, body)
+	return out, err
+}
+
+// callStatus is call with the response STATUS surfaced (a 404 is
+// distinguished from a transport failure by callers that tolerate it).
+func (ls *litellmMCPStore) callStatus(method, path string, body any) ([]byte, int, error) {
 	var reader io.Reader
 	if body != nil {
 		raw, err := json.Marshal(body)
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		reader = bytes.NewReader(raw)
 	}
 	req, err := http.NewRequest(method, ls.origin+path, reader)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	req.Header.Set("Authorization", "Bearer "+ls.master)
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := (&http.Client{Timeout: 30 * time.Second}).Do(req)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer resp.Body.Close()
 	out, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 	if resp.StatusCode != http.StatusOK {
-		return out, fmt.Errorf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(out)))
+		return out, resp.StatusCode, fmt.Errorf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(out)))
 	}
-	return out, nil
+	return out, resp.StatusCode, nil
 }
 
 // keyInfo fetches /key/info for one key (token or hash): alias +
@@ -282,10 +289,19 @@ func (s *Spec) renameMCPKeyAlias(newPod string) error {
 	if token == "" {
 		return nil
 	}
-	if _, err := ls.call(http.MethodPost, "/key/update", map[string]interface{}{
+	_, status, err := ls.callStatus(http.MethodPost, "/key/update", map[string]interface{}{
 		"key": token, "key_alias": "mcptool-" + newPod,
-	}); err != nil {
+	})
+	if err != nil {
 		return fmt.Errorf("rename mcptool key alias: %w", err)
+	}
+	if status == http.StatusNotFound {
+		// The stored token is already dead on the gateway (a wiped gateway
+		// DB between rename and build): there is no alias to normalize — the
+		// next ensure re-mints with the CORRECT alias, and the sweep has no
+		// stale-alias orphan to misread. A transient gateway error above
+		// still fails the rename loudly.
+		return nil
 	}
 	return nil
 }
