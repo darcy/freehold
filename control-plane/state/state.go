@@ -175,6 +175,67 @@ func (r CapabilityRecord) AgentProvisioned() bool {
 	return r.Origin == OriginAgent
 }
 
+// MCPCapabilityRecord is an MCP-plane capability's spec — a semantic tool
+// surface served through the LiteLLM MCP Gateway (a Google Sheets MCP
+// service, an external MCP server), NOT a runner. The CP is the grant
+// authority for it the same as for a runner door: one record per capability,
+// grantees re-asserted on every build, the LiteLLM registration derived from
+// the record (never from a caller-supplied URL — an agent-stated endpoint
+// would hand the broker token to a server the agent controls). The record
+// holds NO credential material: the broker token rides the slot runner's
+// sealed package (SecretRef), the Google service-account key lives in the
+// MCP service's own Secret.
+type MCPCapabilityRecord struct {
+	// ServerName is the LiteLLM MCP server name — also the pinned server_id
+	// (key permissions survive re-registration), and the tool-name prefix an
+	// agent sees (`<server_name>-<tool>`).
+	ServerName string `json:"server_name"`
+	// Namespace is the kube namespace the MCP service deploys into (an
+	// `mcp` slot). Empty for an EXTERNAL MCP server (no freehold workload).
+	Namespace string `json:"namespace,omitempty"`
+	// ServicePort is the MCP service's port; the registration URL derives
+	// as http://<name>.mcp.svc.cluster.local:<port>/. Empty for external.
+	ServicePort int `json:"service_port,omitempty"`
+	// Transport is the MCP transport ("http" streamable or "sse").
+	Transport string `json:"transport"`
+	// URL is the full registration endpoint — CP-derived for a slotted
+	// service, operator-provided for an external server.
+	URL string `json:"url"`
+	// Scope is the human-readable capability bound (e.g.
+	// "spreadsheet:<id>:readonly") — documentation; the HARD bound is the
+	// service's own credential's Google ACL.
+	Scope string `json:"scope,omitempty"`
+	// Tools are the capability's allowed tool names (pinned_tools +
+	// mcp_tool_permissions seed from it).
+	Tools []string `json:"tools,omitempty"`
+	// Grantees are the agent NAMES granted this capability (the same
+	// representation the rebuild re-assertion consumes; each grantee's
+	// LiteLLM MCP key carries the server + tools).
+	Grantees []string `json:"grantees"`
+	// Origin is who provisioned it: "agent" (the CPA's provision_mcp) or
+	// "operator" (the console). Same guard as the runner capability: only an
+	// explicit "agent" is agent-touchable.
+	Origin string `json:"origin,omitempty"`
+	// SecretRef is the broker token's secret NAME sealed into the slot
+	// runner's package ("" for external servers with no freehold-side
+	// credential). The CP holds the token sealed in the litellm store and
+	// ships it to LiteLLM as a static header; the MCP service reads it from
+	// the slot Secret.
+	SecretRef string `json:"secret_ref,omitempty"`
+	CreatedAt uint64 `json:"created_at"`
+}
+
+// MCPCapabilityRecord provenance mirrors the runner capability's rule.
+func (r MCPCapabilityRecord) AgentProvisioned() bool {
+	return r.Origin == OriginAgent
+}
+
+// MCPSlug is the capability's canonical name (== ServerName): registry keys
+// and grant references use it.
+func (r MCPCapabilityRecord) MCPSlug() string {
+	return r.ServerName
+}
+
 // RetiredCapability is the guard note a capability door leaves when it is
 // retired: when it went away, who retired it, and who held the roster. It
 // makes the retirement auditable AND keeps the name out of provision_runner's
@@ -222,6 +283,14 @@ type ControlPlaneState struct {
 	// Capabilities is the dynamic capability-runner table (the provision_runner
 	// flow's records; the static half lives in cpbuild.capabilityRunners).
 	Capabilities map[string]CapabilityRecord `json:"capabilities,omitempty"`
+	// MCPCapabilities is the MCP-plane capability table (the provision_mcp
+	// flow's records): semantic tool capabilities served through the LiteLLM
+	// MCP Gateway, granted via each grantee's MCP key permissions.
+	MCPCapabilities map[string]MCPCapabilityRecord `json:"mcp_capabilities,omitempty"`
+	// RetiredMCPCapabilities holds the guard notes for MCP capabilities the
+	// CPA's revoke_capability retired — the same re-enablable guard as the
+	// runner plane's.
+	RetiredMCPCapabilities map[string]RetiredCapability `json:"retired_mcp_capabilities,omitempty"`
 	// RetiredCapabilities holds the guard notes for doors the CPA's
 	// revoke_runner retired (see RetiredCapability). The name stays refused by
 	// provision_runner until an operator clears the note — by re-provisioning
@@ -298,6 +367,12 @@ func ensureMaps(cp *ControlPlaneState) {
 	}
 	if cp.Capabilities == nil {
 		cp.Capabilities = map[string]CapabilityRecord{}
+	}
+	if cp.MCPCapabilities == nil {
+		cp.MCPCapabilities = map[string]MCPCapabilityRecord{}
+	}
+	if cp.RetiredMCPCapabilities == nil {
+		cp.RetiredMCPCapabilities = map[string]RetiredCapability{}
 	}
 	if cp.RetiredCapabilities == nil {
 		cp.RetiredCapabilities = map[string]RetiredCapability{}
@@ -470,6 +545,106 @@ func (s *StateStore) RemoveCapability(name string) error {
 func (s *StateStore) GetRetired(name string) (RetiredCapability, bool) {
 	r, ok := s.state.RetiredCapabilities[name]
 	return r, ok
+}
+
+// GetMCPCapability returns an MCP-plane capability record.
+func (s *StateStore) GetMCPCapability(name string) (MCPCapabilityRecord, bool) {
+	r, ok := s.state.MCPCapabilities[name]
+	return r, ok
+}
+
+// MCPCapabilityRecords returns the MCP capability table (a copy).
+func (s *StateStore) MCPCapabilityRecords() map[string]MCPCapabilityRecord {
+	out := make(map[string]MCPCapabilityRecord, len(s.state.MCPCapabilities))
+	for k, v := range s.state.MCPCapabilities {
+		out[k] = v
+	}
+	return out
+}
+
+// InsertMCPCapability records an MCP capability + saves. The same
+// re-enable rule as the runner plane: writing the record drops the name's
+// retirement guard.
+func (s *StateStore) InsertMCPCapability(name string, rec MCPCapabilityRecord) error {
+	if s.state.MCPCapabilities == nil {
+		s.state.MCPCapabilities = map[string]MCPCapabilityRecord{}
+	}
+	s.state.MCPCapabilities[name] = rec
+	delete(s.state.RetiredMCPCapabilities, name)
+	return s.Save()
+}
+
+// RemoveMCPCapability drops an MCP capability record + saves.
+func (s *StateStore) RemoveMCPCapability(name string) error {
+	delete(s.state.MCPCapabilities, name)
+	return s.Save()
+}
+
+// GetRetiredMCP returns a retired MCP capability's guard note.
+func (s *StateStore) GetRetiredMCP(name string) (RetiredCapability, bool) {
+	r, ok := s.state.RetiredMCPCapabilities[name]
+	return r, ok
+}
+
+// InsertRetiredMCP records an MCP retirement guard note + saves.
+func (s *StateStore) InsertRetiredMCP(name string, rec RetiredCapability) error {
+	if s.state.RetiredMCPCapabilities == nil {
+		s.state.RetiredMCPCapabilities = map[string]RetiredCapability{}
+	}
+	s.state.RetiredMCPCapabilities[name] = rec
+	return s.Save()
+}
+
+// CapabilityView is one capability in the unified listing (both planes):
+// what it reaches, which plane enforces it, and who holds it. Runner views
+// cover the DYNAMIC capability table only — the build's static doors ride
+// the build, not this registry.
+type CapabilityView struct {
+	// Name is the capability's canonical name (the runner name or the MCP
+	// server slug).
+	Name string `json:"name"`
+	// Plane is the enforcement backend: "runner" (relay-roster exec door) or
+	// "mcp" (LiteLLM key permissions).
+	Plane string `json:"plane"`
+	// Kind is the runner connector kind (ssh/api-class/local) or the MCP
+	// transport (http/sse).
+	Kind string `json:"kind"`
+	// Endpoint is the target address (runner) or registration URL (MCP).
+	Endpoint string `json:"endpoint,omitempty"`
+	// Scope is the MCP capability's human-readable bound (empty for
+	// runners — a door's scope IS its credential).
+	Scope string `json:"scope,omitempty"`
+	// Grantees are the granted agent names.
+	Grantees []string `json:"grantees"`
+	// Origin is "agent" | "operator".
+	Origin string `json:"origin,omitempty"`
+	// CreatedAt is the record's unix stamp.
+	CreatedAt uint64 `json:"created_at"`
+}
+
+// CapabilityViews renders the unified capability listing (runners + MCP,
+// sorted by name then plane) for the console/CPA surface.
+func (s *StateStore) CapabilityViews() []CapabilityView {
+	out := []CapabilityView{}
+	for name, r := range s.state.Capabilities {
+		out = append(out, CapabilityView{
+			Name: name, Plane: "runner", Kind: r.Kind, Endpoint: r.Address,
+			Grantees: r.Rosters, Origin: r.Origin, CreatedAt: r.CreatedAt,
+		})
+	}
+	for name, r := range s.state.MCPCapabilities {
+		out = append(out, CapabilityView{
+			Name: name, Plane: "mcp", Kind: r.Transport, Endpoint: r.URL,
+			Scope: r.Scope, Grantees: r.Grantees, Origin: r.Origin, CreatedAt: r.CreatedAt,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Name != out[j].Name {
+			return out[i].Name < out[j].Name
+		}
+		return out[i].Plane < out[j].Plane
+	})
+	return out
 }
 
 // InsertRetired records a retirement guard note + saves: from here the name is
