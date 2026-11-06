@@ -77,16 +77,20 @@ if [ -f /srv/pangolin/root-key.env ]; then
   echo pangolin-install-ok
   exit 0
 fi
+ADMIN_STALE=0
 if [ -f /srv/pangolin/admin.env ]; then
   . /srv/pangolin/admin.env
-else
+  LOGIN=$(curl -s -c /srv/pangolin/admin.cookies -X POST http://localhost:3000/api/v1/auth/login -H "Content-Type: application/json" -H "X-CSRF-Token: x-csrf-protection" -d "{\"email\":\"$ADMIN_EMAIL\",\"password\":\"$ADMIN_PW\"}")
+  echo "$LOGIN" | grep -q "\"success\":true" || ADMIN_STALE=1
+fi
+if [ "$ADMIN_STALE" = 1 ] || [ ! -f /srv/pangolin/admin.env ]; then
   ADMIN_EMAIL=%s
-  ADMIN_PW=$(openssl rand -hex 16)
+  ADMIN_PW=$(openssl rand -hex 12)Aa1@
   printf "ADMIN_EMAIL=%%s\nADMIN_PW=%%s\n" "$ADMIN_EMAIL" "$ADMIN_PW" > /srv/pangolin/admin.env
   chmod 600 /srv/pangolin/admin.env
+  curl -s -X PUT http://localhost:3000/api/v1/auth/signup -H "Content-Type: application/json" -H "X-CSRF-Token: x-csrf-protection" -d "{\"email\":\"$ADMIN_EMAIL\",\"password\":\"$ADMIN_PW\"}" >/dev/null
+  curl -s -c /srv/pangolin/admin.cookies -X POST http://localhost:3000/api/v1/auth/login -H "Content-Type: application/json" -H "X-CSRF-Token: x-csrf-protection" -d "{\"email\":\"$ADMIN_EMAIL\",\"password\":\"$ADMIN_PW\"}" >/dev/null
 fi
-curl -s -X PUT http://localhost:3000/api/v1/auth/signup -H "Content-Type: application/json" -H "X-CSRF-Token: x-csrf-protection" -d "{\"email\":\"$ADMIN_EMAIL\",\"password\":\"$ADMIN_PW\"}" >/dev/null
-curl -s -c /srv/pangolin/admin.cookies -X POST http://localhost:3000/api/v1/auth/login -H "Content-Type: application/json" -H "X-CSRF-Token: x-csrf-protection" -d "{\"email\":\"$ADMIN_EMAIL\",\"password\":\"$ADMIN_PW\"}" >/dev/null
 KEY_JSON=$(curl -s -b /srv/pangolin/admin.cookies -X PUT http://localhost:3000/api/v1/api-key -H "Content-Type: application/json" -H "X-CSRF-Token: x-csrf-protection" -d "{\"name\":\"freehold\"}")
 KEY_ID=$(echo "$KEY_JSON" | tr ",{}" "\n" | grep apiKeyId | sed "s/.*://; s/\"//g")
 KEY_SECRET=$(echo "$KEY_JSON" | tr ",{}" "\n" | grep -w apiKey | sed "s/.*://; s/\"//g")
