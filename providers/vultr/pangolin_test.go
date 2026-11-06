@@ -36,6 +36,16 @@ func TestPangolinInstallScriptRendersTheWorld(t *testing.T) {
 	if !strings.Contains(script, "PANGOLIN_ROOT_KEY=") {
 		t.Fatal("the script must print the root key once")
 	}
+	// The edge's own dashboard/API routers: without them Traefik has no
+	// router for pangolin.<world>, issues no cert, and Newt never connects.
+	for _, want := range []string{
+		"main-app-router-redirect", "next-router", "api-router", "ws-router",
+		"Host(`pangolin.librem.example.test`)", "certResolver: letsencrypt",
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("the dynamic config must carry the edge routers: missing %q", want)
+		}
+	}
 	if !strings.Contains(script, "/srv/pangolin/root-key.env") {
 		t.Fatal("the key must persist on the VPS (a re-run re-prints, never re-mints)")
 	}

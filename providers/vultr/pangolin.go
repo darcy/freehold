@@ -39,7 +39,7 @@ func PangolinInstallScript(worldDomain, email string) string {
 	compose := pangolinCompose(worldDomain, email)
 	conf := pangolinConfig(worldDomain)
 	traefik := pangolinTraefikConf(email)
-	dynamic := pangolinDynamicConf()
+	dynamic := pangolinDynamicConf(worldDomain)
 	return fmt.Sprintf(`set -e
 if [ -f /srv/pangolin/root-key.env ] && docker ps --format "{{.Names}}" 2>/dev/null | grep -q pangolin && curl -sf http://localhost:3003/v1/org/freehold/sites -H "Authorization: Bearer $(cat /srv/pangolin/root-key.env)" >/dev/null 2>&1; then
   echo "PANGOLIN_ROOT_KEY=$(cat /srv/pangolin/root-key.env)"
@@ -56,16 +56,16 @@ apt-get update -qq >/dev/null 2>&1 || true
 apt-get install -y -qq docker-ce docker-compose-plugin >/dev/null 2>&1
 systemctl enable --now docker >/dev/null 2>&1 || true
 mkdir -p /srv/pangolin/config/traefik /srv/pangolin/config/letsencrypt
-if [ ! -f /srv/pangolin/config/config.yml ]; then
 cat > /srv/pangolin/docker-compose.yaml <<COMPOSE
 %sCOMPOSE
+if [ ! -f /srv/pangolin/config/config.yml ]; then
 cat > /srv/pangolin/config/config.yml <<CONF
 %sCONF
+fi
 cat > /srv/pangolin/config/traefik/traefik_config.yml <<TRK
 %sTRK
 cat > /srv/pangolin/config/traefik/dynamic_config.yml <<DYN
 %sDYN
-fi
 cd /srv/pangolin && docker compose up -d 2>/dev/null || docker-compose up -d
 for i in $(seq 1 60); do
   curl -sf http://localhost:3000/api/v1/ >/dev/null 2>&1 && break
@@ -308,12 +308,83 @@ ping:
 // pangolinDynamicConf renders the traefik file provider's base (the shape
 // the upstream stack ships; Pangolin's generated config rides the http
 // provider beside it).
-func pangolinDynamicConf() string {
-	return `http:
+func pangolinDynamicConf(worldDomain string) string {
+	dash := "pangolin." + worldDomain
+	// The dashboard/API routers are the edge's OWN ingress: without them
+	// Traefik has no router for the edge host, requests no ACME cert, and
+	// Newt cannot reach the token endpoint — the site never comes online and
+	// the resource routers are never generated (a deadlock). Upstream shape;
+	// "~" stands in for Traefik's rule backticks (a raw Go string cannot hold
+	// them).
+	conf := fmt.Sprintf(`http:
   middlewares:
+    badger:
+      plugin:
+        badger:
+          disableForwardAuth: true
     redirect-to-https:
       redirectScheme:
         scheme: https
         permanent: true
-`
+
+  routers:
+    main-app-router-redirect:
+      rule: "Host(~%[1]s~)"
+      service: next-service
+      entryPoints:
+        - web
+      middlewares:
+        - redirect-to-https
+        - badger
+
+    next-router:
+      rule: "Host(~%[1]s~) && !PathPrefix(~\/api\/v1~)"
+      service: next-service
+      entryPoints:
+        - websecure
+      middlewares:
+        - badger
+      tls:
+        certResolver: letsencrypt
+
+    api-router:
+      rule: "Host(~%[1]s~) && PathPrefix(~\/api\/v1~)"
+      service: api-service
+      entryPoints:
+        - websecure
+      middlewares:
+        - badger
+      tls:
+        certResolver: letsencrypt
+
+    ws-router:
+      rule: "Host(~%[1]s~)"
+      service: api-service
+      entryPoints:
+        - websecure
+      middlewares:
+        - badger
+      tls:
+        certResolver: letsencrypt
+
+  services:
+    next-service:
+      loadBalancer:
+        servers:
+          - url: "http://pangolin:3002"
+    api-service:
+      loadBalancer:
+        servers:
+          - url: "http://pangolin:3000"
+
+tcp:
+  serversTransports:
+    pp-transport-v1:
+      proxyProtocol:
+        version: 1
+    pp-transport-v2:
+      proxyProtocol:
+        version: 2
+`, dash)
+	return strings.ReplaceAll(conf, "~", "`")
 }
