@@ -9,7 +9,6 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"os"
 	"sort"
 	"strings"
 	"time"
@@ -508,14 +507,14 @@ func (s *Spec) sweepLitellmMCPAccess(store *state.StateStore) (string, error) {
 			// agentkey- prefix is only the store env key. MCP access rides
 			// mcptool-<pod>, never the model key — sweep it to the sentinel
 			// when it holds any grant.
-			if s.maybeDenyMCP(ls, hash, alias, perm) {
-				report = append(report, alias+" swept to no-mcp-servers (model keys never hold MCP grants)")
+			if note := s.maybeDenyMCP(ls, hash, alias, perm); note != "" {
+				report = append(report, note+" (model keys never hold MCP grants)")
 			}
 		case strings.HasPrefix(alias, "mcptool-"):
 			pod := strings.TrimPrefix(alias, "mcptool-")
 			if !agentPods[pod] {
-				if s.maybeDenyMCP(ls, hash, alias, perm) {
-					report = append(report, alias+" swept to no-mcp-servers (no such agent)")
+				if note := s.maybeDenyMCP(ls, hash, alias, perm); note != "" {
+					report = append(report, note+" (no such agent)")
 				}
 				continue
 			}
@@ -536,8 +535,8 @@ func (s *Spec) sweepLitellmMCPAccess(store *state.StateStore) (string, error) {
 				report = append(report, alias+" rewritten (was "+trimJSON(string(hadJSON))+")")
 			}
 		default:
-			if s.maybeDenyMCP(ls, hash, alias, perm) {
-				report = append(report, alias+" swept to no-mcp-servers (foreign key)")
+			if note := s.maybeDenyMCP(ls, hash, alias, perm); note != "" {
+				report = append(report, note+" (foreign key)")
 			}
 		}
 	}
@@ -549,19 +548,24 @@ func (s *Spec) sweepLitellmMCPAccess(store *state.StateStore) (string, error) {
 // under a lost flag, so it is stamped explicitly too); reports whether a
 // write was needed. A write failure is reported to the build log and does
 // not fail the sweep (the next build re-runs it).
-func (s *Spec) maybeDenyMCP(ls *litellmMCPStore, hash, alias string, perm map[string]interface{}) bool {
+// maybeDenyMCP sweeps one key to the sentinel when its object_permission
+// holds any MCP grant shape (or names nothing — an absent list is open
+// under a lost flag, so it is stamped explicitly too). Returns the report
+// line: a successful write reports the sweep; a FAILED write reports that
+// too (loud, in the stage report — the next build re-runs it), never just
+// stderr.
+func (s *Spec) maybeDenyMCP(ls *litellmMCPStore, hash, alias string, perm map[string]interface{}) string {
 	raw, _ := json.Marshal(perm["mcp_servers"])
 	if string(raw) == `["no-mcp-servers"]` {
-		return false
+		return ""
 	}
 	if _, err := ls.call(http.MethodPost, "/key/update", map[string]interface{}{
 		"key":               hash,
 		"object_permission": map[string]interface{}{"mcp_servers": []string{"no-mcp-servers"}},
 	}); err != nil {
-		fmt.Fprintf(os.Stderr, "litellm mcp sweep: %s: %v\n", alias, err)
-		return false
+		return fmt.Sprintf("%s deny-write FAILED (the next build re-runs the sweep): %v", alias, err)
 	}
-	return true
+	return alias + " swept to no-mcp-servers"
 }
 
 // trimJSON keeps a short prefix of a JSON blob for a drift note.
