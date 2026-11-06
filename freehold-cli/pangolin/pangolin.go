@@ -46,7 +46,9 @@ func execOnVPS(vpsIP, cmd string) (string, error) {
 		return "", err
 	}
 	defer cleanup()
-	out, err := proxmox.SSHExec("root@"+vpsIP, keyPath)(cmd, 60)
+	// sshArgs prepends "root@": pass the BARE host (a "root@" prefix here
+	// becomes root@root@host — publickey denied).
+	out, err := proxmox.SSHExec(vpsIP, keyPath)(cmd, 60)
 	if err != nil {
 		return "", err
 	}
@@ -243,7 +245,9 @@ func buildPangolinSession(cfg *config.Config, region, plan string) (*provisionin
 		World:    cfg.Name,
 	}
 	session.ExecOnHost = func(script string, timeoutSecs uint64) error {
-		out, err := proxmox.SSHExec(session.Host, keyPath)(script, timeoutSecs)
+		// session.Host carries the "root@" prefix the created-host lifecycle
+		// records; sshArgs adds its own — pass the bare host.
+		out, err := proxmox.SSHExec(strings.TrimPrefix(session.Host, "root@"), keyPath)(script, timeoutSecs)
 		if err != nil {
 			return err
 		}
@@ -347,7 +351,7 @@ func authorizeOnVPS(vpsIP, pubLine string) error {
 		return err
 	}
 	defer cleanup()
-	out, err := proxmox.SSHExec("root@"+vpsIP, keyPath)(
+	out, err := proxmox.SSHExec(vpsIP, keyPath)(
 		fmt.Sprintf("mkdir -p ~/.ssh && chmod 700 ~/.ssh && grep -Fqx '%s' ~/.ssh/authorized_keys 2>/dev/null || (echo '%s' >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys)", pubLine, pubLine),
 		60)
 	if err != nil {
