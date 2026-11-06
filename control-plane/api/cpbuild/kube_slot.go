@@ -90,9 +90,14 @@ func kubeSlotManifest(ns, quota string) ([]byte, error) {
 					"app.kubernetes.io/managed-by": "freehold",
 					// A slot's full-namespace Role reaches Secrets (the MCP
 					// services') and can schedule pods — without an enforce
-					// label, privileged/hostNetwork pods mean root on the
-					// node. Enforce restricted on every slot carve.
-					"pod-security.kubernetes.io/enforce": "restricted",
+					// label, PRIVILEGED pods mean root on the node. Enforce
+					// baseline on every slot carve: privileged pods,
+					// hostProcess, and hostPorts are all rejected (the
+					// node-root paths), while hostNetwork (the MCP service's
+					// LAN reach) stays available; a pod inside still runs
+					// non-root with dropped capabilities by its own
+					// securityContext.
+					"pod-security.kubernetes.io/enforce": "baseline",
 				},
 			},
 		},

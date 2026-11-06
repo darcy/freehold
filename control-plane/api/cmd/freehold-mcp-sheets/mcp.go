@@ -15,6 +15,16 @@ import (
 	"strings"
 )
 
+type server struct {
+	sheet    string
+	readOnly bool
+	auth     *googleAuth
+	http     *http.Client
+	// sheetsBase is the Sheets API origin (the real one; a test points it at
+	// a fake).
+	sheetsBase string
+}
+
 func base64StdDecode(s string) (string, error) {
 	raw, err := base64.StdEncoding.DecodeString(strings.TrimSpace(s))
 	if err != nil {

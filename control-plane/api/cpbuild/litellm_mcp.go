@@ -719,6 +719,9 @@ func (s *Spec) provisionMCP(args agent.ProvisionMCPArgs, callerIsOperator bool, 
 		if args.ServicePort <= 0 || args.ServicePort > 65535 {
 			return "", fmt.Errorf("provision_mcp %s: service_port is required for a slotted capability (the MCP service's port)", name)
 		}
+		if strings.TrimSpace(args.SecretRef) == "" {
+			return "", fmt.Errorf("provision_mcp %s: secret_ref is required for a slotted capability — the broker token's secret name in the slot runner's package (the service MUST answer only its broker; the CP generates + seals the token, credential-blind)", name)
+		}
 		if _, ok := store.GetRunner("kube-api-" + ns); !ok {
 			return "", fmt.Errorf("provision_mcp %s: no kube-api-%s slot door — carve the mcp slot first (Compute applies the slot manifest through kube-api-root, then provision the door)", name, ns)
 		}

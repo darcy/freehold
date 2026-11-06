@@ -906,7 +906,7 @@ func TestGrantCapabilityMCPDelta(t *testing.T) {
 	seedAgents(t, store, reg, "Helper", "Writer")
 	if _, err := spec.provisionMCP(agent.ProvisionMCPArgs{
 		Name: "sheet-a-ro", Namespace: "mcp", ServicePort: 8000,
-		GrantTo: []string{"Helper"}, Tools: []string{"read_thing"},
+		GrantTo: []string{"Helper"}, Tools: []string{"read_thing"}, SecretRef: "sheet-a-ro-token",
 	}, false, reg, store); err != nil {
 		t.Fatalf("provision: %v", err)
 	}
@@ -960,7 +960,7 @@ func TestRevokeCapabilityRetire(t *testing.T) {
 	spec, reg, gw, store := provisionFixture(t)
 	seedAgents(t, store, reg, "Helper")
 	if _, err := spec.provisionMCP(agent.ProvisionMCPArgs{
-		Name: "sheet-a-ro", Namespace: "mcp", ServicePort: 8000, GrantTo: []string{"Helper"},
+		Name: "sheet-a-ro", Namespace: "mcp", ServicePort: 8000, GrantTo: []string{"Helper"}, SecretRef: "sheet-a-ro-token",
 	}, false, reg, store); err != nil {
 		t.Fatalf("provision: %v", err)
 	}
@@ -997,7 +997,7 @@ func TestRevokeCapabilityRetire(t *testing.T) {
 	}
 	// The OPERATOR re-enables by provisioning again (the guard clears).
 	if _, err := spec.provisionMCP(agent.ProvisionMCPArgs{
-		Name: "sheet-a-ro", Namespace: "mcp", ServicePort: 8000, GrantTo: []string{"Helper"},
+		Name: "sheet-a-ro", Namespace: "mcp", ServicePort: 8000, GrantTo: []string{"Helper"}, SecretRef: "sheet-a-ro-token",
 	}, true, reg, store); err != nil {
 		t.Fatalf("operator re-enable: %v", err)
 	}
@@ -1012,7 +1012,7 @@ func TestCapabilityOperatorOriginGuard(t *testing.T) {
 	spec, reg, _, store := provisionFixture(t)
 	seedAgents(t, store, reg, "Helper")
 	if _, err := spec.provisionMCP(agent.ProvisionMCPArgs{
-		Name: "sheet-a-ro", Namespace: "mcp", ServicePort: 8000, GrantTo: []string{"Helper"},
+		Name: "sheet-a-ro", Namespace: "mcp", ServicePort: 8000, GrantTo: []string{"Helper"}, SecretRef: "sheet-a-ro-token",
 	}, true, reg, store); err != nil {
 		t.Fatalf("operator provision: %v", err)
 	}
@@ -1063,7 +1063,7 @@ func TestRenameFollowsMCPGrants(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := spec.provisionMCP(agent.ProvisionMCPArgs{
-		Name: "sheet-a-ro", Namespace: "mcp", ServicePort: 8000, GrantTo: []string{"Helper"},
+		Name: "sheet-a-ro", Namespace: "mcp", ServicePort: 8000, GrantTo: []string{"Helper"}, SecretRef: "sheet-a-ro-token",
 	}, false, reg, store); err != nil {
 		t.Fatalf("provision: %v", err)
 	}
@@ -1097,7 +1097,7 @@ func TestRetireToleratesDeadGateway(t *testing.T) {
 	spec, reg, gw, store := provisionFixture(t)
 	seedAgents(t, store, reg, "Helper")
 	if _, err := spec.provisionMCP(agent.ProvisionMCPArgs{
-		Name: "sheet-a-ro", Namespace: "mcp", ServicePort: 8000, GrantTo: []string{"Helper"},
+		Name: "sheet-a-ro", Namespace: "mcp", ServicePort: 8000, GrantTo: []string{"Helper"}, SecretRef: "sheet-a-ro-token",
 	}, false, reg, store); err != nil {
 		t.Fatalf("provision: %v", err)
 	}
@@ -1124,7 +1124,7 @@ func TestProvisionMCPNarrowedRoster(t *testing.T) {
 	spec, reg, gw, store := provisionFixture(t)
 	seedAgents(t, store, reg, "Helper", "Writer")
 	if _, err := spec.provisionMCP(agent.ProvisionMCPArgs{
-		Name: "sheet-a-ro", Namespace: "mcp", ServicePort: 8000, GrantTo: []string{"Helper", "Writer"},
+		Name: "sheet-a-ro", Namespace: "mcp", ServicePort: 8000, GrantTo: []string{"Helper", "Writer"}, SecretRef: "sheet-a-ro-token",
 	}, false, reg, store); err != nil {
 		t.Fatalf("provision: %v", err)
 	}
@@ -1134,7 +1134,7 @@ func TestProvisionMCPNarrowedRoster(t *testing.T) {
 	}
 	// The narrowed re-provision: only Helper stays.
 	report, err := spec.provisionMCP(agent.ProvisionMCPArgs{
-		Name: "sheet-a-ro", Namespace: "mcp", ServicePort: 8000, GrantTo: []string{"Helper"},
+		Name: "sheet-a-ro", Namespace: "mcp", ServicePort: 8000, GrantTo: []string{"Helper"}, SecretRef: "sheet-a-ro-token",
 	}, false, reg, store)
 	if err != nil {
 		t.Fatalf("re-provision: %v", err)
@@ -1176,7 +1176,7 @@ func TestRetirePendingClearsOnSuccess(t *testing.T) {
 	spec, reg, gw, store := provisionFixture(t)
 	seedAgents(t, store, reg, "Helper", "Writer")
 	if _, err := spec.provisionMCP(agent.ProvisionMCPArgs{
-		Name: "sheet-a-ro", Namespace: "mcp", ServicePort: 8000, GrantTo: []string{"Helper", "Writer"},
+		Name: "sheet-a-ro", Namespace: "mcp", ServicePort: 8000, GrantTo: []string{"Helper", "Writer"}, SecretRef: "sheet-a-ro-token",
 	}, false, reg, store); err != nil {
 		t.Fatalf("provision: %v", err)
 	}
@@ -1187,7 +1187,7 @@ func TestRetirePendingClearsOnSuccess(t *testing.T) {
 	// The take-back legs do NOT fail the call (the record narrows; the legs
 	// ride PendingTakeBacks + the report names them).
 	if _, err := spec.provisionMCP(agent.ProvisionMCPArgs{
-		Name: "sheet-a-ro", Namespace: "mcp", ServicePort: 8000, GrantTo: []string{"Helper"},
+		Name: "sheet-a-ro", Namespace: "mcp", ServicePort: 8000, GrantTo: []string{"Helper"}, SecretRef: "sheet-a-ro-token",
 	}, false, reg, store); err != nil {
 		t.Fatalf("re-provision: %v", err)
 	}
@@ -1202,7 +1202,7 @@ func TestRetirePendingClearsOnSuccess(t *testing.T) {
 	// CLEARS.
 	gw.failUpdates = false
 	if _, err := spec.provisionMCP(agent.ProvisionMCPArgs{
-		Name: "sheet-a-ro", Namespace: "mcp", ServicePort: 8000, GrantTo: []string{"Helper"},
+		Name: "sheet-a-ro", Namespace: "mcp", ServicePort: 8000, GrantTo: []string{"Helper"}, SecretRef: "sheet-a-ro-token",
 	}, false, reg, store); err != nil {
 		t.Fatalf("retry: %v", err)
 	}
@@ -1222,7 +1222,7 @@ func TestRevokeCapabilityDropConverges(t *testing.T) {
 	spec, reg, gw, store := provisionFixture(t)
 	seedAgents(t, store, reg, "Helper")
 	if _, err := spec.provisionMCP(agent.ProvisionMCPArgs{
-		Name: "sheet-a-ro", Namespace: "mcp", ServicePort: 8000, GrantTo: []string{"Helper"},
+		Name: "sheet-a-ro", Namespace: "mcp", ServicePort: 8000, GrantTo: []string{"Helper"}, SecretRef: "sheet-a-ro-token",
 	}, false, reg, store); err != nil {
 		t.Fatalf("provision: %v", err)
 	}

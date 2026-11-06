@@ -9,7 +9,8 @@
 //   - Broker auth: every /mcp request must carry Authorization: Bearer
 //     $FREEHOLD_BROKER_TOKEN (the token the CP sealed for this capability;
 //     LiteLLM attaches it as a static header). Unset = the endpoint is open
-//     — for a slotted capability the CP always sets it.
+//     — slotted capabilities always set it (provision_mcp requires
+//     secret_ref; the stage renders the Secret from the CP's sealed store).
 //   - Pin: every tool addresses $FREEHOLD_SPREADSHEET_ID — the service
 //     cannot name another spreadsheet. The HARD bound is still the SA's
 //     Google ACL (share only that sheet with the service account).
@@ -35,64 +36,17 @@ import (
 	"time"
 )
 
-type server struct {
-	sheet    string
-	readOnly bool
-	auth     *googleAuth
-	http     *http.Client
-	// sheetsBase is the Sheets API origin (the real one; a test points it at
-	// a fake).
-	sheetsBase string
-}
-
 func main() {
-	saJSON := os.Getenv("GOOGLE_SA_JSON")
-	if saJSON == "" {
-		if b64 := os.Getenv("GOOGLE_SA_JSON_B64"); b64 != "" {
-			raw, err := base64StdDecode(b64)
-			if err != nil {
-				log.Fatalf("GOOGLE_SA_JSON_B64: %v", err)
-			}
-			saJSON = raw
-		}
-	}
-	var key *saKey
-	var rsaKey *rsa.PrivateKey
-	if saJSON != "" {
-		k := &saKey{}
-		if err := json.Unmarshal([]byte(saJSON), k); err != nil {
-			log.Fatalf("GOOGLE_SA_JSON: %v", err)
-		}
-		if k.ClientEmail == "" || k.PrivateKey == "" || k.TokenURI == "" {
-			log.Fatalf("GOOGLE_SA_JSON: client_email, private_key and token_uri are all required")
-		}
-		rk, err := k.rsaKey()
-		if err != nil {
-			log.Fatalf("GOOGLE_SA_JSON: %v", err)
-		}
-		key = k
-		rsaKey = rk
-	}
-	readOnly := os.Getenv("FREEHOLD_READ_ONLY") == "1"
-	scope := "https://www.googleapis.com/auth/spreadsheets"
-	if readOnly {
-		scope = "https://www.googleapis.com/auth/spreadsheets.readonly"
-	}
-	s := &server{
-		sheet:    os.Getenv("FREEHOLD_SPREADSHEET_ID"),
-		readOnly: readOnly,
-		auth: &googleAuth{
-			key: key, rsa: rsaKey, scope: scope,
-			http: &http.Client{Timeout: 30 * time.Second},
-		},
-		http: &http.Client{Timeout: 30 * time.Second},
+	s, err := newServerFromEnv()
+	if err != nil {
+		log.Fatal(err)
 	}
 	addr := os.Getenv("FREEHOLD_MCP_ADDR")
 	if addr == "" {
 		addr = ":8000"
 	}
 	log.Printf("freehold-mcp-sheets: sheet=%q read_only=%v sa_configured=%v addr=%s",
-		s.sheet, readOnly, key != nil, addr)
+		s.sheet, s.readOnly, s.auth.key != nil, addr)
 	if err := http.ListenAndServe(addr, s.routes()); err != nil {
 		log.Fatal(err)
 	}
@@ -138,8 +92,8 @@ func newServerFromEnv() (*server, error) {
 		sheetsBase = "https://sheets.googleapis.com"
 	}
 	return &server{
-		sheet:      os.Getenv("FREEHOLD_SPREADSHEET_ID"),
-		readOnly:   readOnly,
+		sheet:    os.Getenv("FREEHOLD_SPREADSHEET_ID"),
+		readOnly: readOnly,
 		auth: &googleAuth{
 			key: key, rsa: rsaKey, scope: scope,
 			http: &http.Client{Timeout: 30 * time.Second},
