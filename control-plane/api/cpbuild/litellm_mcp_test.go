@@ -1086,3 +1086,60 @@ func TestRetireToleratesDeadGateway(t *testing.T) {
 		t.Fatal("the guard must set")
 	}
 }
+
+// TestProvisionMCPNarrowedRoster: a re-provision whose grant_to NARROWS the
+// roster takes the dropped grantees' access back WITH the call (their keys
+// drop to the sentinel) — the record narrowing silently while a dropped
+// agent keeps access until the next build is a take-back that lies.
+func TestProvisionMCPNarrowedRoster(t *testing.T) {
+	spec, reg, gw, store := provisionFixture(t)
+	seedAgents(t, store, "Helper", "Writer")
+	for _, n := range []string{"Helper", "Writer"} {
+		if _, err := reg.RegisterAgent(n, strings.Repeat("a", 64), "#freehold"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := spec.provisionMCP(agent.ProvisionMCPArgs{
+		Name: "sheet-a-ro", Namespace: "mcp", ServicePort: 8000, GrantTo: []string{"Helper", "Writer"},
+	}, false, reg, store); err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	env := storeEnvForTest(t, spec.StateDir)
+	if denied := gw.denyList(t, env[mcptoolKeyEnvKey("writer")]); len(denied) != 1 {
+		t.Fatalf("writer must hold the grant first, got %v", denied)
+	}
+	// The narrowed re-provision: only Helper stays.
+	report, err := spec.provisionMCP(agent.ProvisionMCPArgs{
+		Name: "sheet-a-ro", Namespace: "mcp", ServicePort: 8000, GrantTo: []string{"Helper"},
+	}, false, reg, store)
+	if err != nil {
+		t.Fatalf("re-provision: %v", err)
+	}
+	if denied := gw.denyList(t, env[mcptoolKeyEnvKey("writer")]); len(denied) != 1 || denied[0] != "no-mcp-servers" {
+		t.Fatalf("the dropped grantee must be taken back WITH the call, got %v", denied)
+	}
+	if denied := gw.denyList(t, env[mcptoolKeyEnvKey("helper")]); len(denied) != 1 || denied[0] != "sheet-a-ro" {
+		t.Fatalf("the kept grantee must be untouched, got %v", denied)
+	}
+	if !strings.Contains(report, "sheet-a-ro") {
+		t.Fatalf("report = %s", report)
+	}
+	// A slotted capability's name must be a DNS label (the derived Service
+	// name cannot carry a leading digit or a trailing hyphen).
+	if _, err := spec.provisionMCP(agent.ProvisionMCPArgs{
+		Name: "9sheet-", Namespace: "mcp", ServicePort: 8000, GrantTo: []string{"Helper"},
+	}, false, reg, store); err == nil || !strings.Contains(err.Error(), "DNS label") {
+		t.Fatalf("a non-DNS-label name must be refused on the slotted path, got %v", err)
+	}
+	// A name that is already a RUNNER door lives on one plane only.
+	if err := store.InsertCapability("some-door", state.CapabilityRecord{
+		Kind: "ssh", Address: "root@h", Port: 8800, Origin: state.OriginAgent,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := spec.provisionMCP(agent.ProvisionMCPArgs{
+		Name: "some-door", Namespace: "mcp", ServicePort: 8000, GrantTo: []string{"Helper"},
+	}, false, reg, store); err == nil || !strings.Contains(err.Error(), "one plane") {
+		t.Fatalf("a runner-door name must be refused, got %v", err)
+	}
+}

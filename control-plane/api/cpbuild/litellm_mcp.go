@@ -658,6 +658,12 @@ func (s *Spec) provisionMCP(args agent.ProvisionMCPArgs, callerIsOperator bool, 
 	if _, retired := store.GetRetiredMCP(name); retired && !callerIsOperator {
 		return "", fmt.Errorf("provision_mcp %s: this capability was retired by revoke_capability — an agent may not re-mint a capability it was just told to take away; the operator re-enables the name by provisioning it again", name)
 	}
+	// A capability name lives on ONE plane: a name that is already a RUNNER
+	// door cannot also be an MCP capability (the grant/revoke surface would
+	// resolve it ambiguously).
+	if _, isRunner := store.GetCapability(name); isRunner {
+		return "", fmt.Errorf("provision_mcp %s: the name is already a RUNNER door — pick a different name (a capability name lives on one plane)", name)
+	}
 
 	var rec state.MCPCapabilityRecord
 	if prev, ok := store.GetMCPCapability(name); ok {
@@ -688,6 +694,12 @@ func (s *Spec) provisionMCP(args agent.ProvisionMCPArgs, callerIsOperator bool, 
 		}
 		if err := validateKubeNS(ns); err != nil {
 			return "", fmt.Errorf("provision_mcp %s: %w", name, err)
+		}
+		// The derived URL uses the capability name as the k8s Service name —
+		// it must be a DNS label (runnerNameRe admits leading digits and
+		// trailing hyphens, which no Service can carry).
+		if !kubeNSRe.MatchString(name) {
+			return "", fmt.Errorf("provision_mcp %s: a slotted capability's name becomes the k8s Service name — it must be a DNS label ([a-z0-9-], no leading/trailing hyphen)", name)
 		}
 		if args.ServicePort <= 0 || args.ServicePort > 65535 {
 			return "", fmt.Errorf("provision_mcp %s: service_port is required for a slotted capability (the MCP service's port)", name)
@@ -737,6 +749,7 @@ func (s *Spec) provisionMCP(args agent.ProvisionMCPArgs, callerIsOperator bool, 
 
 	// Record BEFORE the side effects so a failure after this point heals on
 	// the next build (the record re-registers + re-grants).
+	prevGrantees := append([]string(nil), rec.Grantees...)
 	rec.Grantees = append([]string(nil), grantTo...)
 	if err := store.InsertMCPCapability(name, rec); err != nil {
 		return "", fmt.Errorf("record MCP capability: %w", err)
@@ -746,14 +759,27 @@ func (s *Spec) provisionMCP(args agent.ProvisionMCPArgs, callerIsOperator bool, 
 		return "", err
 	}
 
-	// Grant each grantee (their MCP key's object_permission is rewritten
-	// from CP state — which now includes this capability).
+	// Grant each grantee — and take back from every FORMER grantee the
+	// narrowed roster dropped (a re-provision's take-back lands WITH the
+	// call, not at the next build's sweep; the record narrows silently
+	// otherwise while the dropped agent keeps access).
+	dropped := []string{}
+	for _, g := range prevGrantees {
+		if !containsRoster(grantTo, g) {
+			dropped = append(dropped, g)
+		}
+	}
 	granted := []string{}
 	for _, g := range grantTo {
 		if _, _, err := s.ensureAgentMCPKey(g, store); err != nil {
 			return "", fmt.Errorf("grant %s → %s: %w", name, g, err)
 		}
 		granted = append(granted, g)
+	}
+	for _, g := range dropped {
+		if _, _, err := s.ensureAgentMCPKey(g, store); err != nil {
+			return "", fmt.Errorf("take back %s from %s: %w", name, g, err)
+		}
 	}
 
 	report := fmt.Sprintf("mcp capability %s (%s → %s) registered on the gateway and granted to [%s].",
