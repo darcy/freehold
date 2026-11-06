@@ -266,7 +266,6 @@ async function runHarnessOnce(prompt, timeoutMs) {
       'The repository is checked out at the current working directory (the PR\'s base branch — ' +
       'trusted: it holds only previously-reviewed + merged content, and it is the same tree ' +
       'the harness itself runs from) — the attached diff, not the working tree, is the source of truth for what changed. ' +
-      'the working tree, is the source of truth for what changed. ' +
       'Use your read-only tools to inspect surrounding code and verify cross-file claims. ' +
       'Finish by outputting ONLY the single JSON review object the instructions specify.';
     const args = [
