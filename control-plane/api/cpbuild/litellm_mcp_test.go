@@ -643,3 +643,49 @@ func TestRenameMCPKeyAliasFollowsAgent(t *testing.T) {
 		t.Fatalf("gateway alias = %q, want mcptool-renamed", alias)
 	}
 }
+
+// TestSweepConvergesUntrackedDuplicate: a re-mint that hit a transient
+// gateway error leaves the OLD key live on the gateway under the same
+// mcptool-<pod> alias, untracked by the store. The sweep must converge it
+// to the agent's CURRENT grants by hash — a stale grant set must never stay
+// live just because it is not the store's token.
+func TestSweepConvergesUntrackedDuplicate(t *testing.T) {
+	dir := t.TempDir()
+	stateDir := dir + "/agent-tools"
+	litellmFixture(t, stateDir, "master-key", "provider-key", "openai", "gpt-4o")
+	store := seededMCPStore(t, stateDir)
+	seedAgents(t, store, "Helper")
+	gw := newMCPKeyGateway()
+	srv := httptest.NewServer(gw.handler(t))
+	defer srv.Close()
+	spec := &Spec{StateDir: stateDir, LitellmBaseURL: srv.URL + "/v1"}
+
+	token, _, err := spec.ensureAgentMCPKey("Helper", store)
+	if err != nil {
+		t.Fatalf("mint: %v", err)
+	}
+	// The untracked duplicate: a second key with the SAME alias, holding a
+	// stale (wider) grant set, whose token the store does not know.
+	gw.mu.Lock()
+	gw.keys++
+	dup := &keyRecord{
+		token: fmt.Sprintf("sk-dup-%d", gw.keys), hash: fmt.Sprintf("%064x", gw.keys),
+		alias: "mcptool-helper", perm: map[string]interface{}{"mcp_servers": []string{"evil"}},
+	}
+	gw.byToken[dup.token] = dup
+	gw.byHash[dup.hash] = dup
+	gw.mu.Unlock()
+
+	if _, err := spec.sweepLitellmMCPAccess(store); err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	// The duplicate converged to the state's grants (it was rewritten by
+	// hash, not skipped because its alias belongs to a live agent).
+	if denied := gw.denyList(t, dup.token); len(denied) != 1 || denied[0] != "google_sheets_a_ro" {
+		t.Fatalf("the untracked duplicate must converge to the state's grants, got %v", denied)
+	}
+	// The tracked key is untouched in its grants.
+	if denied := gw.denyList(t, token); len(denied) != 1 || denied[0] != "google_sheets_a_ro" {
+		t.Fatalf("the tracked key must hold the state's grants, got %v", denied)
+	}
+}

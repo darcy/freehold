@@ -469,9 +469,11 @@ func (s *Spec) sweepLitellmMCPAccess(store *state.StateStore) (string, error) {
 	//    plane's headline signal — someone edited a key behind the CP's
 	//    back — so it lands in the stage report, never discarded.
 	agentPods := map[string]bool{}
+	podToAgent := map[string]string{}
 	for name := range store.Snapshot().Agents {
 		pod := agent.PodName(name)
 		agentPods[pod] = true
+		podToAgent[pod] = name
 		_, drift, err := s.ensureAgentMCPKey(name, store)
 		if err != nil {
 			return "", err
@@ -515,8 +517,24 @@ func (s *Spec) sweepLitellmMCPAccess(store *state.StateStore) (string, error) {
 				if s.maybeDenyMCP(ls, hash, alias, perm) {
 					report = append(report, alias+" swept to no-mcp-servers (no such agent)")
 				}
+				continue
 			}
-			// A live agent's key was just overwritten in (1).
+			// A LIVE agent's key: rewritten to CP state BY HASH, not skipped
+			// by alias — a re-mint that hit a transient gateway error leaves
+			// the old (still-live) key behind UNTRACKED under the same alias,
+			// and step 1 only rewrote the store's token. Overwriting every
+			// key of the alias converges the untracked duplicate to the same
+			// legit grants instead of leaving a stale grant set live forever.
+			want := agentMCPPermissionBody(store, podToAgent[pod])
+			if !samePermission(perm, want) {
+				if _, err := ls.call(http.MethodPost, "/key/update", map[string]interface{}{
+					"key": hash, "object_permission": want,
+				}); err != nil {
+					return "", fmt.Errorf("overwrite %s: %w", alias, err)
+				}
+				hadJSON, _ := json.Marshal(perm)
+				report = append(report, alias+" rewritten (was "+trimJSON(string(hadJSON))+")")
+			}
 		default:
 			if s.maybeDenyMCP(ls, hash, alias, perm) {
 				report = append(report, alias+" swept to no-mcp-servers (foreign key)")
