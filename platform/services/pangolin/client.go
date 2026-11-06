@@ -200,11 +200,12 @@ func (c *Client) MintAccessToken(ctx context.Context, resourceID int, title stri
 
 // SetTarget points the resource at the app's internal address, reachable
 // from the gateway (where Newt dials out): freehold-subnet IP + the app's
-// port (a NodePort, a guest's port). Method "http" — Pangolin terminates
-// TLS and proxies plain HTTP to it.
-func (c *Client) SetTarget(ctx context.Context, resourceID, siteID int, ip string, port int) error {
+// port. method is "http" (Pangolin terminates TLS, proxies plain HTTP) or
+// "https" (TLS to the home edge — the member-gated path; the resource's
+// tlsServerName carries the SNI).
+func (c *Client) SetTarget(ctx context.Context, resourceID, siteID int, ip string, port int, method string) error {
 	return c.do(ctx, http.MethodPut, fmt.Sprintf("/v1/resource/%d/target", resourceID), map[string]interface{}{
-		"siteId": siteID, "ip": ip, "port": port, "method": "http",
+		"siteId": siteID, "ip": ip, "port": port, "method": method,
 	}, nil)
 }
 
@@ -292,9 +293,9 @@ func (c *Client) EnsureResource(ctx context.Context, orgID string, siteID int, s
 	return r, true, err
 }
 
-// SetTargetIfDiffers points the resource at ip:port, skipping the write when
-// the target already matches (re-apply convergence, no churn).
-func (c *Client) SetTargetIfDiffers(ctx context.Context, resourceID, siteID int, ip string, port int) error {
+// SetTargetIfDiffers points the resource at ip:port:method, skipping the
+// write when the target already matches (re-apply convergence, no churn).
+func (c *Client) SetTargetIfDiffers(ctx context.Context, resourceID, siteID int, ip string, port int, method string) error {
 	var out struct {
 		Targets []struct {
 			SiteID int    `json:"siteId"`
@@ -307,9 +308,174 @@ func (c *Client) SetTargetIfDiffers(ctx context.Context, resourceID, siteID int,
 		return err
 	}
 	for _, t := range out.Targets {
-		if t.SiteID == siteID && t.IP == ip && t.Port == port && t.Method == "http" {
+		if t.SiteID == siteID && t.IP == ip && t.Port == port && t.Method == method {
 			return nil
 		}
 	}
-	return c.SetTarget(ctx, resourceID, siteID, ip, port)
+	return c.SetTarget(ctx, resourceID, siteID, ip, port, method)
+}
+
+// ---- the public path's SSO + per-app policy (docs/NETWORK.md, model D) ----
+
+// IdP is one identity provider (the global OIDC IdP the world's CP provides).
+type IdP struct {
+	IDPID   int    `json:"idpId"`
+	Name    string `json:"name"`
+	Type    string `json:"type"`
+	Variant string `json:"variant"`
+}
+
+// ListIDPs returns the instance's global identity providers.
+func (c *Client) ListIDPs(ctx context.Context) ([]IdP, error) {
+	var out struct {
+		IDPs []IdP `json:"idps"`
+	}
+	if err := c.do(ctx, http.MethodGet, "/v1/idp", nil, &out); err != nil {
+		return nil, err
+	}
+	return out.IDPs, nil
+}
+
+// CreateOIDCIDP registers the world's CP as a global OIDC identity provider.
+// Returns the idp id + Pangolin's callback (the redirect URI our authorize
+// endpoint must accept). Pangolin decrypts the client secret for every login
+// and token exchange; the CP seals the same pair.
+func (c *Client) CreateOIDCIDP(ctx context.Context, name, clientID, clientSecret, authURL, tokenURL string) (int, string, error) {
+	var out struct {
+		IDPID       int    `json:"idpId"`
+		RedirectURL string `json:"redirectUrl"`
+	}
+	if err := c.do(ctx, http.MethodPut, "/v1/idp/oidc", map[string]interface{}{
+		"name": name, "clientId": clientID, "clientSecret": clientSecret,
+		"authUrl": authURL, "tokenUrl": tokenURL,
+		"identifierPath": "sub", "namePath": "name",
+		"scopes": "openid profile email", "autoProvision": true, "variant": "oidc",
+	}, &out); err != nil {
+		return 0, "", err
+	}
+	if out.IDPID == 0 {
+		return 0, "", fmt.Errorf("pangolin: the OIDC IdP create returned no idpId")
+	}
+	return out.IDPID, out.RedirectURL, nil
+}
+
+// EnsureOIDCIDP finds the global OIDC IdP by name, creating it when absent.
+// created reports a fresh create (its callback must be sealed); an existing
+// IdP returns "" for the callback (the CP already sealed it).
+func (c *Client) EnsureOIDCIDP(ctx context.Context, name, clientID, clientSecret, authURL, tokenURL string) (idpID int, redirectURL string, created bool, err error) {
+	idps, ierr := c.ListIDPs(ctx)
+	if ierr != nil {
+		return 0, "", false, ierr
+	}
+	for _, i := range idps {
+		if i.Name == name && i.Type == "oidc" {
+			return i.IDPID, "", false, nil
+		}
+	}
+	id, redirect, cerr := c.CreateOIDCIDP(ctx, name, clientID, clientSecret, authURL, tokenURL)
+	return id, redirect, true, cerr
+}
+
+// AssignIDPOrg links a global IdP to the org with its auto-provision role
+// mapping (a JMESPath expression; "'family'" maps every admitted key to the
+// family role). Idempotent (PUT).
+func (c *Client) AssignIDPOrg(ctx context.Context, idpID int, orgID, roleMapping string) error {
+	return c.do(ctx, http.MethodPut, fmt.Sprintf("/v1/idp/%d/org/%s", idpID, orgID), map[string]string{
+		"roleMapping": roleMapping,
+	}, nil)
+}
+
+// Role is one org role (the access unit for resources).
+type Role struct {
+	RoleID int    `json:"roleId"`
+	Name   string `json:"name"`
+}
+
+// ListRoles returns the org's roles.
+func (c *Client) ListRoles(ctx context.Context, orgID string) ([]Role, error) {
+	var out struct {
+		Roles []Role `json:"roles"`
+	}
+	if err := c.do(ctx, http.MethodGet, "/v1/org/"+orgID+"/roles", nil, &out); err != nil {
+		return nil, err
+	}
+	return out.Roles, nil
+}
+
+// EnsureRole finds the org role by name, creating it when absent.
+func (c *Client) EnsureRole(ctx context.Context, orgID, name string) (int, error) {
+	roles, err := c.ListRoles(ctx, orgID)
+	if err != nil {
+		return 0, err
+	}
+	for _, r := range roles {
+		if r.Name == name {
+			return r.RoleID, nil
+		}
+	}
+	var out Role
+	if err := c.do(ctx, http.MethodPut, "/v1/org/"+orgID+"/role", map[string]interface{}{"name": name}, &out); err != nil {
+		return 0, err
+	}
+	if out.RoleID == 0 {
+		return 0, fmt.Errorf("pangolin: the role create returned no roleId")
+	}
+	return out.RoleID, nil
+}
+
+// SetAccessControl sets a resource's auth posture: SSO on/off, the roles
+// allowed, and (SSO) the IdP to skip straight to. Idempotent.
+func (c *Client) SetAccessControl(ctx context.Context, resourceID int, sso bool, roleIDs []int, skipToIDPID int) error {
+	body := map[string]interface{}{"sso": sso, "userIds": []string{}, "roleIds": roleIDs}
+	if skipToIDPID != 0 {
+		body["skipToIdpId"] = skipToIDPID
+	}
+	return c.do(ctx, http.MethodPut, fmt.Sprintf("/v1/resource-policy/%d/access-control", resourceID), body, nil)
+}
+
+// SetTLSName sets a resource's upstream TLS SNI (the home edge's vhost name) —
+// the tunnel target is https to the edge, which serves the per-app vhost by
+// SNI/Host.
+func (c *Client) SetTLSName(ctx context.Context, resourceID int, name string) error {
+	return c.do(ctx, http.MethodPost, fmt.Sprintf("/v1/resource/%d", resourceID), map[string]interface{}{
+		"tlsServerName": name,
+	}, nil)
+}
+
+// Rule is one access rule on a resource (ACCEPT bypasses auth for matching
+// requests; PASS forces auth; DROP rejects).
+type Rule struct {
+	Action   string `json:"action"`
+	Match    string `json:"match"`
+	Value    string `json:"value"`
+	Priority int    `json:"priority"`
+}
+
+// ListRules returns a resource's rules.
+func (c *Client) ListRules(ctx context.Context, resourceID int) ([]Rule, error) {
+	var out struct {
+		Rules []Rule `json:"rules"`
+	}
+	if err := c.do(ctx, http.MethodGet, fmt.Sprintf("/v1/public-resource/%d/rules", resourceID), nil, &out); err != nil {
+		return nil, err
+	}
+	return out.Rules, nil
+}
+
+// EnsureAcceptRule creates an ACCEPT rule (bypass auth) for one path pattern
+// when no matching rule exists. The exempt paths are the app's own-auth
+// surfaces (navidrome /rest, browns /api) — native clients cannot do SSO.
+func (c *Client) EnsureAcceptRule(ctx context.Context, resourceID int, path string, priority int) error {
+	rules, err := c.ListRules(ctx, resourceID)
+	if err != nil {
+		return err
+	}
+	for _, r := range rules {
+		if r.Action == "ACCEPT" && r.Match == "PATH" && r.Value == path {
+			return nil
+		}
+	}
+	return c.do(ctx, http.MethodPut, fmt.Sprintf("/v1/public-resource/%d/rule", resourceID), map[string]interface{}{
+		"action": "ACCEPT", "match": "PATH", "value": path, "priority": priority, "enabled": true,
+	}, nil)
 }

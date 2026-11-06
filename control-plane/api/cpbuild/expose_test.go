@@ -676,6 +676,18 @@ func TestExposeRidesThePangolinPath(t *testing.T) {
 			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"resources":[]}}`))
 		case "/v1/org/freehold/resource":
 			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"resourceId":7,"name":"yuvomi","subdomain":"yuvomi","fullDomain":"yuvomi.librem.example.test","domainId":"domain1","ssl":true,"enabled":true}}`))
+		case "/v1/org/freehold/roles":
+			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"roles":[]}}`))
+		case "/v1/org/freehold/role":
+			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"roleId":5,"name":"family"}}`))
+		case "/v1/idp":
+			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"idps":[]}}`))
+		case "/v1/idp/oidc":
+			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"idpId":11,"redirectUrl":"https://pangolin.librem.example.test/auth/idp/11/oidc/callback"}}`))
+		case "/v1/idp/11/org/freehold":
+			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{}}`))
+		case "/v1/resource-policy/7/access-control":
+			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{}}`))
 		case "/v1/resource/7":
 			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":null}`))
 		case "/v1/resource/7/targets":
@@ -706,12 +718,21 @@ func TestExposeRidesThePangolinPath(t *testing.T) {
 	}
 	want := []string{
 		"GET /v1/org/freehold/sites",
+		// the world-level SSO stages: the family role, the CP's OIDC IdP, the
+		// org's auto-provision policy
+		"GET /v1/org/freehold/roles",
+		"PUT /v1/org/freehold/role",
+		"GET /v1/idp",
+		"PUT /v1/idp/oidc",
+		"PUT /v1/idp/11/org/freehold",
 		"GET /v1/org/freehold/domains",
 		"GET /v1/org/freehold/resources",
 		"PUT /v1/org/freehold/resource",
 		"POST /v1/resource/7", // the sso gate — created resources are never open
+		"POST /v1/resource/7", // the upstream TLS SNI (the home edge's vhost)
+		"PUT /v1/resource-policy/7/access-control",
 		"GET /v1/resource/7/targets",
-		"PUT /v1/resource/7/target",
+		"PUT /v1/resource/7/target", // https to the home edge, not the raw app
 	}
 	// The ordering PROVEN behaviorally: the fake refused every pre-tunnel
 	// dial — a live expose here means the tunnel asserted first. The
@@ -765,8 +786,16 @@ func TestExposePangolinEmptyDNSKeepsTheProxyIP(t *testing.T) {
 			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"domains":[{"domainId":"domain1","baseDomain":"librem.example.test","verified":true}]}}`))
 		case "/v1/org/freehold/resources":
 			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"resources":[{"resourceId":9,"name":"yuvomi","subdomain":"yuvomi","fullDomain":"yuvomi.librem.example.test","domainId":"domain1"}]}}`))
+		case "/v1/org/freehold/roles":
+			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"roles":[{"roleId":5,"name":"family"}]}}`))
+		case "/v1/idp":
+			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"idps":[{"idpId":11,"name":"freehold","type":"oidc"}]}}`))
+		case "/v1/idp/11/org/freehold":
+			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{}}`))
+		case "/v1/resource-policy/9/access-control":
+			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{}}`))
 		case "/v1/resource/9":
-			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":null}`)) // the sso re-assert
+			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":null}`)) // the sso re-assert / tls name
 		case "/v1/resource/9/targets":
 			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"targets":[]}}`))
 		case "/v1/resource/9/target":
@@ -1071,6 +1100,18 @@ func TestPangolinEnsureAssertsTheGatewayNewt(t *testing.T) {
 			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"resources":[]}}`))
 		case "/v1/org/freehold/resource":
 			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"resourceId":7,"name":"yuvomi","subdomain":"yuvomi","fullDomain":"yuvomi.librem.example.test","domainId":"domain1"}}`))
+		case "/v1/org/freehold/roles":
+			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"roles":[]}}`))
+		case "/v1/org/freehold/role":
+			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"roleId":5,"name":"family"}}`))
+		case "/v1/idp":
+			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"idps":[]}}`))
+		case "/v1/idp/oidc":
+			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"idpId":11,"redirectUrl":"https://pangolin.librem.example.test/auth/idp/11/oidc/callback"}}`))
+		case "/v1/idp/11/org/freehold":
+			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{}}`))
+		case "/v1/resource-policy/7/access-control":
+			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{}}`))
 		case "/v1/resource/7":
 			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":null}`))
 		case "/v1/resource/7/targets":

@@ -8,13 +8,13 @@ import (
 func TestHostGatewayScriptShape(t *testing.T) {
 	script := HostGatewayScript("10.77.0.0/24", "203.0.113.7", "10.77.0.13", "10.77.0.12", "10.77.0.11", "vmbr0")
 	for _, want := range []string{
-		"address 10.77.0.1/24",          // the host owns the subnet's .1
-		"ip daddr 203.0.113.7",          // the DNATs match the public edge
-		"dnat to 10.77.0.13",            // 80/443/6443 -> the k3s node
-		"dnat to 10.77.0.12:8080",       // console
-		"dnat to 10.77.0.11:3000",       // relay dial
-		"policy drop;",                  // the input policy a public edge needs
-		"tcp dport 22 accept",           // ssh stays
+		"address 10.77.0.1/24",    // the host owns the subnet's .1
+		"ip daddr 203.0.113.7",    // the DNATs match the public edge
+		"dnat to 10.77.0.13",      // 80/443/6443 -> the k3s node
+		"dnat to 10.77.0.12:8080", // console
+		"dnat to 10.77.0.11:3000", // relay dial
+		"policy drop;",            // the input policy a public edge needs
+		"tcp dport 22 accept",     // ssh stays
 		"ip saddr 10.77.0.0/24 masquerade",
 		"interface=vmbr0",
 	} {

@@ -112,6 +112,8 @@ func GatewayInternalIP(cidr string) string { return nthIP(cidr, 1) }
 // on the internal CIDR: relay .11, cp .12, k3s .13.
 func InternalIPFor(cidr, role string) string {
 	switch role {
+	case "gateway":
+		return nthIP(cidr, 1)
 	case "relay":
 		return nthIP(cidr, 11)
 	case "cp":

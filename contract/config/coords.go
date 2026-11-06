@@ -147,4 +147,14 @@ type PangolinCoords struct {
 	Site   string `json:"site"`   // the newt site's name (the gateway's dial-out identity)
 	Domain string `json:"domain"` // the base domain Pangolin serves (the world domain)
 	DNSIP  string `json:"dns_ip,omitempty"`
+	// Apps is the operator's public-path allowlist: only these registry app
+	// names ride the Pangolin tunnel (empty = every registry app, the
+	// pre-allowlist behaviour). An app not listed keeps its A record on the
+	// proxy and no resource — "we have a public path" is not "expose
+	// everything".
+	Apps []string `json:"apps,omitempty"`
+	// Relay exposes the relay community host through the public path, UNGATED:
+	// Buzz clients authenticate with their own Nostr keys and cannot do a
+	// browser SSO, so SSO on the relay host would break every client.
+	Relay bool `json:"relay,omitempty"`
 }

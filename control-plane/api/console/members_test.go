@@ -24,6 +24,7 @@ import (
 const testChannelID = "3fa85f64-5717-4562-b3fc-2c963f66afa6"
 
 type memberFixture struct {
+	dir         string
 	s           *Server
 	opSec       []byte
 	opPK        string
@@ -53,6 +54,7 @@ func newMemberFixtureOpts(t *testing.T, memberInChannel bool) *memberFixture {
 		t.Fatal(err)
 	}
 	f := &memberFixture{
+		dir:       dir,
 		opSec:     secret32(1),
 		memberSec: secret32(2),
 		relaySec:  secret32(3),

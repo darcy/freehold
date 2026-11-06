@@ -18,6 +18,7 @@ package console
 
 import (
 	"crypto/sha256"
+	"crypto/subtle"
 	_ "embed"
 	"encoding/base64"
 	"encoding/hex"
@@ -756,6 +757,39 @@ func (s *Server) forwardAuthVerify(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, "member gate is not enabled on this console")
 		return
 	}
+	// The Pangolin public path (docs/NETWORK.md): the edge authenticated the
+	// request at the VPS and forwarded the member's Nostr pubkey as
+	// Remote-User. Trust it ONLY when the forward_auth call carries the edge's
+	// shared token AND the original client is the gateway — the only address
+	// that reaches an app vhost THROUGH the tunnel (Newt runs on the gateway).
+	// A LAN client reaches the vhost directly and keeps the cookie path; the
+	// token keeps a direct call to /auth/verify from forging the client
+	// address. The relay roster is still the ACL, checked per request.
+	if want := s.edgeTunnelToken(); want != "" {
+		if got := r.Header.Get("X-Freehold-Tunnel-Token"); got != "" && subtle.ConstantTimeCompare([]byte(got), []byte(want)) == 1 {
+			if ip := r.Header.Get("X-Original-Client-IP"); ip != "" && ip == s.gatewayIP() {
+				pk := strings.ToLower(strings.TrimSpace(r.Header.Get("Remote-User")))
+				if !isHex64(pk) {
+					log.Printf("gate deny %s%s: tunnel request without a member identity", r.Header.Get("X-Original-Host"), r.Header.Get("X-Original-Uri"))
+					writeErr(w, http.StatusUnauthorized, "the public path did not carry a member identity")
+					return
+				}
+				admitted, err := s.memberAdmits(MemberInfo{Pubkey: pk, Name: pk}, r)
+				if err != nil {
+					log.Printf("gate deny %s%s: tunnel user (pk %.8s) membership error: %v", r.Header.Get("X-Original-Host"), r.Header.Get("X-Original-Uri"), pk, err)
+					writeErr(w, http.StatusServiceUnavailable, "membership unavailable: "+err.Error())
+					return
+				}
+				if admitted {
+					w.WriteHeader(http.StatusNoContent)
+					return
+				}
+				log.Printf("gate deny %s%s: tunnel user (pk %.8s) not in the app's group", r.Header.Get("X-Original-Host"), r.Header.Get("X-Original-Uri"), pk)
+				writeErr(w, http.StatusForbidden, "the Pangolin identity is not in this app's group")
+				return
+			}
+		}
+	}
 	// The deny-log's subject: the app host + path the gate saw (the same
 	// originals memberAdmits judges).
 	host := r.Header.Get("X-Original-Host")
@@ -863,6 +897,26 @@ func (s *Server) forwardAuthVerify(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeErr(w, http.StatusUnauthorized, "no valid session — sign in at /auth")
+}
+
+// edgeTunnelToken is the shared secret the edge stamps on the gate's
+// forward_auth call (derived from the console identity — the same value the
+// Caddyfile renders). "" when no build executor is bound (no public path).
+func (s *Server) edgeTunnelToken() string {
+	if s.Builder == nil {
+		return ""
+	}
+	return s.Builder.EdgeTunnelToken()
+}
+
+// gatewayIP is the freehold-subnet gateway's internal address — the only
+// client that reaches an app vhost THROUGH the Pangolin tunnel (Newt runs on
+// the gateway). "" without a gateway.
+func (s *Server) gatewayIP() string {
+	if s.Builder == nil || s.Builder.GatewayCIDR == "" {
+		return ""
+	}
+	return config.InternalIPFor(s.Builder.GatewayCIDR, "gateway")
 }
 
 // ofStr dereferences an optional string ("" for nil) — the optional PublicOrigin.

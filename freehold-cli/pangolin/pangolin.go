@@ -139,7 +139,14 @@ func run(cmd *cobra.Command, args []string) error {
 	// --destroy-host finds it here). DNSIP = the VPS: the exposed apps' A
 	// records move to the edge the moment the build runs.
 	cfg.PangolinHost = &config.PangolinHostSpec{Provider: "vultr", ID: host.ID, IP: host.IP, Endpoint: endpoint}
-	cfg.Pangolin = &config.PangolinCoords{Org: "freehold", Site: cfg.Name, Domain: worldDomain, DNSIP: host.IP}
+	// The operator's public-path policy ([pangolin] apps/relay) is SOURCE:
+	// a re-run re-records the instance shape but never resets the allowlist.
+	var apps []string
+	var relay bool
+	if cfg.Pangolin != nil {
+		apps, relay = cfg.Pangolin.Apps, cfg.Pangolin.Relay
+	}
+	cfg.Pangolin = &config.PangolinCoords{Org: "freehold", Site: cfg.Name, Domain: worldDomain, DNSIP: host.IP, Apps: apps, Relay: relay}
 	// The edge's own hostname (pangolin.<world>) points at the VPS: its ACME
 	// cert issues there (HTTP-01, on-demand) and Newt dials TLS through it.
 	// The CP owns the zone credential, so `freehold build` asserts the record

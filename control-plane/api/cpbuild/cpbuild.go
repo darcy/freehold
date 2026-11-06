@@ -168,6 +168,16 @@ type Spec struct {
 	// re-ensures per record — the stage is once-per-build, not per-app).
 	newtAsserted bool
 
+	// publicPathAsserted: the world-level public-path stages (the CP's OIDC
+	// client record, the Pangolin global OIDC IdP + the org's family role +
+	// auto-provision policy, the relay host's ungated resource) ran once this
+	// build — the per-app ensure calls them.
+	publicPathAsserted bool
+	// idpID/familyRoleID: the Pangolin OIDC IdP + org role the per-app access
+	// control points at (set by pangolinPublicPathEnsure).
+	idpID        int
+	familyRoleID int
+
 	// seq: the tests' monotonic event counter (the exec-command ordering
 	// pins against the API call order). nil in production.
 	seq *int

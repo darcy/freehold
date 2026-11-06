@@ -24,12 +24,15 @@ package cpbuild
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
 	"crypto/x509"
+	"encoding/hex"
 	"encoding/pem"
 	"errors"
 	"fmt"
 	"log"
-	"net"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -284,10 +287,10 @@ func (s *Spec) edgeRiders(registry map[string]bool) []caddydeploy.AppVhost {
 // success, nothing is reachable.
 func (s *Spec) edgeRiderDNSEnsure(name string) (bool, error) {
 	fqdn := appFQDN(s.CpHost, s.WorldDomainOverride, name)
+	// Riders are operator-pinned vhosts with no registry row, so no Pangolin
+	// resource exists for them: their A record stays on the proxy (the
+	// allowlist gates REGISTRY apps only).
 	ip := s.ProxyIP
-	if s.Pangolin != nil && s.Pangolin.DNSIP != "" {
-		ip = s.Pangolin.DNSIP
-	}
 	if ip == "" {
 		return false, fmt.Errorf("rider dns %s: the proxy IP is not in the world coords", fqdn)
 	}
@@ -415,7 +418,7 @@ func (s *Spec) appDNSEnsure(rec agenttools.AppRecord) (bool, error) {
 	// home IP appears in no public DNS). Empty DNSIP keeps the proxy IP — a
 	// dev/test world exercises the tunnel without moving the public DNS.
 	ip := s.ProxyIP
-	if s.Pangolin != nil && s.Pangolin.DNSIP != "" {
+	if s.Pangolin != nil && s.Pangolin.DNSIP != "" && s.pangolinRides(rec.Name) {
 		ip = s.Pangolin.DNSIP
 	}
 	if ip == "" {
@@ -493,6 +496,9 @@ func (s *Spec) pangolinEnsure(rec agenttools.AppRecord) error {
 	if rec.Visibility == agenttools.VisibilityLAN {
 		return nil
 	}
+	if !s.pangolinRides(rec.Name) {
+		return nil
+	}
 	if err := s.pangolinHostDNSEnsure(); err != nil {
 		return err
 	}
@@ -502,14 +508,6 @@ func (s *Spec) pangolinEnsure(rec agenttools.AppRecord) error {
 	}
 	if s.GatewayLxc == 0 && !s.HostedGateway {
 		return fmt.Errorf("pangolin: the world has no gateway — the Newt tunnel client has nowhere to run (the pangolin public path needs one)")
-	}
-	host, portStr, err := net.SplitHostPort(rec.Target)
-	if err != nil {
-		return fmt.Errorf("pangolin: target %q is not host:port", rec.Target)
-	}
-	port, err := strconv.Atoi(portStr)
-	if err != nil {
-		return fmt.Errorf("pangolin: target %q port: %w", rec.Target, err)
 	}
 	// The tunnel FIRST: the client's base is the CP's loopback — the
 	// forward unit is what makes that address mean the VPS. Dailing
@@ -530,6 +528,9 @@ func (s *Spec) pangolinEnsure(rec agenttools.AppRecord) error {
 	if err := s.ensureNewtGateway(endpoint); err != nil {
 		return fmt.Errorf("pangolin: the gateway's newt stage: %w", err)
 	}
+	if err := s.pangolinPublicPathEnsure(cl, site.SiteID); err != nil {
+		return err
+	}
 	domainID, err := cl.EnsureDomain(context.Background(), p.Org, p.Domain)
 	if err != nil {
 		return err
@@ -538,13 +539,222 @@ func (s *Spec) pangolinEnsure(rec agenttools.AppRecord) error {
 	if err != nil {
 		return fmt.Errorf("pangolin: resource %s: %w", rec.Name, err)
 	}
-	if err := cl.SetTargetIfDiffers(context.Background(), res.ResourceID, site.SiteID, host, port); err != nil {
-		return fmt.Errorf("pangolin: target %s: %w", rec.Target, err)
+	// Model D (docs/NETWORK.md): the edge authenticates via the CP's OIDC IdP
+	// and forwards the member's pubkey; the home gate enforces the app's
+	// channel per request. The target is the HOME EDGE (https, SNI = the app
+	// vhost) — not the raw app — so the gate runs. Native clients bypass the
+	// SSO on the operator-pinned exempt paths (ACCEPT rules) and reach the
+	// app's own auth.
+	if err := cl.SetTLSName(context.Background(), res.ResourceID, s.appRecordFQDN(rec)); err != nil {
+		return fmt.Errorf("pangolin: tls name %s: %w", rec.Name, err)
+	}
+	if err := cl.SetAccessControl(context.Background(), res.ResourceID, true, []int{s.familyRoleID}, s.idpID); err != nil {
+		return fmt.Errorf("pangolin: access control %s: %w", rec.Name, err)
+	}
+	for i, path := range s.edgeAppExemptPaths(rec.Name) {
+		if err := cl.EnsureAcceptRule(context.Background(), res.ResourceID, path, i+1); err != nil {
+			return fmt.Errorf("pangolin: exempt rule %s %s: %w", rec.Name, path, err)
+		}
+	}
+	// https to the home edge; Newt (on the gateway) forwards to the k3s node.
+	// The vhost's SNI/Host is the app's own name (tlsServerName above).
+	if err := cl.SetTargetIfDiffers(context.Background(), res.ResourceID, site.SiteID, s.k3sIP(), 443, "https"); err != nil {
+		return fmt.Errorf("pangolin: target %s: %w", rec.Name, err)
 	}
 	if created {
 		fmt.Fprintf(os.Stderr, "pangolin: resource %s created (%s)\n", rec.Name, res.FullDomain)
 	}
 	return nil
+}
+
+// pangolinPublicPathEnsure asserts the WORLD-LEVEL half of the public path
+// once per build (the per-app ensure calls it): the CP's OIDC client record
+// (sealed to the console identity), the Pangolin global OIDC IdP + the org's
+// family role + auto-provision policy, and — when the coords ask — the relay
+// host's UNGATED resource (Buzz clients authenticate with their own keys; a
+// browser SSO would break every websocket).
+func (s *Spec) pangolinPublicPathEnsure(cl *pangolin.Client, siteID int) error {
+	if s.publicPathAsserted {
+		return nil
+	}
+	p := s.Pangolin
+	ctx := context.Background()
+	clientID, clientSecret, redirectURI, err := s.oidcCreds()
+	if err != nil || clientID == "" || clientSecret == "" {
+		clientID, err = randomHex(24)
+		if err != nil {
+			return err
+		}
+		clientSecret, err = randomHex(32)
+		if err != nil {
+			return err
+		}
+		redirectURI = ""
+		if err := s.sealOIDCCreds(clientID, clientSecret, ""); err != nil {
+			return fmt.Errorf("pangolin: seal the OIDC client record: %w", err)
+		}
+	}
+	roleID, err := cl.EnsureRole(ctx, p.Org, "family")
+	if err != nil {
+		return fmt.Errorf("pangolin: the family role: %w", err)
+	}
+	idpID, newRedirect, created, err := cl.EnsureOIDCIDP(ctx, "freehold", clientID, clientSecret,
+		"https://"+s.CpHost+"/api/oidc/authorize", "https://"+s.CpHost+"/api/oidc/token")
+	if err != nil {
+		return fmt.Errorf("pangolin: the OIDC IdP: %w", err)
+	}
+	if created && newRedirect != "" {
+		redirectURI = newRedirect
+	}
+	if redirectURI == "" {
+		// Deterministic callback (the dashboard path is fixed once the idp
+		// exists): what our authorize endpoint must accept.
+		redirectURI = "https://pangolin." + p.Domain + "/auth/idp/" + strconv.Itoa(idpID) + "/oidc/callback"
+	}
+	if _, _, stored, _ := s.oidcCreds(); stored != redirectURI {
+		if err := s.sealOIDCCreds(clientID, clientSecret, redirectURI); err != nil {
+			return fmt.Errorf("pangolin: seal the OIDC callback: %w", err)
+		}
+	}
+	if err := cl.AssignIDPOrg(ctx, idpID, p.Org, "'family'"); err != nil {
+		return fmt.Errorf("pangolin: the IdP org policy: %w", err)
+	}
+	s.idpID, s.familyRoleID = idpID, roleID
+	s.publicPathAsserted = true
+	if !p.Relay {
+		return nil
+	}
+	sub := relaySubdomain(s.RelayHost, p.Domain)
+	if sub == "" {
+		return fmt.Errorf("pangolin: the relay host %q is not a child of the world domain %q — cannot expose it", s.RelayHost, p.Domain)
+	}
+	// The relay host's public A record moves to the VPS (the resource routes
+	// it there); the CP's own relay DIAL is the raw guest IP, so this changes
+	// nothing about how the world reaches its relay.
+	if p.DNSIP != "" {
+		provider, env, derr := s.dnsCredFromStore("relay")
+		if derr != nil {
+			return fmt.Errorf("pangolin: relay dns %s: %w", s.RelayHost, derr)
+		}
+		mgr, merr := dnsman.For(provider, env)
+		if merr != nil {
+			return fmt.Errorf("pangolin: relay dns %s: %w", s.RelayHost, merr)
+		}
+		if uerr := mgr.UpsertA(s.RelayHost, p.DNSIP); uerr != nil {
+			return fmt.Errorf("pangolin: relay dns %s: %w", s.RelayHost, uerr)
+		}
+	}
+	domainID, err := cl.EnsureDomain(ctx, p.Org, p.Domain)
+	if err != nil {
+		return err
+	}
+	res, _, err := cl.EnsureResource(ctx, p.Org, siteID, sub, domainID, p.Domain)
+	if err != nil {
+		return fmt.Errorf("pangolin: relay resource: %w", err)
+	}
+	if err := cl.SetAccessControl(ctx, res.ResourceID, false, nil, 0); err != nil {
+		return fmt.Errorf("pangolin: relay access control: %w", err)
+	}
+	if err := cl.SetTargetIfDiffers(ctx, res.ResourceID, siteID, s.RelayIP, 3000, "http"); err != nil {
+		return fmt.Errorf("pangolin: relay target: %w", err)
+	}
+	return nil
+}
+
+// relaySubdomain is the relay host's label under the world domain
+// (relay.<domain> → "relay"); "" when the host is not a child of it.
+func relaySubdomain(relayHost, domain string) string {
+	if relayHost == "" || domain == "" || relayHost == domain {
+		return ""
+	}
+	sub := strings.TrimSuffix(relayHost, "."+domain)
+	if sub == relayHost || sub == "" {
+		return ""
+	}
+	return sub
+}
+
+// edgeAppExemptPaths is the operator's at-source exempt paths for one app
+// (the [edge.apps] rider pins) — mirrored onto the Pangolin resource as ACCEPT
+// rules: native clients (navidrome /rest, browns /api) authenticate with the
+// app, never a browser SSO.
+func (s *Spec) edgeAppExemptPaths(name string) []string {
+	ea, ok := s.EdgeApps[name]
+	if !ok || len(ea.ExemptPaths) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(ea.ExemptPaths))
+	for _, p := range ea.ExemptPaths {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// oidcCreds opens the world's OIDC client record (world-secrets/oidc.json,
+// sealed to the console identity): the client id/secret the Pangolin IdP was
+// created with, and the callback our authorize endpoint accepts.
+func (s *Spec) oidcCreds() (clientID, clientSecret, redirectURI string, err error) {
+	root := s.consoleStateRoot()
+	path := filepath.Join(root, "world-secrets", "oidc.json")
+	if !cert.CredExists(path) {
+		return "", "", "", fmt.Errorf("no OIDC client record on the CP at %s", path)
+	}
+	secret, err := s.consoleEncSecretAt(root)
+	if err != nil {
+		return "", "", "", err
+	}
+	open := func(sec, aad, blob []byte) ([]byte, error) { return crypto.Open(sec, aad, blob) }
+	_, env, err := cert.LoadCreds(path, open, secret)
+	if err != nil {
+		return "", "", "", fmt.Errorf("OIDC client record: %w", err)
+	}
+	return env["OIDC_CLIENT_ID"], env["OIDC_CLIENT_SECRET"], env["OIDC_REDIRECT_URI"], nil
+}
+
+// sealOIDCCreds seals the OIDC client record to the console identity (the
+// same shape the DNS/pangolin creds use).
+func (s *Spec) sealOIDCCreds(clientID, clientSecret, redirectURI string) error {
+	root := s.consoleStateRoot()
+	secret, err := s.consoleEncSecretAt(root)
+	if err != nil {
+		return err
+	}
+	pub, err := crypto.X25519PublicKey(secret)
+	if err != nil {
+		return err
+	}
+	return cert.SaveCreds(
+		filepath.Join(root, "world-secrets", "oidc.json"),
+		"oidc",
+		map[string]string{"OIDC_CLIENT_ID": clientID, "OIDC_CLIENT_SECRET": clientSecret, "OIDC_REDIRECT_URI": redirectURI},
+		func(recipientPub, aad, plain []byte) ([]byte, error) { return crypto.Seal(recipientPub, aad, plain) },
+		pub, "oidc",
+	)
+}
+
+// EdgeTunnelToken derives the shared secret the edge stamps on every
+// forward_auth call; the CP trusts the tunnel's Remote-User identity ONLY when
+// it matches (and only from the gateway's address). Deterministic from the
+// console identity — the console and agent-tools render the same Caddyfile.
+func (s *Spec) EdgeTunnelToken() string {
+	secret, err := s.consoleEncSecretAt(s.consoleStateRoot())
+	if err != nil || len(secret) != 32 {
+		return ""
+	}
+	mac := hmac.New(sha256.New, secret)
+	mac.Write([]byte("freehold-edge-tunnel-v1"))
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
+// randomHex returns n random bytes as hex.
+func randomHex(n int) (string, error) {
+	b := make([]byte, n)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
 }
 
 // ensurePangolinTunnel keeps the CP's side of the public path up: the VPS's
@@ -713,6 +923,25 @@ func (s *Spec) newtIdentity() (struct{ ID, Secret string }, error) {
 	return out, nil
 }
 
+// pangolinRides reports whether a registry app rides the world's public path:
+// the coords' allowlist decides (empty = every registry app). "We have a
+// public path" is not "expose everything" — an app not listed keeps its A
+// record on the proxy and gets no resource.
+func (s *Spec) pangolinRides(name string) bool {
+	if s.Pangolin == nil {
+		return false
+	}
+	if len(s.Pangolin.Apps) == 0 {
+		return true
+	}
+	for _, n := range s.Pangolin.Apps {
+		if n == name {
+			return true
+		}
+	}
+	return false
+}
+
 // pangolinHostDNSEnsure points the edge's own hostname (pangolin.<world>)
 // at the VPS: its ACME cert issues there (HTTP-01, on-demand) and Newt dials
 // TLS through it. The CP owns the zone credential — a box installed without
@@ -828,6 +1057,18 @@ func (s *Spec) renderCaddyfile() string {
 			}
 		}
 	}
+	// The public path's gate assertion: the shared token lets the CP trust the
+	// tunnel's Remote-User identity (the Pangolin SSO's member pubkey) when the
+	// original client is the gateway. Only a world WITH the public path renders
+	// it (a direct-edge world has no tunneled requests); absent the console
+	// identity it is "" and the cookie gate alone applies.
+	if s.Pangolin != nil {
+		if token := s.EdgeTunnelToken(); token != "" {
+			for i := range apps {
+				apps[i].TunnelToken = token
+			}
+		}
+	}
 	pair := ""
 	if s.K3sIP != "" {
 		pair = s.K3sIP + ":5000"
@@ -913,7 +1154,8 @@ rm -f /tmp/fh-caddyfile
 // on — the other apps still come up, and the failure is loud in the report,
 // never silent.
 func (s *Spec) worldApps() (string, error) {
-	s.newtAsserted = false // a fresh build re-asserts the dial-out leg
+	s.newtAsserted = false       // a fresh build re-asserts the dial-out leg
+	s.publicPathAsserted = false // ... and the world-level SSO stages
 	if s.Apps == nil {
 		return "", nil
 	}

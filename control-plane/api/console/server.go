@@ -74,6 +74,12 @@ type Server struct {
 	// systemd restart on this guest). Injectable for tests.
 	RestartDoor func(name string, port int) error
 
+	// oidcMu/oidcCodes hold the short-lived authorization codes of the world's
+	// OIDC provider (the public path's SSO). In-memory: a CP restart drops
+	// pending codes, and the browser simply retries the login.
+	oidcMu    sync.Mutex
+	oidcCodes map[string]oidcCode
+
 	// builderMu serializes world-build runs and the coords re-seat the build
 	// request performs (the box ships its profile's world-config so the
 	// PROVISIONING box stays the source of truth without a redeploy). Two
@@ -139,6 +145,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// page routes (no /api prefix) so they ride the same CP vhost.
 	case path == "/auth" && method == http.MethodGet:
 		s.memberLoginPage(w, r)
+	case path == "/api/oidc/authorize" && method == http.MethodGet:
+		s.oidcAuthorize(w, r)
+	case path == "/api/oidc/token" && method == http.MethodPost:
+		s.oidcToken(w, r)
 	case path == "/auth/verify" && method == http.MethodGet:
 		s.forwardAuthVerify(w, r)
 	case strings.HasPrefix(path, "/auth/link/") && method == http.MethodGet:

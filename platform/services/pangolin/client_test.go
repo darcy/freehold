@@ -75,7 +75,7 @@ func TestClientDrivesTheVerifiedShapes(t *testing.T) {
 	if r.FullDomain != "litellm.pangolin.local" {
 		t.Fatalf("the resource must resolve the fqdn: %+v", r)
 	}
-	if err := c.SetTarget(ctx, r.ResourceID, s.SiteID, "10.78.0.13", 31400); err != nil {
+	if err := c.SetTarget(ctx, r.ResourceID, s.SiteID, "10.78.0.13", 31400, "http"); err != nil {
 		t.Fatal(err)
 	}
 	if err := c.DeleteResource(ctx, r.ResourceID); err != nil {
