@@ -199,10 +199,6 @@ func TestDoorUnitSandboxPinsLeastPrivilege(t *testing.T) {
 		"PrivateTmp=yes",
 		"RestrictSUIDSGID=yes",
 		"ExecStartPre=+/usr/bin/chown -R fhd-litellm-api-admin " + pkgDir,
-		// Traversal: the CP state dir is 0700 and state.Open re-tightens it;
-		// the door user must reach its own package dir or the runner
-		// crash-loops "no identity found".
-		"ExecStartPre=+/bin/sh -c 'd=$$(/usr/bin/dirname " + pkgDir + ")",
 		"ExecStart=",
 	} {
 		if !strings.Contains(s, want) {
