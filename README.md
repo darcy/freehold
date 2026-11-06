@@ -302,8 +302,9 @@ Every PR runs two gates:
   required `check`. Green/red, no exceptions.
 - **AI review** (`ai-pr-review.yml`, "Bot Review"): an opencode headless session explores
   the repo with read-only tools and verifies the diff's claims against the actual code.
-  It runs `pull_request_target`-only (what executes is always trusted `main` — a PR can
-  never rewrite what reviews it) and ends with a computed verdict submitted as a PR
+  It runs `pull_request_target`-only (what executes is always trusted — the PR's base
+  branch, which holds only previously-reviewed + merged content; a PR can never rewrite
+  what reviews it) and ends with a computed verdict submitted as a PR
   review state: `APPROVE` when clean, `REQUEST_CHANGES` with findings — so branch
   protection gates the merge. Findings are tiered 🛑 BLOCKING / ⚠️ IMPORTANT /
   💡 SUGGESTION / NIT; the operator can dismiss a review. README/ARCHITECTURE drift is

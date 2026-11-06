@@ -263,9 +263,9 @@ async function runHarnessOnce(prompt, timeoutMs) {
     writeFileSync(promptFile, prompt);
     const message = 'You are a PR review agent. The attached file contains your complete ' +
       'review instructions, repo context, and the diff under review — follow it exactly. ' +
-      'The repository is checked out at the current working directory (the base branch — ' +
-      'trusted main, the same tree the harness itself runs from) — the attached diff, not ' +
-      'the working tree, is the source of truth for what changed. ' +
+      'The repository is checked out at the current working directory (the PR\'s base branch — ' +
+      'trusted: it holds only previously-reviewed + merged content, and it is the same tree ' +
+      'the harness itself runs from) — the attached diff, not the working tree, is the source of truth for what changed. ' +
       'Use your read-only tools to inspect surrounding code and verify cross-file claims. ' +
       'Finish by outputting ONLY the single JSON review object the instructions specify.';
     const args = [
