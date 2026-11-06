@@ -689,3 +689,32 @@ func TestSweepConvergesUntrackedDuplicate(t *testing.T) {
 		t.Fatalf("the tracked key must hold the state's grants, got %v", denied)
 	}
 }
+
+// TestRenameToleratesDeadToken: a wiped gateway DB (every stored token dead)
+// must not wedge the rename — the 404 alias-normalize is tolerated (the next
+// ensure re-mints with the correct alias), while the STORE record still
+// moves.
+func TestRenameToleratesDeadToken(t *testing.T) {
+	dir := t.TempDir()
+	stateDir := dir + "/agent-tools"
+	litellmFixture(t, stateDir, "master-key", "provider-key", "openai", "gpt-4o")
+	store := seededMCPStore(t, stateDir)
+	seedAgents(t, store, "Helper")
+	gw := newMCPKeyGateway()
+	srv := httptest.NewServer(gw.handler(t))
+	defer srv.Close()
+	spec := &Spec{StateDir: stateDir, LitellmBaseURL: srv.URL + "/v1"}
+
+	if _, _, err := spec.ensureAgentMCPKey("Helper", store); err != nil {
+		t.Fatalf("mint: %v", err)
+	}
+	gw.mu.Lock()
+	gw.liveDB = false // the wipe
+	gw.mu.Unlock()
+	if err := spec.moveLitellmKeyRecord("helper", "renamed"); err != nil {
+		t.Fatalf("a rename must not wedge on a dead token: %v", err)
+	}
+	if env := storeEnvForTest(t, stateDir); env[mcptoolKeyEnvKey("renamed")] == "" {
+		t.Fatalf("the store record must still move")
+	}
+}

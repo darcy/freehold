@@ -292,17 +292,14 @@ func (s *Spec) renameMCPKeyAlias(newPod string) error {
 	_, status, err := ls.callStatus(http.MethodPost, "/key/update", map[string]interface{}{
 		"key": token, "key_alias": "mcptool-" + newPod,
 	})
-	if err != nil {
+	if err != nil && status != http.StatusNotFound {
 		return fmt.Errorf("rename mcptool key alias: %w", err)
 	}
-	if status == http.StatusNotFound {
-		// The stored token is already dead on the gateway (a wiped gateway
-		// DB between rename and build): there is no alias to normalize — the
-		// next ensure re-mints with the CORRECT alias, and the sweep has no
-		// stale-alias orphan to misread. A transient gateway error above
-		// still fails the rename loudly.
-		return nil
-	}
+	// A 404 (the stored token is already dead on the gateway — a wiped
+	// gateway DB between rename and build) is tolerated: there is no alias
+	// to normalize — the next ensure re-mints with the CORRECT alias, and
+	// the sweep has no stale-alias orphan to misread. Transient failures
+	// (5xx, transport) still fail the rename loudly.
 	return nil
 }
 
