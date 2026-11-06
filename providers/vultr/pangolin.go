@@ -71,6 +71,9 @@ cat > /srv/pangolin/config/config.yml <<CONF
 %sCONF
 fi
 cd /srv/pangolin && docker compose up -d 2>/dev/null || docker-compose up -d
+# Traefik reads its STATIC config at start: a re-rendered static file needs a
+# restart (the dynamic file hot-reloads via the file provider).
+docker restart traefik >/dev/null 2>&1 || true
 for i in $(seq 1 60); do
   curl -sf http://localhost:3000/api/v1/ >/dev/null 2>&1 && break
   sleep 2
@@ -109,7 +112,7 @@ fi
 echo "PANGOLIN_ROOT_KEY=$KEY_ID.$KEY_SECRET"
 rm -f /srv/pangolin/admin.cookies
 echo pangolin-install-ok
-`, compose, conf, traefik, dynamic, email)
+`, compose, traefik, dynamic, conf, email)
 }
 
 // PreparePangolin mints or re-adopts the world's Pangolin VPS: the same
