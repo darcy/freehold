@@ -496,20 +496,22 @@ func TestSweepLitellmMCPAccess(t *testing.T) {
 	defer srv.Close()
 	spec := &Spec{StateDir: stateDir, LitellmBaseURL: srv.URL + "/v1"}
 
-	// A model key holding an MCP grant (drift) + a foreign UI key with grants.
-	store.InsertAgent("Helper", state.AgentRecord{Pubkey: strings.Repeat("a", 64), CreatedAt: 1})
+	// The CP's model key is minted through the REAL path — its gateway
+	// key_alias is the BARE pod name ("helper"; "agentkey-" is only the
+	// store env key) — and holds a drifted MCP grant.
+	modelToken, err := spec.ensureAgentLitellmKey("Helper")
+	if err != nil {
+		t.Fatalf("mint model key: %v", err)
+	}
+	// A foreign UI key with grants + an orphaned mcptool key (agent gone).
+	foreign := []string{}
 	gw.mu.Lock()
-	// mint three keys directly into the gateway: helper's model key (drifted),
-	// a foreign UI key (grants), and an orphaned mcptool key.
-	for alias, perm := range map[string]map[string]interface{}{
-		"agentkey-helper": {"mcp_servers": []string{"evil"}},
-		"ui-key":          {"mcp_servers": []string{"evil"}},
-		"mcptool-ghost":   {"mcp_servers": []string{"evil"}},
-	} {
+	for _, alias := range []string{"ui-key", "mcptool-ghost"} {
 		gw.keys++
-		rec := &keyRecord{token: fmt.Sprintf("sk-%d", gw.keys), hash: fmt.Sprintf("%064x", gw.keys), alias: alias, perm: perm}
+		rec := &keyRecord{token: fmt.Sprintf("sk-%d", gw.keys), hash: fmt.Sprintf("%064x", gw.keys), alias: alias, perm: map[string]interface{}{"mcp_servers": []string{"evil"}}}
 		gw.byToken[rec.token] = rec
 		gw.byHash[rec.hash] = rec
+		foreign = append(foreign, rec.token)
 	}
 	gw.mu.Unlock()
 
@@ -523,16 +525,36 @@ func TestSweepLitellmMCPAccess(t *testing.T) {
 		t.Fatalf("helper's mcp key = %v", denied)
 	}
 	// Every other key is at the sentinel.
-	for _, tok := range []string{"sk-1", "sk-2", "sk-3"} {
+	for _, tok := range append([]string{modelToken}, foreign...) {
 		if denied := gw.denyList(t, tok); len(denied) != 1 || denied[0] != "no-mcp-servers" {
 			t.Fatalf("%s must be swept to the sentinel, got %v", tok, denied)
 		}
 	}
 	// The report names the sweeps.
-	for _, want := range []string{"agentkey-helper", "ui-key", "mcptool-ghost"} {
+	for _, want := range []string{"helper swept", "ui-key", "mcptool-ghost"} {
 		if !strings.Contains(drift, want) {
 			t.Fatalf("drift report must name %s, got:\n%s", want, drift)
 		}
+	}
+	// The model key was swept (the fake's records hold the sentinel now).
+	if denied := gw.denyList(t, modelToken); len(denied) != 1 || denied[0] != "no-mcp-servers" {
+		t.Fatalf("the model key must be swept to the sentinel, got %v", denied)
+	}
+	// Drift on a LIVE agent's mcptool key lands in the sweep's report (the
+	// overwrite is never silent).
+	gw.mu.Lock()
+	for _, rec := range gw.byToken {
+		if rec.alias == "mcptool-helper" {
+			rec.perm = map[string]interface{}{"mcp_servers": []string{"evil"}}
+		}
+	}
+	gw.mu.Unlock()
+	driftWanted, err := spec.sweepLitellmMCPAccess(store)
+	if err != nil {
+		t.Fatalf("drift sweep: %v", err)
+	}
+	if !strings.Contains(driftWanted, "mcptool-helper rewritten") {
+		t.Fatalf("a drifted agent MCP key must be reported, got:\n%s", driftWanted)
 	}
 	// A second sweep is quiet (idempotent).
 	drift2, err := spec.sweepLitellmMCPAccess(store)

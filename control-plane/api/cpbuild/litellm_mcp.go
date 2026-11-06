@@ -465,11 +465,19 @@ func (s *Spec) sweepLitellmMCPAccess(store *state.StateStore) (string, error) {
 	}
 	report := []string{}
 	// 1. The owned plane: every registry agent's MCP key, mint-or-overwrite.
+	//    A drift note (the gateway's copy differed from CP state) is the
+	//    plane's headline signal — someone edited a key behind the CP's
+	//    back — so it lands in the stage report, never discarded.
 	agentPods := map[string]bool{}
 	for name := range store.Snapshot().Agents {
-		agentPods[agent.PodName(name)] = true
-		if _, _, err := s.ensureAgentMCPKey(name, store); err != nil {
+		pod := agent.PodName(name)
+		agentPods[pod] = true
+		_, drift, err := s.ensureAgentMCPKey(name, store)
+		if err != nil {
 			return "", err
+		}
+		if drift != "" {
+			report = append(report, drift)
 		}
 	}
 	// 2. The fleet sweep: every key the CP did not just ensure, default-denied.
@@ -490,8 +498,14 @@ func (s *Spec) sweepLitellmMCPAccess(store *state.StateStore) (string, error) {
 		}
 		switch {
 		case strings.HasPrefix(alias, "agentkey-"):
-			// The CP's model key: MCP access rides mcptool-<pod>, never the
-			// model key — sweep it to the sentinel when it holds any grant.
+			// Store-env-keyed legacy shape (not minted by current code).
+			fallthrough
+		case agentPods[alias]:
+			// The CP's MODEL key: the mint writes gateway key_alias = the
+			// BARE pod name (departments.go's ensureAgentLitellmKey) — the
+			// agentkey- prefix is only the store env key. MCP access rides
+			// mcptool-<pod>, never the model key — sweep it to the sentinel
+			// when it holds any grant.
 			if s.maybeDenyMCP(ls, hash, alias, perm) {
 				report = append(report, alias+" swept to no-mcp-servers (model keys never hold MCP grants)")
 			}
