@@ -245,7 +245,9 @@ func buildPangolinSession(cfg *config.Config, region, plan string) (*provisionin
 		}
 		*captured = append(*captured, out.Stdout)
 		if out.ExitCode == nil || *out.ExitCode != 0 {
-			return fmt.Errorf("host script failed: %s", strings.TrimSpace(out.Stderr))
+			// The script's diagnostics print on STDOUT (the named failure
+			// markers) — carry the tail, never stderr alone.
+			return fmt.Errorf("host script failed: %s | out: %.300s", strings.TrimSpace(out.Stderr), strings.TrimSpace(out.Stdout))
 		}
 		return nil
 	}
@@ -360,13 +362,19 @@ func cpVmid(cfg *config.Config) int {
 	return 0
 }
 
-// freeholdExec runs the freehold CLI's own exec verb in-process, carrying
-// this verb's --config so the profile context survives the shell-out.
-// target = the profile's runner target (the world host's runner).
+// freeholdExec runs the freehold CLI's own exec verb IN-PROCESS (this
+// binary — os.Executable, the module's self-exec pattern; never a PATH
+// lookup), carrying this verb's --config so the profile context survives
+// the shell-out. target = the profile's runner target (the world host's
+// runner).
 func freeholdExec(cfgPath, target string, args ...string) (string, error) {
+	self, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
 	full := append([]string{"exec", target}, args...)
 	full = append(full, "--config", cfgPath)
-	cmd := exec.Command("freehold", full...)
+	cmd := exec.Command(self, full...)
 	out, err := cmd.CombinedOutput()
 	return string(out), err
 }

@@ -41,7 +41,7 @@ func PangolinInstallScript(worldDomain, email string) string {
 	traefik := pangolinTraefikConf(email)
 	dynamic := pangolinDynamicConf()
 	return fmt.Sprintf(`set -e
-if [ -f /srv/pangolin/root-key.env ] && docker ps --format "{{.Names}}" 2>/dev/null | grep -q pangolin; then
+if [ -f /srv/pangolin/root-key.env ] && docker ps --format "{{.Names}}" 2>/dev/null | grep -q pangolin && curl -sf http://localhost:3003/v1/org/freehold -H "Authorization: Bearer $(cat /srv/pangolin/root-key.env)" >/dev/null 2>&1; then
   echo "PANGOLIN_ROOT_KEY=$(cat /srv/pangolin/root-key.env)"
   echo pangolin-install-ok
   exit 0
@@ -94,7 +94,9 @@ if [ -z "$KEY_ID" ] || [ -z "$KEY_SECRET" ]; then echo "PANGOLIN_KEY_JSON=$KEY_J
 printf "%%s\n" "$KEY_ID.$KEY_SECRET" > /srv/pangolin/root-key.env
 chmod 600 /srv/pangolin/root-key.env
 ORG_JSON=$(curl -s -X PUT http://localhost:3003/v1/org -H "Authorization: Bearer $KEY_ID.$KEY_SECRET" -H "Content-Type: application/json" -d "{\"orgId\":\"freehold\",\"name\":\"freehold\",\"subnet\":\"100.90.0.0/16\",\"utilitySubnet\":\"100.91.0.0/24\"}")
-echo "$ORG_JSON" | grep -q orgId || { echo "PANGOLIN_ORG_JSON=$ORG_JSON"; echo pangolin-org-create-failed; exit 1; }
+if ! echo "$ORG_JSON" | grep -q orgId; then
+  echo "$ORG_JSON" | grep -qi "exist" || { echo "PANGOLIN_ORG_JSON=$ORG_JSON"; echo pangolin-org-create-failed; exit 1; }
+fi
 GRANT=$(curl -sf -b /srv/pangolin/admin.cookies -X POST http://localhost:3000/api/v1/api-key/$KEY_ID/actions -H "Content-Type: application/json" -H "X-CSRF-Token: x-csrf-protection" -d "{\"actionIds\":[\"createOrg\",\"createSite\",\"deleteSite\",\"createResource\",\"deleteResource\",\"createTarget\",\"deleteTarget\",\"getSite\",\"getResource\",\"listSites\",\"listResources\",\"listTargets\",\"getDomain\",\"listOrgDomains\",\"generateAccessToken\",\"updateResource\"]}") || { echo pangolin-actions-grant-failed; exit 1; }
 echo "$GRANT" | grep -q "\"success\":true" || { echo "PANGOLIN_GRANT_JSON=$GRANT"; echo pangolin-actions-grant-failed; exit 1; }
 echo "PANGOLIN_ROOT_KEY=$KEY_ID.$KEY_SECRET"
@@ -151,6 +153,11 @@ func PreparePangolin(ctx context.Context, s *provisioning.HostSession, existingI
 	return &provisioning.Host{ID: hostID, IP: hostIP}, nil
 }
 
+// pangolinGerbilVersion is the gerbil pin paired with the pangolin pin —
+// the upstream versions the pair independently (no 1.24.0 gerbil tag); this
+// is what :latest resolved to at the pin. Bump the pair together.
+const pangolinGerbilVersion = "1.6.0"
+
 // pangolinCompose renders the stack's compose file. The ports publish on
 // the instance's NIC (the public path): web (traefik), the Newt WireGuard
 // listener, the external/integration API ports (the world's CP dials the
@@ -174,7 +181,7 @@ services:
       timeout: "3s"
       retries: 20
   gerbil:
-    image: fosrl/gerbil:latest
+    image: fosrl/gerbil:1.6.0
     container_name: gerbil
     restart: unless-stopped
     depends_on:
