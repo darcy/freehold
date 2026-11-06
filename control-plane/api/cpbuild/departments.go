@@ -1257,6 +1257,12 @@ func (s *Spec) moveLitellmKeyRecord(oldPod, newPod string) error {
 	}
 	delete(env, oldKey)
 	env[newKey] = v
+	// The agent's MCP-only key follows the same rename (the record rides the
+	// agent, not the pod name).
+	if mv := mcptoolKeyEnvKey(oldPod); env[mv] != "" {
+		env[mcptoolKeyEnvKey(newPod)] = env[mv]
+		delete(env, mv)
+	}
 	return s.saveLitellmStoreEnv(path, secret, env)
 }
 

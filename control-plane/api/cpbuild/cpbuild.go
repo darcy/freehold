@@ -1772,12 +1772,23 @@ func BuildWorldApply(spec *Spec) agent.WorldApply {
 		// 7.9. LiteLLM default aliases: ensure the gateway carries the alias set
 		// the pods request (Code/General/Freehold/ExtraThinking) BEFORE the pods
 		// (re)apply pointing at theirs — an unregistered alias is a 400ing
-		// agent. Idempotent; a failure fails the build loudly.
+		// agent. Idempotent; a failure fails the build loudly. Beside it, the
+		// MCP plane: every MCP capability's server registered, every agent's
+		// MCP key ensured (drift-overwritten from CP state), the fleet swept
+		// default-deny.
 		if spec.K3sVmid != 0 && spec.LitellmIP != "" {
 			if err := spec.stageLitellmAliases(); err != nil {
 				return "", fmt.Errorf("world-build litellm aliases: %w", err)
 			}
 			report = append(report, "litellm default aliases ensured")
+			cpState := spec.consoleStateDir()
+			if cpStore, err := state.Open(cpState); err != nil {
+				return "", fmt.Errorf("world-build litellm mcp: %w", err)
+			} else if mcpReport, err := spec.stageLitellmMCP(cpStore); err != nil {
+				return "", fmt.Errorf("world-build litellm mcp: %w", err)
+			} else if mcpReport != "" {
+				report = append(report, "litellm mcp: "+mcpReport)
+			}
 		}
 		// 8. The agent org + world facts are CP-owned now: create the CPA +
 		// departments, reconcile every registered agent, and register the world
