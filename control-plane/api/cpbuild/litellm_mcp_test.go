@@ -262,11 +262,15 @@ func seededMCPStore(t *testing.T, dir string) *state.StateStore {
 	return store
 }
 
-// seedAgents registers two agents in the store (the sweep's owner plane).
-func seedAgents(t *testing.T, store *state.StateStore, names ...string) {
+// seedAgents registers agents in the store AND the registry (the sweep's
+// authoritative table is the registry file under agentToolsRoot).
+func seedAgents(t *testing.T, store *state.StateStore, reg *agenttools.Registry, names ...string) {
 	t.Helper()
 	for _, n := range names {
 		store.InsertAgent(n, state.AgentRecord{Pubkey: strings.Repeat("a", 64), CreatedAt: 1})
+		if _, err := reg.RegisterAgent(n, strings.Repeat("a", 64), "#freehold"); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 
@@ -307,7 +311,11 @@ func TestEnsureAgentMCPKey(t *testing.T) {
 	stateDir := dir + "/agent-tools"
 	litellmFixture(t, stateDir, "master-key", "provider-key", "openai", "gpt-4o")
 	store := seededMCPStore(t, stateDir)
-	seedAgents(t, store, "Helper")
+	reg, err := agenttools.OpenRegistry(filepath.Join(stateDir, "registry.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedAgents(t, store, reg, "Helper")
 	gw := newMCPKeyGateway()
 	srv := httptest.NewServer(gw.handler(t))
 	defer srv.Close()
@@ -375,7 +383,11 @@ func TestEnsureAgentMCPKeyReMintOnWipedDB(t *testing.T) {
 	stateDir := dir + "/agent-tools"
 	litellmFixture(t, stateDir, "master-key", "provider-key", "openai", "gpt-4o")
 	store := seededMCPStore(t, stateDir)
-	seedAgents(t, store, "Helper")
+	reg, err := agenttools.OpenRegistry(filepath.Join(stateDir, "registry.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedAgents(t, store, reg, "Helper")
 	gw := newMCPKeyGateway()
 	srv := httptest.NewServer(gw.handler(t))
 	defer srv.Close()
@@ -406,7 +418,11 @@ func TestRevokeAgentMCPKey(t *testing.T) {
 	stateDir := dir + "/agent-tools"
 	litellmFixture(t, stateDir, "master-key", "provider-key", "openai", "gpt-4o")
 	store := seededMCPStore(t, stateDir)
-	seedAgents(t, store, "Helper")
+	reg, err := agenttools.OpenRegistry(filepath.Join(stateDir, "registry.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedAgents(t, store, reg, "Helper")
 	gw := newMCPKeyGateway()
 	srv := httptest.NewServer(gw.handler(t))
 	defer srv.Close()
@@ -501,7 +517,11 @@ func TestSweepLitellmMCPAccess(t *testing.T) {
 	stateDir := dir + "/agent-tools"
 	litellmFixture(t, stateDir, "master-key", "provider-key", "openai", "gpt-4o")
 	store := seededMCPStore(t, stateDir)
-	seedAgents(t, store, "Helper")
+	reg, err := agenttools.OpenRegistry(filepath.Join(stateDir, "registry.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedAgents(t, store, reg, "Helper")
 	gw := newMCPKeyGateway()
 	srv := httptest.NewServer(gw.handler(t))
 	defer srv.Close()
@@ -593,7 +613,11 @@ func TestStageLitellmMCPWired(t *testing.T) {
 	stateDir := t.TempDir() + "/agent-tools"
 	litellmFixture(t, stateDir, "master-key", "provider-key", "openai", "gpt-4o")
 	store := seededMCPStore(t, stateDir)
-	seedAgents(t, store, "Helper")
+	reg, err := agenttools.OpenRegistry(filepath.Join(stateDir, "registry.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedAgents(t, store, reg, "Helper")
 	gw := newMCPKeyGateway()
 	srv := httptest.NewServer(gw.handler(t))
 	defer srv.Close()
@@ -616,7 +640,11 @@ func TestRenameMCPKeyAliasFollowsAgent(t *testing.T) {
 	stateDir := dir + "/agent-tools"
 	litellmFixture(t, stateDir, "master-key", "provider-key", "openai", "gpt-4o")
 	store := seededMCPStore(t, stateDir)
-	seedAgents(t, store, "Helper")
+	reg, err := agenttools.OpenRegistry(filepath.Join(stateDir, "registry.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedAgents(t, store, reg, "Helper")
 	gw := newMCPKeyGateway()
 	srv := httptest.NewServer(gw.handler(t))
 	defer srv.Close()
@@ -665,7 +693,11 @@ func TestSweepConvergesUntrackedDuplicate(t *testing.T) {
 	stateDir := dir + "/agent-tools"
 	litellmFixture(t, stateDir, "master-key", "provider-key", "openai", "gpt-4o")
 	store := seededMCPStore(t, stateDir)
-	seedAgents(t, store, "Helper")
+	reg, err := agenttools.OpenRegistry(filepath.Join(stateDir, "registry.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedAgents(t, store, reg, "Helper")
 	gw := newMCPKeyGateway()
 	srv := httptest.NewServer(gw.handler(t))
 	defer srv.Close()
@@ -710,7 +742,11 @@ func TestRenameToleratesDeadToken(t *testing.T) {
 	stateDir := dir + "/agent-tools"
 	litellmFixture(t, stateDir, "master-key", "provider-key", "openai", "gpt-4o")
 	store := seededMCPStore(t, stateDir)
-	seedAgents(t, store, "Helper")
+	reg, err := agenttools.OpenRegistry(filepath.Join(stateDir, "registry.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedAgents(t, store, reg, "Helper")
 	gw := newMCPKeyGateway()
 	srv := httptest.NewServer(gw.handler(t))
 	defer srv.Close()
@@ -775,12 +811,7 @@ func provisionFixture(t *testing.T) (*Spec, *agenttools.Registry, *mcpKeyGateway
 // capability, and the record persists with agent provenance.
 func TestProvisionMCPSlotted(t *testing.T) {
 	spec, reg, gw, store := provisionFixture(t)
-	seedAgents(t, store, "Helper")
-	store.InsertAgent("Helper", state.AgentRecord{Pubkey: strings.Repeat("a", 64), CreatedAt: 1})
-	// The registry row the grant surface resolves against.
-	if _, err := reg.RegisterAgent("Helper", strings.Repeat("a", 64), "#freehold"); err != nil {
-		t.Fatal(err)
-	}
+	seedAgents(t, store, reg, "Helper")
 
 	report, err := spec.provisionMCP(agent.ProvisionMCPArgs{
 		Name: "sheet-a-ro", Namespace: "mcp", ServicePort: 8000,
@@ -836,10 +867,7 @@ func TestProvisionMCPSlotted(t *testing.T) {
 // carries no freehold credential (secret_ref refused).
 func TestProvisionMCPExternal(t *testing.T) {
 	spec, reg, _, store := provisionFixture(t)
-	seedAgents(t, store, "Helper")
-	if _, err := reg.RegisterAgent("Helper", strings.Repeat("a", 64), "#freehold"); err != nil {
-		t.Fatal(err)
-	}
+	seedAgents(t, store, reg, "Helper")
 	if _, err := spec.provisionMCP(agent.ProvisionMCPArgs{
 		Name: "ext", URL: "https://mcp.example.com/mcp", SecretRef: "nope",
 		GrantTo: []string{"Helper"},
@@ -866,12 +894,7 @@ func TestProvisionMCPExternal(t *testing.T) {
 // a silent pass); a runner capability is refused with routing.
 func TestGrantCapabilityMCPDelta(t *testing.T) {
 	spec, reg, gw, store := provisionFixture(t)
-	seedAgents(t, store, "Helper", "Writer")
-	for _, n := range []string{"Helper", "Writer"} {
-		if _, err := reg.RegisterAgent(n, strings.Repeat("a", 64), "#freehold"); err != nil {
-			t.Fatal(err)
-		}
-	}
+	seedAgents(t, store, reg, "Helper", "Writer")
 	if _, err := spec.provisionMCP(agent.ProvisionMCPArgs{
 		Name: "sheet-a-ro", Namespace: "mcp", ServicePort: 8000,
 		GrantTo: []string{"Helper"}, Tools: []string{"read_thing"},
@@ -908,9 +931,15 @@ func TestGrantCapabilityMCPDelta(t *testing.T) {
 	if len(rec.Grantees) != 1 || rec.Grantees[0] != "Writer" {
 		t.Fatalf("roster = %v", rec.Grantees)
 	}
-	// A non-grantee removal is refused (named, not a silent pass).
-	if _, err := spec.grantCapability(agent.CapabilityGrantArgs{Name: "sheet-a-ro", RevokeFrom: []string{"Helper"}}, false, reg, store, nil); err == nil || !strings.Contains(err.Error(), "holds no grant") {
-		t.Fatalf("a non-grantee removal must be refused, got %v", err)
+	// A non-grantee removal CONVERGES (a prior leg's pending rewrite) and is
+	// named in the report — never a silent pass, never a refusal that blocks
+	// the retry from reaching the converge loop.
+	report, err := spec.grantCapability(agent.CapabilityGrantArgs{Name: "sheet-a-ro", RevokeFrom: []string{"Helper"}}, false, reg, store, nil)
+	if err != nil {
+		t.Fatalf("a non-grantee removal converges: %v", err)
+	}
+	if !strings.Contains(report, "rewritten from CP state") {
+		t.Fatalf("the convergence must be named in the report:\n%s", report)
 	}
 }
 
@@ -920,10 +949,7 @@ func TestGrantCapabilityMCPDelta(t *testing.T) {
 // operator re-enables it.
 func TestRevokeCapabilityRetire(t *testing.T) {
 	spec, reg, gw, store := provisionFixture(t)
-	seedAgents(t, store, "Helper")
-	if _, err := reg.RegisterAgent("Helper", strings.Repeat("a", 64), "#freehold"); err != nil {
-		t.Fatal(err)
-	}
+	seedAgents(t, store, reg, "Helper")
 	if _, err := spec.provisionMCP(agent.ProvisionMCPArgs{
 		Name: "sheet-a-ro", Namespace: "mcp", ServicePort: 8000, GrantTo: []string{"Helper"},
 	}, false, reg, store); err != nil {
@@ -975,10 +1001,7 @@ func TestRevokeCapabilityRetire(t *testing.T) {
 // is not the CPA's to grant or revoke; the operator's own calls pass.
 func TestCapabilityOperatorOriginGuard(t *testing.T) {
 	spec, reg, _, store := provisionFixture(t)
-	seedAgents(t, store, "Helper")
-	if _, err := reg.RegisterAgent("Helper", strings.Repeat("a", 64), "#freehold"); err != nil {
-		t.Fatal(err)
-	}
+	seedAgents(t, store, reg, "Helper")
 	if _, err := spec.provisionMCP(agent.ProvisionMCPArgs{
 		Name: "sheet-a-ro", Namespace: "mcp", ServicePort: 8000, GrantTo: []string{"Helper"},
 	}, true, reg, store); err != nil {
@@ -1063,10 +1086,7 @@ func TestRenameFollowsMCPGrants(t *testing.T) {
 // still drops under the guard.
 func TestRetireToleratesDeadGateway(t *testing.T) {
 	spec, reg, gw, store := provisionFixture(t)
-	seedAgents(t, store, "Helper")
-	if _, err := reg.RegisterAgent("Helper", strings.Repeat("a", 64), "#freehold"); err != nil {
-		t.Fatal(err)
-	}
+	seedAgents(t, store, reg, "Helper")
 	if _, err := spec.provisionMCP(agent.ProvisionMCPArgs{
 		Name: "sheet-a-ro", Namespace: "mcp", ServicePort: 8000, GrantTo: []string{"Helper"},
 	}, false, reg, store); err != nil {
@@ -1093,12 +1113,7 @@ func TestRetireToleratesDeadGateway(t *testing.T) {
 // agent keeps access until the next build is a take-back that lies.
 func TestProvisionMCPNarrowedRoster(t *testing.T) {
 	spec, reg, gw, store := provisionFixture(t)
-	seedAgents(t, store, "Helper", "Writer")
-	for _, n := range []string{"Helper", "Writer"} {
-		if _, err := reg.RegisterAgent(n, strings.Repeat("a", 64), "#freehold"); err != nil {
-			t.Fatal(err)
-		}
-	}
+	seedAgents(t, store, reg, "Helper", "Writer")
 	if _, err := spec.provisionMCP(agent.ProvisionMCPArgs{
 		Name: "sheet-a-ro", Namespace: "mcp", ServicePort: 8000, GrantTo: []string{"Helper", "Writer"},
 	}, false, reg, store); err != nil {

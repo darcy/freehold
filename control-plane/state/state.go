@@ -216,6 +216,11 @@ type MCPCapabilityRecord struct {
 	// "operator" (the console). Same guard as the runner capability: only an
 	// explicit "agent" is agent-touchable.
 	Origin string `json:"origin,omitempty"`
+	// PendingTakeBacks are former grantees whose key-rewrite leg FAILED on a
+	// prior provision/re-provision (the record had already narrowed): the
+	// retry re-drives them, and each successful rewrite clears them. Empty
+	// = nothing pending.
+	PendingTakeBacks []string `json:"pending_take_backs,omitempty"`
 	// SecretRef is the broker token's secret NAME sealed into the slot
 	// runner's package ("" for external servers with no freehold-side
 	// credential). The CP holds the token sealed in the litellm store and
