@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "receiptId": "f6589da3-8a21-406d-a831-484f40bc9b40",
+  "status": "current",
+  "command": "deliver",
+  "type": "workflow",
+  "input": "/home/darcy/.herdr/worktrees/freehold/google-sheets/.archify/workflow-mcp-key-grant-options-20261105-152043/candidate.json",
+  "output": "/home/darcy/.herdr/worktrees/freehold/google-sheets/.archify/workflow-mcp-key-grant-options-20261105-152043/mcp-key-grant-options.html",
+  "specification": {
+    "sha256": "9d6fbc84e25541e5dad03ddcd571d24a5cb760837a8ca119658aef557661d2d9",
+    "bytes": 7416
+  },
+  "artifact": {
+    "sha256": "5f4cb78e4ac36637bda13b7995e4189d392da2bdd2358964e55ee175bc1c3581",
+    "bytes": 775760
+  }
+}

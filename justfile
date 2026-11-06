@@ -24,6 +24,8 @@ build:
     @just build-runner "{{version}}" "{{commit}}"
     @echo "→ freehold-agent-tools (static release — the CP ships it to agent pods)"
     @cd control-plane && mise exec go@1.25.0 -- sh -c 'CGO_ENABLED=0 go build -ldflags "{{ldflags}}" -o ../target/release/freehold-agent-tools ./api/cmd/freehold-agent-tools'
+    @echo "→ freehold-mcp-sheets (static release — the MCP capability plane's sheets service)"
+    @cd control-plane && mise exec go@1.25.0 -- sh -c 'CGO_ENABLED=0 go build -ldflags "{{ldflags}}" -o ../target/release/freehold-mcp-sheets ./api/cmd/freehold-mcp-sheets'
     @echo "✓ all binaries built"
 
 # The runner builds against BOOKWORM's glibc when docker is available: a runner
@@ -55,6 +57,7 @@ install: build
     install -m 755 target/release/freehold-console ~/.cargo/release/freehold-console
     install -m 755 target/release/runner ~/.cargo/release/runner
     install -m 755 target/release/freehold-agent-tools ~/.cargo/release/freehold-agent-tools
+    install -m 755 target/release/freehold-mcp-sheets ~/.cargo/release/freehold-mcp-sheets
     # The migration scripts, where box.ResolveMigrationsDir finds them for an
     # INSTALLED CLI (~/.cargo/migrations is a parent of ~/.cargo/bin/freehold).
     # Without this `freehold install` ships no scripts at all. They ship unmarked —
@@ -64,7 +67,7 @@ install: build
 # Verify every sibling `box.ResolveBins` requires is present (AGENTS.md's full
 # binary set). One list, so the gate can't silently lag the ResolveBins set.
 check-siblings:
-    @for f in target/debug/freehold target/debug/freehold-console target/release/freehold-console target/debug/runner target/release/runner target/release/freehold-agent-tools; do \
+    @for f in target/debug/freehold target/debug/freehold-console target/release/freehold-console target/debug/runner target/release/runner target/release/freehold-agent-tools target/release/freehold-mcp-sheets; do \
       if test -x "$f"; then echo "ok  $f"; else echo "MISSING $f (run: just build)"; exit 1; fi; \
     done
     @echo "✓ all siblings present"

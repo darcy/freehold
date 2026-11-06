@@ -247,6 +247,36 @@ func ToolList() []map[string]interface{} {
 			}, []string{"name"}),
 		},
 		{
+			"name": "provision_mcp", "description": "Register an MCP capability and grant it (the MCP plane's grant-giving flow, the sibling of provision_runner): an MCP server registered on the LiteLLM gateway + the named agents' MCP keys granted its tools. The tool is CREDENTIAL-BLIND — no secret field exists (the broker token is CP-generated and sealed; the MCP service's own Google SA key never enters this flow). Two shapes: SLOTTED (namespace + service_port — the URL DERIVES as http://<name>.<namespace>.svc.cluster.local:<port>/{/mcp|/sse}; url is REFUSED — an agent-stated endpoint would hand the broker token to a server the agent controls; the mcp slot's door (kube-api-<namespace>) must exist — Compute carves it through kube-api-root) and EXTERNAL (url required; secret_ref refused — an external server carries no freehold-sealed credential). transport: http (streamable, default) | sse. tools (optional) pins the capability's allowed tool subset. scope (optional) documents the bound. The confirmation discipline + granting skill are the same as provision_runner's; the agent_grants kill switch governs this too.",
+			"inputSchema": i(map[string]interface{}{
+				"name":           map[string]interface{}{"type": "string"},
+				"transport":      map[string]interface{}{"type": "string", "enum": []string{"http", "sse"}},
+				"namespace":      map[string]interface{}{"type": "string"},
+				"service_port":   map[string]interface{}{"type": "integer"},
+				"url":            map[string]interface{}{"type": "string"},
+				"scope":          map[string]interface{}{"type": "string"},
+				"spreadsheet_id": map[string]interface{}{"type": "string"},
+				"tools":          map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
+				"grant_to":       map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
+				"secret_ref":     map[string]interface{}{"type": "string"},
+			}, []string{"name", "grant_to"}),
+		},
+		{
+			"name": "grant_capability", "description": "Grant agents onto an MCP capability (grant_to adds agent names, revoke_from removes them — one call can do both). Each grant is a KEY-PERMISSION write on the granted agent's MCP key (the capability's server + tools appear in /mcp tools/list for that agent) — not an exec seat. Runner DOORS are refused with routing: a runner's roster grants stay operator-scoped (the console's grant page, grant_agent, or a re-provision's unioned roster). An operator-provisioned MCP capability is not the CPA's to grant. The agent_grants kill switch governs this.",
+			"inputSchema": i(map[string]interface{}{
+				"name":        map[string]interface{}{"type": "string"},
+				"grant_to":    map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
+				"revoke_from": map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
+			}, []string{"name"}),
+		},
+		{
+			"name": "revoke_capability", "description": "Take an MCP capability away. With revoke_from set, those agent NAMES lose the capability (their MCP keys are rewritten without it) while the capability keeps serving the rest of its roster; with revoke_from empty the capability is RETIRED: the gateway registration is deleted, every grantee's key re-stamped, the record dropped under a re-enablable guard note (the operator re-enables by provisioning again). The MCP service's DEPLOYMENT is the owner's to remove — a retired capability whose service still runs with its SA key is a known state, never a silent one: relay that verbatim. A RUNNER door delegates to revoke_runner's audited path unchanged. The agent_grants kill switch governs this.",
+			"inputSchema": i(map[string]interface{}{
+				"name":        map[string]interface{}{"type": "string"},
+				"revoke_from": map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
+			}, []string{"name"}),
+		},
+		{
 			"name": "expose_app", "description": "Make a service reachable by the people it serves: a public TLS vhost on the edge (DNS pointed, cert issued, Caddy config applied live), gated by the member login. auth=gate is the STANDING DEFAULT POSTURE — every app is member-gated unless the operator says otherwise for that app; auth=app (the app has its own auth) | none, and visibility=public, are operator-only exceptions, never an agent's default. name is a DNS label — the app's hostname is <name>.<the world's own domain>, the world's subtree derived from YOUR cp host (cp.librem.freehold.technology → librem.freehold.technology; sandbox.freehold.technology → itself — so an app named litellm lands at litellm.librem.freehold.technology or litellm.sandbox.freehold.technology; the member cookie scopes to the same world domain). NEVER compose the hostname from the DNS zone, another world's records, or a guess — derive it from your own world's cp host. SCOPE: exposure is Network's capability — only the network department (or the operator) may call this; other agents are refused, so route the ask through Network in conversation. group is the relay CHANNEL the access rides (name or id; default general — the everyone-channel): the requester must ALREADY be in it — access narrows to groups the requester belongs to and never widens; the gate enforces the channel per request (IsMemberAuth), so removing someone from the channel revokes them within the cache TTL. requester is the pubkey of whoever asked (default: you). target is the service's internal host:port (the edge proxies plain HTTP to it). visibility: family (public DNS + gate — the default) | public (NO gate — operator-only) | lan (no public DNS). The record survives rebuilds; a failed apply is re-ensured by the next build and the report names which legs landed. VERIFY your work with gate_fetch: your own signed request passes the same channel check a member session does (expose validated the requester is in the group — verify as yourself only when requester defaults to you), so a 200 with the app's body proves the exposure serves through the edge; a 403 names the signer out of the group.",
 			"inputSchema": i(map[string]interface{}{
 				"name":       map[string]interface{}{"type": "string"},
@@ -406,6 +436,28 @@ type revokeRunnerArgs struct {
 	Name string `json:"name"`
 	// RevokeFrom are the agent NAMES to drop from the door's roster; empty =
 	// retire the whole door. The server never interprets it — the flow does.
+	RevokeFrom []string `json:"revoke_from"`
+}
+
+// provisionMCPArgs registers an MCP capability (the MCP plane's
+// grant-giving flow). Credential-blind: no secret field exists.
+type provisionMCPArgs struct {
+	Name          string   `json:"name"`
+	Transport     string   `json:"transport"`
+	Namespace     string   `json:"namespace"`
+	ServicePort   int      `json:"service_port"`
+	URL           string   `json:"url"`
+	Scope         string   `json:"scope"`
+	SpreadsheetID string   `json:"spreadsheet_id"`
+	Tools         []string `json:"tools"`
+	GrantTo       []string `json:"grant_to"`
+	SecretRef     string   `json:"secret_ref"`
+}
+
+// capabilityGrantArgs is grant_capability / revoke_capability's delta.
+type capabilityGrantArgs struct {
+	Name       string   `json:"name"`
+	GrantTo    []string `json:"grant_to"`
 	RevokeFrom []string `json:"revoke_from"`
 }
 
@@ -668,6 +720,17 @@ func (s *Server) requireGranter(caller string) error {
 	return nil // operator caller (not a registry agent)
 }
 
+// callerIsOperator classifies a verified caller for the flows that guard by
+// grant authority: an OPERATOR (a roster member not in the agent registry)
+// versus the CPA (a registry agent at the grant surface). Fails closed to
+// "not operator" (registry-agent semantics) when no resolver is bound.
+func (s *Server) callerIsOperator(caller string) bool {
+	if s.IsAgent == nil {
+		return false
+	}
+	return !s.IsAgent(caller)
+}
+
 // agentGrantsMode returns the configured agent-grant mode ("confirm" default).
 func (s *Server) agentGrantsMode() string {
 	if s.AgentGrants == nil {
@@ -797,6 +860,69 @@ func (s *Server) dispatch(w http.ResponseWriter, id json.RawMessage, params json
 			return
 		}
 		report, err := s.Tools.RevokeRunner(agent.RetireArgs{Name: a.Name, RevokeFrom: a.RevokeFrom})
+		s.textResult(w, id, err, report)
+	case "provision_mcp":
+		// The MCP plane's grant-giving carve-out: the SAME identity gate +
+		// kill switch as provision_runner (one grant surface, two planes,
+		// one switch — a world where the agent can provision doors but not
+		// MCP capabilities is a half-governed plane).
+		if err := s.requireGranter(caller); err != nil {
+			s.rpcError(w, id, -32003, "unauthorized: "+err.Error())
+			return
+		}
+		if mode := s.agentGrantsMode(); mode == "off" {
+			s.rpcError(w, id, -32003, "unauthorized: agent_grants is off — provision_mcp is disabled (the operator grants via the console)")
+			return
+		}
+		var a provisionMCPArgs
+		if err := json.Unmarshal(call.Arguments, &a); err != nil {
+			s.rpcError(w, id, -32602, "provision_mcp arguments: "+err.Error())
+			return
+		}
+		report, err := s.Tools.ProvisionMCP(agent.ProvisionMCPArgs{
+			Name: a.Name, Transport: a.Transport, Namespace: a.Namespace,
+			ServicePort: a.ServicePort, URL: a.URL, Scope: a.Scope,
+			SpreadsheetID: a.SpreadsheetID,
+			Tools:         a.Tools, GrantTo: a.GrantTo, SecretRef: a.SecretRef,
+		}, s.callerIsOperator(caller))
+		s.textResult(w, id, err, report)
+	case "grant_capability":
+		if err := s.requireGranter(caller); err != nil {
+			s.rpcError(w, id, -32003, "unauthorized: "+err.Error())
+			return
+		}
+		if mode := s.agentGrantsMode(); mode == "off" {
+			s.rpcError(w, id, -32003, "unauthorized: agent_grants is off — grant_capability is disabled (the operator grants via the console)")
+			return
+		}
+		var a capabilityGrantArgs
+		if err := json.Unmarshal(call.Arguments, &a); err != nil {
+			s.rpcError(w, id, -32602, "grant_capability arguments: "+err.Error())
+			return
+		}
+		report, err := s.Tools.GrantCapability(agent.CapabilityGrantArgs{
+			Name: a.Name, GrantTo: a.GrantTo, RevokeFrom: a.RevokeFrom,
+		}, s.callerIsOperator(caller))
+		s.textResult(w, id, err, report)
+	case "revoke_capability":
+		// The take-away twin: the SAME gate + switch (one governed plane,
+		// both directions).
+		if err := s.requireGranter(caller); err != nil {
+			s.rpcError(w, id, -32003, "unauthorized: "+err.Error())
+			return
+		}
+		if mode := s.agentGrantsMode(); mode == "off" {
+			s.rpcError(w, id, -32003, "unauthorized: agent_grants is off — revoke_capability is disabled (the operator revokes via the console)")
+			return
+		}
+		var a capabilityGrantArgs
+		if err := json.Unmarshal(call.Arguments, &a); err != nil {
+			s.rpcError(w, id, -32602, "revoke_capability arguments: "+err.Error())
+			return
+		}
+		report, err := s.Tools.RevokeCapability(agent.CapabilityGrantArgs{
+			Name: a.Name, GrantTo: a.GrantTo, RevokeFrom: a.RevokeFrom,
+		}, s.callerIsOperator(caller))
 		s.textResult(w, id, err, report)
 	case "fill_door":
 		// The seal leg of the grant flow — the SAME identity gate and kill

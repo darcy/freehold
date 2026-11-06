@@ -68,6 +68,11 @@ func Redeploy(t Transport, spec *DeployCpSpec) error {
 			return err
 		}
 	}
+	if spec.MCPSheetsBinary != nil && *spec.MCPSheetsBinary != "" {
+		if err := shipFile(t, spec, *spec.MCPSheetsBinary, spec.BinDir+"/freehold-mcp-sheets", "mcp-sheets binary"); err != nil {
+			return err
+		}
+	}
 
 	restartRunner := spec.RunnerBinary != nil && *spec.RunnerBinary != "" && spec.RunnerPackage != nil
 	// Capture the doors' argvs BEFORE stopping them (below) — the transient

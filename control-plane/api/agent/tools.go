@@ -107,6 +107,77 @@ type ProvisionArgs struct {
 // nil = unsupported.
 type ProvisionRunnerFn func(args ProvisionArgs) (report string, err error)
 
+// ProvisionMCPArgs is one provision_mcp call: an MCP-plane capability's
+// registration + grants. The credential-blind rule holds — the tool accepts
+// no secret at all (the broker token is CP-generated and sealed; the Google
+// SA key never enters this flow). A SLOTTED capability's URL is CP-DERIVED
+// (an agent-stated endpoint would hand the broker token to a server the
+// agent controls); an EXTERNAL capability's URL is the thing being stated.
+type ProvisionMCPArgs struct {
+	// Name is the capability's slug (kebab-case): the LiteLLM server_name +
+	// pinned server_id + the tool-name prefix grantees see.
+	Name string `json:"name"`
+	// Transport is the MCP transport: "http" (streamable, default) | "sse".
+	Transport string `json:"transport,omitempty"`
+	// Namespace is the slotted shape: the mcp slot's namespace the MCP
+	// service deploys into. Set = the URL DERIVES (refuse url).
+	Namespace string `json:"namespace,omitempty"`
+	// ServicePort is the slotted service's port (required when Namespace is
+	// set).
+	ServicePort int `json:"service_port,omitempty"`
+	// URL is the EXTERNAL shape's endpoint (required when Namespace is
+	// empty; refused when slotted).
+	URL string `json:"url,omitempty"`
+	// Scope is the human-readable capability bound (documentation — the hard
+	// bound is the service credential's own ACL).
+	Scope string `json:"scope,omitempty"`
+	// SpreadsheetID is the sheet a slotted mcp-sheets service pins (the
+	// service cannot name another spreadsheet).
+	SpreadsheetID string `json:"spreadsheet_id,omitempty"`
+	// Tools pins the capability's allowed tool subset (empty = the whole
+	// server's catalog).
+	Tools []string `json:"tools,omitempty"`
+	// GrantTo are the agent NAMES granted the capability (registry rows).
+	GrantTo []string `json:"grant_to"`
+	// SecretRef is the slotted capability's broker-token secret name sealed
+	// into the slot runner's package (external servers carry no freehold
+	// credential — refused when Namespace is empty).
+	SecretRef string `json:"secret_ref,omitempty"`
+}
+
+// ProvisionMCPFn registers an MCP-plane capability (provision_mcp — the
+// CPA's grant-giving flow, the same surface class as provision_runner).
+// callerIsOperator distinguishes the two grant authorities the flow guards
+// (the CPA cannot re-provision an operator-origin record). Built by
+// cpbuild.BuildProvisionMCP; nil = unsupported.
+type ProvisionMCPFn func(args ProvisionMCPArgs, callerIsOperator bool) (string, error)
+
+// CapabilityGrantArgs is one grant_capability / revoke_capability call: a
+// capability's name (either plane — looked up) plus the grantee delta.
+type CapabilityGrantArgs struct {
+	// Name is the capability's slug (the MCP server name or the runner
+	// name).
+	Name string `json:"name"`
+	// GrantTo adds these agent NAMES to the capability's grantees.
+	GrantTo []string `json:"grant_to,omitempty"`
+	// RevokeFrom removes these agent NAMES from the grantees.
+	RevokeFrom []string `json:"revoke_from,omitempty"`
+}
+
+// CapabilityGrantFn grants agents onto an MCP capability (grant_capability
+// — the MCP plane's native grant: each grant is a key-permission write, not
+// an exec seat). Runner-plane capabilities are REFUSED with routing (roster
+// grants stay operator-scoped on their existing surfaces). Built by
+// cpbuild.BuildGrantCapability; nil = unsupported.
+type CapabilityGrantFn func(args CapabilityGrantArgs, callerIsOperator bool) (string, error)
+
+// CapabilityRevokeFn is the take-away twin: remove grantees from an MCP
+// capability, or RETIRE it outright (record dropped, the LiteLLM server
+// registration deleted, a re-enablable guard note); on the runner plane it
+// delegates to revoke_runner's audited path unchanged. Built by
+// cpbuild.BuildRevokeCapability; nil = unsupported.
+type CapabilityRevokeFn func(args CapabilityGrantArgs, callerIsOperator bool) (string, error)
+
 // RetireArgs is one revoke_runner call. The tool takes no secret (retirement
 // only removes; there is nothing to seal).
 type RetireArgs struct {
@@ -211,6 +282,16 @@ type Tools struct {
 	// Revoke retires a capability door on the fly (revoke_runner — the CPA's
 	// take-away flow; the counterpart of Provision above). nil = unsupported.
 	Revoke RevokeRunnerFn
+	// MCPProvision registers an MCP-plane capability (provision_mcp).
+	// nil = unsupported.
+	MCPProvision ProvisionMCPFn
+	// MCPGrant grants agents onto an MCP capability (grant_capability).
+	// nil = unsupported.
+	MCPGrant CapabilityGrantFn
+	// MCPRevoke takes MCP capability away (revoke_capability) — grantee
+	// removal or whole retirement; the runner plane delegates to Revoke.
+	// nil = unsupported.
+	MCPRevoke CapabilityRevokeFn
 	// Fill seals a non-secret credential into a no_secret door (fill_door).
 	// nil = unsupported.
 	Fill FillDoorFn
@@ -421,6 +502,30 @@ func (t *Tools) RevokeRunner(args RetireArgs) (string, error) {
 		return "", fmt.Errorf("revoke_runner: no retirement path bound")
 	}
 	return t.Revoke(args)
+}
+
+// ProvisionMCP registers an MCP-plane capability + grants it (provision_mcp).
+func (t *Tools) ProvisionMCP(args ProvisionMCPArgs, callerIsOperator bool) (string, error) {
+	if t.MCPProvision == nil {
+		return "", fmt.Errorf("provision_mcp: no registration path bound")
+	}
+	return t.MCPProvision(args, callerIsOperator)
+}
+
+// GrantCapability grants agents onto a capability (grant_capability).
+func (t *Tools) GrantCapability(args CapabilityGrantArgs, callerIsOperator bool) (string, error) {
+	if t.MCPGrant == nil {
+		return "", fmt.Errorf("grant_capability: no grant path bound")
+	}
+	return t.MCPGrant(args, callerIsOperator)
+}
+
+// RevokeCapability takes a capability away (revoke_capability).
+func (t *Tools) RevokeCapability(args CapabilityGrantArgs, callerIsOperator bool) (string, error) {
+	if t.MCPRevoke == nil {
+		return "", fmt.Errorf("revoke_capability: no take-away path bound")
+	}
+	return t.MCPRevoke(args, callerIsOperator)
 }
 
 // FillDoor seals a non-secret credential into a declared no_secret door.

@@ -965,7 +965,9 @@ The department-owned architecture and the plans each domain carries:
     #freehold is the workroom where all agent-to-agent plumbing lives, and the
     channel the user asked in gets plain-language status only. Only the
     identity/grant separation is locked.
-*   **LiteLLM** as a k8s Deployment, config via env, state in Postgres.
+*   **LiteLLM** as a k8s Deployment, config via env + the pinned gateway
+    config in `litellm.tf` (the MCP default-deny posture lives there), state in
+    Postgres.
 *   **Storage:** ZFS / LVM-thin now → Ceph on a second box. Layered reliability.
 *   **Buzz relay is headless;** the first-party **console** is the admin/ops
     surface.

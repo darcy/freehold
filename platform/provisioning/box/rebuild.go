@@ -144,6 +144,7 @@ type Bins struct {
 	ReleaseConsole    string // target/release/freehold-console (deploy-cp --binary)
 	ReleaseRun        string // target/release/runner (deploy-cp --runner-binary)
 	ReleaseAgentTools string // target/release/freehold-agent-tools (the CP's agent-tools MCP server)
+	ReleaseMCPSheets  string // target/release/freehold-mcp-sheets (the MCP plane's sheets service)
 }
 
 // ResolveBins checks the sibling binaries THIS pipeline execs and returns
@@ -164,6 +165,7 @@ func ResolveBins() (Bins, error) {
 		ReleaseConsole:    filepath.Join(releaseDir, "freehold-console"),
 		ReleaseRun:        filepath.Join(releaseDir, "runner"),
 		ReleaseAgentTools: filepath.Join(releaseDir, "freehold-agent-tools"),
+		ReleaseMCPSheets:  filepath.Join(releaseDir, "freehold-mcp-sheets"),
 	}
 	var missing []string
 	for _, x := range []struct{ path, label string }{
@@ -172,6 +174,7 @@ func ResolveBins() (Bins, error) {
 		{b.ReleaseConsole, "../release/freehold-console"},
 		{b.ReleaseRun, "../release/runner"},
 		{b.ReleaseAgentTools, "../release/freehold-agent-tools"},
+		{b.ReleaseMCPSheets, "../release/freehold-mcp-sheets"},
 	} {
 		if _, err := os.Stat(x.path); err != nil {
 			missing = append(missing, filepath.Join(filepath.Base(selfDir), x.label))
@@ -179,7 +182,7 @@ func ResolveBins() (Bins, error) {
 	}
 	if len(missing) > 0 {
 		return b, fmt.Errorf(
-			"sibling binaries missing: %s\n  build them once, then re-run:\n    go build -C control-plane -o target/debug/freehold-console ./api/cmd/freehold-console && go build -C control-plane -o target/release/freehold-console ./api/cmd/freehold-console && cargo build --bin runner && cargo build --release --bin runner && CGO_ENABLED=0 go build -C control-plane -o target/release/freehold-agent-tools ./api/cmd/freehold-agent-tools",
+			"sibling binaries missing: %s\n  build them once, then re-run:\n    go build -C control-plane -o target/debug/freehold-console ./api/cmd/freehold-console && go build -C control-plane -o target/release/freehold-console ./api/cmd/freehold-console && cargo build --bin runner && cargo build --release --bin runner && CGO_ENABLED=0 go build -C control-plane -o target/release/freehold-agent-tools ./api/cmd/freehold-agent-tools && CGO_ENABLED=0 go build -C control-plane -o target/release/freehold-mcp-sheets ./api/cmd/freehold-mcp-sheets",
 			strings.Join(missing, ", "))
 	}
 	return b, nil
@@ -2359,6 +2362,7 @@ func (e *Engine) stageDeployCp() error {
 		"--runner-package", RunnerPkgs() + "/" + e.F.Target,
 		"--operator-pubkey", e.F.OperatorPubkey,
 		"--agent-tools-binary", e.Bins.ReleaseAgentTools,
+		"--mcp-sheets-binary", e.Bins.ReleaseMCPSheets,
 		// The verb surface: the running CLI (this release's), the profile
 		// config, and the profile's cp-verb SSH key — the data verbs run ON
 		// the CP guest through the cp-local-root runner.
@@ -2452,6 +2456,7 @@ func (e *Engine) RedeployCp(bins Bins, migrationsDir string) (GuestDirs, error) 
 		"--runner-package", RunnerPkgs() + "/" + e.F.Target,
 		"--operator-pubkey", e.F.OperatorPubkey,
 		"--agent-tools-binary", bins.ReleaseAgentTools,
+		"--mcp-sheets-binary", bins.ReleaseMCPSheets,
 		// The verb surface (the update re-ships it idempotently).
 		"--freehold-binary", bins.Self,
 		"--freehold-config", e.F.ConfigPath,

@@ -120,9 +120,19 @@ func BuildUpdateAgentFn(spec *Spec, reg *agenttools.Registry) agent.UpdateAgentF
 				if err := spec.moveLitellmKeyRecord(oldPod, newPod); err != nil {
 					return "", fmt.Errorf("%s: move the litellm key record: %w", verb, err)
 				}
+				// The MCP capability grants ride the agent NAME — they follow
+				// the rename (a rename that left them would strip the
+				// agent's MCP access at the next build's permission rewrite).
+				// Failure is reported + reversed by rekeyBack, never silent.
+				if err := spec.renameMCPGranteeState(name, newName); err != nil {
+					return "", fmt.Errorf("%s: move the MCP capability grants: %w", verb, err)
+				}
 				rekeyBack := func() string {
 					if rerr := spec.moveLitellmKeyRecord(newPod, oldPod); rerr != nil {
 						return fmt.Sprintf(" [UNVERIFIED] the minted-key record could not be re-keyed back (%v) — the store still holds agentkey-%s under the un-applied destination name; re-run the rename to converge it", rerr, newPod)
+					}
+					if rerr := spec.renameMCPGranteeState(newName, name); rerr != nil {
+						return fmt.Sprintf(" [UNVERIFIED] the MCP capability grants could not follow back (%v) — the records still grant %q; re-run the rename to converge it", rerr, newName)
 					}
 					return ""
 				}
@@ -259,6 +269,13 @@ func BuildRemoveAgentFn(spec *Spec) agent.RemoveAgentFn {
 		}
 		if err := spec.revokeAgentLitellmKey(name); err != nil {
 			return "", fmt.Errorf("%s %s: revoking the litellm key FAILED (%v) — the registry row is untouched; retry once the gateway answers", verb, name, err)
+		}
+		// The MCP-only key dies in the same breath: an orphaned mcptool key
+		// keeps its full MCP grant set live on the gateway until the next
+		// build's sweep stamps it — an unbounded window for a credential the
+		// agent's pod will never hold again.
+		if err := spec.revokeAgentMCPKey(name); err != nil {
+			return "", fmt.Errorf("%s %s: revoking the MCP key FAILED (%v) — the registry row is untouched; retry once the gateway answers", verb, name, err)
 		}
 		if err := spec.run(agent.AgentRetireScript(spec.K3sVmid, name), 120); err != nil {
 			return "", fmt.Errorf("%s %s: retiring the pod FAILED (%v) — the registry row is untouched; its gateway key is already revoked, and a later reconcile mints fresh and heals the pod's Secret; fix the k3s guest and retry, or drop the row from the console if the pod is already gone", verb, name, err)

@@ -679,6 +679,13 @@ func cmdServe(args []string) {
 	// so the two flows share their ownership guards by construction (they read the
 	// same capability table through the same registry handle).
 	tools.Revoke = cpbuild.BuildRevokeRunner(spec, reg)
+	// The MCP capability plane's grant surface: register + grant/take-away,
+	// bound to the same spec + registry so every plane's flows read the same
+	// capability table through the same handles; the take-away's runner case
+	// delegates to the Revoke fn bound above.
+	tools.MCPProvision = cpbuild.BuildProvisionMCP(spec, reg)
+	tools.MCPGrant = cpbuild.BuildGrantCapability(spec, reg)
+	tools.MCPRevoke = cpbuild.BuildRevokeCapability(spec, reg, tools.Revoke)
 	// The no-secret seal leg (fill_door) and the self-hosted package fetch
 	// (door_package) — bound to the same spec so they read the same capability
 	// table the give/take flows wrote.
@@ -766,6 +773,17 @@ func cmdServe(args []string) {
 			return
 		}
 		http.ServeFile(w, r, self)
+	})
+	// Serve the MCP plane's sheets service binary — the capability pods
+	// fetch it at bootstrap (the same pattern; the sibling ships beside this
+	// binary on the CP guest).
+	mux.HandleFunc("/mcp-sheets-binary", func(w http.ResponseWriter, r *http.Request) {
+		self, err := os.Executable()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		http.ServeFile(w, r, filepath.Join(filepath.Dir(self), "freehold-mcp-sheets"))
 	})
 	log.Printf("freehold-agent-tools serving on %s (audience %s, self-url %s)", *addr, audience, *selfURL)
 	s := &http.Server{Addr: *addr, Handler: mux}
