@@ -185,17 +185,17 @@ func (c *Client) requireSSO(ctx context.Context, resourceID int) error {
 // default). The tunnel-verification path.
 func (c *Client) MintAccessToken(ctx context.Context, resourceID int, title string, validForSeconds int) (string, error) {
 	var out struct {
-		Token string `json:"token"`
+		AccessToken string `json:"accessToken"` // Pangolin names it "accessToken" in the create response
 	}
 	if err := c.do(ctx, http.MethodPost, fmt.Sprintf("/v1/resource/%d/access-token", resourceID), map[string]interface{}{
 		"title": title, "validForSeconds": validForSeconds,
 	}, &out); err != nil {
 		return "", err
 	}
-	if out.Token == "" {
+	if out.AccessToken == "" {
 		return "", fmt.Errorf("pangolin: the access token came back empty")
 	}
-	return out.Token, nil
+	return out.AccessToken, nil
 }
 
 // SetTarget points the resource at the app's internal address, reachable
