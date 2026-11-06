@@ -205,6 +205,11 @@ type MCPCapabilityRecord struct {
 	// "spreadsheet:<id>:readonly") — documentation; the HARD bound is the
 	// service's own credential's Google ACL.
 	Scope string `json:"scope,omitempty"`
+	// SpreadsheetID is the sheet the capability's mcp-sheets service pins
+	// (every tool addresses exactly this spreadsheet; the service cannot
+	// name another). Empty for capabilities whose server is not a
+	// freehold-mcp-sheets service.
+	SpreadsheetID string `json:"spreadsheet_id,omitempty"`
 	// Tools are the capability's allowed tool names (pinned_tools +
 	// mcp_tool_permissions seed from it).
 	Tools []string `json:"tools,omitempty"`

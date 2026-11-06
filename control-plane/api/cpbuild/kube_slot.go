@@ -85,8 +85,15 @@ func kubeSlotManifest(ns, quota string) ([]byte, error) {
 		{
 			"apiVersion": "v1", "kind": "Namespace",
 			"metadata": map[string]any{
-				"name":   ns,
-				"labels": map[string]string{"app.kubernetes.io/managed-by": "freehold"},
+				"name": ns,
+				"labels": map[string]string{
+					"app.kubernetes.io/managed-by": "freehold",
+					// A slot's full-namespace Role reaches Secrets (the MCP
+					// services') and can schedule pods — without an enforce
+					// label, privileged/hostNetwork pods mean root on the
+					// node. Enforce restricted on every slot carve.
+					"pod-security.kubernetes.io/enforce": "restricted",
+				},
 			},
 		},
 		{

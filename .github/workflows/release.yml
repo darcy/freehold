@@ -42,8 +42,9 @@ jobs:
           cp target/release/freehold-console dist/freehold-console
           cp target/release/runner dist/runner
           cp target/release/freehold-agent-tools dist/freehold-agent-tools
+          cp target/release/freehold-mcp-sheets dist/freehold-mcp-sheets
           tar -czf dist/migrations.tar.gz migrations
-          (cd dist && sha256sum freehold freehold-console runner freehold-agent-tools migrations.tar.gz > checksums.txt)
+          (cd dist && sha256sum freehold freehold-console runner freehold-agent-tools freehold-mcp-sheets migrations.tar.gz > checksums.txt)
 
       - name: Attach assets to a draft release
         uses: softprops/action-gh-release@v2
@@ -55,5 +56,6 @@ jobs:
             dist/freehold-console
             dist/runner
             dist/freehold-agent-tools
+            dist/freehold-mcp-sheets
             dist/migrations.tar.gz
             dist/checksums.txt

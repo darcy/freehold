@@ -1,6 +1,7 @@
 package cpbuild
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -1240,5 +1241,51 @@ func TestRevokeCapabilityDropConverges(t *testing.T) {
 	}
 	if !strings.Contains(report, "rewritten from CP state") {
 		t.Fatalf("the convergence must be named:\\n%s", report)
+	}
+}
+
+// --- Phase 4: the MCP services stage ---
+
+// TestMCPServiceManifest: the rendered manifests pin the sheet, carry the
+// broker + SA secrets, advertise read-only per the scope, and bootstrap the
+// binary off the CP.
+func TestMCPServiceManifest(t *testing.T) {
+	rec := state.MCPCapabilityRecord{
+		ServerName: "sheet-a-ro", Namespace: "mcp", ServicePort: 8000,
+		Transport: "http", URL: "http://sheet-a-ro.mcp.svc.cluster.local:8000/mcp",
+		Scope: "spreadsheet:abc:readonly", SpreadsheetID: "abc123",
+		SecretRef: "sheet-a-ro-token",
+	}
+	raw, err := mcpServiceManifest(rec, "SA-JSON", "broker-tok", "192.168.30.5", "8089")
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	list := strings.Split(string(raw), "\n")
+	_ = list
+	var m map[string]interface{}
+	if err := json.Unmarshal(raw, &m); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	items := m["items"].([]interface{})
+	if len(items) != 4 { // sa Secret + broker Secret + Deployment + Service
+		t.Fatalf("want 4 items, got %d", len(items))
+	}
+	blob := string(raw)
+	for _, want := range []string{
+		`"FREEHOLD_SPREADSHEET_ID","value":"abc123"`,            // the pin
+		`"FREEHOLD_READ_ONLY","value":"1"`,                      // readonly per the scope
+		base64.StdEncoding.EncodeToString([]byte("broker-tok")), // the broker token rides (the Secret's data is base64)
+		"/mcp-sheets-binary",                                    // the bootstrap fetch
+		`"hostNetwork":true`,
+	} {
+		if !strings.Contains(blob, want) {
+			t.Fatalf("manifest missing %q\n%s", want, blob)
+		}
+	}
+	// A write scope advertises read-write.
+	rec.Scope = "spreadsheet:abc:rw"
+	raw, _ = mcpServiceManifest(rec, "", "", "ip", "8089")
+	if strings.Contains(string(raw), `"FREEHOLD_READ_ONLY","value":"1"`) {
+		t.Fatalf("an rw scope must not be read-only")
 	}
 }

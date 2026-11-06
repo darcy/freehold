@@ -131,6 +131,9 @@ type ProvisionMCPArgs struct {
 	// Scope is the human-readable capability bound (documentation — the hard
 	// bound is the service credential's own ACL).
 	Scope string `json:"scope,omitempty"`
+	// SpreadsheetID is the sheet a slotted mcp-sheets service pins (the
+	// service cannot name another spreadsheet).
+	SpreadsheetID string `json:"spreadsheet_id,omitempty"`
 	// Tools pins the capability's allowed tool subset (empty = the whole
 	// server's catalog).
 	Tools []string `json:"tools,omitempty"`

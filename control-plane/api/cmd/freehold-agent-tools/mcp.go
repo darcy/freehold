@@ -110,6 +110,7 @@ func freeholdToolDefs(hasRunner bool, targets []string) []map[string]interface{}
 				"service_port": map[string]interface{}{"type": "integer"},
 				"url":          map[string]interface{}{"type": "string"},
 				"scope":        map[string]interface{}{"type": "string"},
+				"spreadsheet_id": map[string]interface{}{"type": "string"},
 				"tools":        map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
 				"grant_to":     map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
 				"secret_ref":   map[string]interface{}{"type": "string"},

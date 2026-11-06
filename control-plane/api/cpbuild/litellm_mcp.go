@@ -3,6 +3,7 @@ package cpbuild
 import (
 	"bytes"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -740,6 +741,7 @@ func (s *Spec) provisionMCP(args agent.ProvisionMCPArgs, callerIsOperator bool, 
 	rec.ServerName = name
 	rec.Transport = transport
 	rec.Scope = strings.TrimSpace(args.Scope)
+	rec.SpreadsheetID = strings.TrimSpace(args.SpreadsheetID)
 	rec.Tools = dedupNonBlank(args.Tools)
 	rec.Origin = state.OriginOperator
 	if !callerIsOperator {
@@ -1119,4 +1121,156 @@ func mustRegistryRows(reg *agenttools.Registry) ([]console.AgentInfo, error) {
 		return nil, fmt.Errorf("read agent registry: %w", err)
 	}
 	return rows, nil
+}
+
+// stageMCPServices re-applies every SLOTTED MCP capability's SERVICE — the
+// Deployment + Service + Secret the mcp-sheets binary serves from — from the
+// capability record + the CP's sealed material (the kube-slot pattern: the
+// record IS the spec; a k3s rebuild wipes the cluster and the next build
+// re-derives everything). Idempotent (server-side apply); wired in the build
+// beside the MCP registration. The SA key rides the CP litellm store
+// (`mcp-<slug>-sa`, operator-filled); an UNFILLED key renders an EMPTY
+// Secret — the service comes up and answers MCP, and every Google call
+// fails with a clear configuration error until the operator fills it (the
+// plumbing is verifiable without a credential).
+func (s *Spec) stageMCPServices(store *state.StateStore) (string, error) {
+	if s.K3sVmid == 0 {
+		return "", nil
+	}
+	ls, err := s.openLitellmMCPStore()
+	if err != nil {
+		return "", err
+	}
+	report := []string{}
+	for _, rec := range store.MCPCapabilityRecords() {
+		if rec.Namespace == "" {
+			continue // an external server: nothing to deploy
+		}
+		saKey := ""
+		if ls != nil {
+			saKey = ls.env["mcp-"+rec.ServerName+"-sa"]
+		}
+		brokerToken := ""
+		if ls != nil && rec.SecretRef != "" {
+			brokerToken = ls.env[mcpBrokerTokenEnvKey(rec.ServerName)]
+		}
+		manifest, err := mcpServiceManifest(rec, saKey, brokerToken, s.CpIP, AgentToolsPort)
+		if err != nil {
+			return "", err
+		}
+		cmd := fmt.Sprintf(
+			`pct exec %d -- sh -c "printf '%%s' '%s' | base64 -d | %s apply -f -"`,
+			s.K3sVmid, base64.StdEncoding.EncodeToString(manifest), kubeKubectl())
+		if _, err := s.execOut(cmd, 120); err != nil {
+			return "", fmt.Errorf("apply MCP service %s: %w", rec.ServerName, err)
+		}
+		note := "applied"
+		if saKey == "" {
+			note += " (SA key UNFILLED — the service answers MCP; Google calls fail with a clear error until the operator fills it)"
+		}
+		report = append(report, fmt.Sprintf("MCP service %s (%s): %s", rec.ServerName, rec.URL, note))
+	}
+	return strings.Join(report, "\n"), nil
+}
+
+// mcpServiceManifest renders one MCP service's manifests as a kubectl-
+// applicable JSON List. The pod runs the SPRIG image (already in the world
+// for the agent pods — no image build) and bootstraps the mcp-sheets binary
+// off the CP's /mcp-sheets-binary (the agent bridge's fetch pattern);
+// hostNetwork puts it on the node's LAN so it reaches the CP directly (the
+// same reason the agent pods run hostNetwork).
+func mcpServiceManifest(rec state.MCPCapabilityRecord, saKeyJSON, brokerToken, cpIP, agentToolsPort string) ([]byte, error) {
+	if rec.Namespace == "" || rec.ServicePort <= 0 {
+		return nil, fmt.Errorf("mcp service %s: namespace and service_port are required", rec.ServerName)
+	}
+	readOnly := "0"
+	if strings.Contains(rec.Scope, ":readonly") {
+		readOnly = "1"
+	}
+	broker := ""
+	if rec.SecretRef != "" {
+		broker = rec.SecretRef
+	}
+	bootstrap := fmt.Sprintf(
+		"if curl -fsSL --max-time 25 'http://%s:%s/mcp-sheets-binary' -o /tmp/mcp-sheets && chmod +x /tmp/mcp-sheets; then exec /tmp/mcp-sheets; fi; echo 'mcp-sheets binary fetch failed' >&2; sleep 3600",
+		cpIP, agentToolsPort)
+	env := []map[string]any{
+		{"name": "FREEHOLD_MCP_ADDR", "value": fmt.Sprintf(":%d", rec.ServicePort)},
+		{"name": "FREEHOLD_SPREADSHEET_ID", "value": rec.SpreadsheetID},
+		{"name": "FREEHOLD_READ_ONLY", "value": readOnly},
+	}
+	if broker != "" && brokerToken != "" {
+		env = append(env, map[string]any{"name": "FREEHOLD_BROKER_TOKEN", "valueFrom": map[string]any{
+			"secretKeyRef": map[string]any{"name": broker, "key": "token"},
+		}})
+	} else {
+		// No broker token (undeclared or not yet sealed): the env value is
+		// EMPTY — the service runs OPEN until the stage re-applies with the
+		// sealed token (the CP generates it on the next registration).
+		env = append(env, map[string]any{"name": "FREEHOLD_BROKER_TOKEN", "value": ""})
+	}
+	if saKeyJSON != "" {
+		env = append(env, map[string]any{"name": "GOOGLE_SA_JSON", "valueFrom": map[string]any{
+			"secretKeyRef": map[string]any{"name": rec.ServerName + "-sa", "key": "sa.json"},
+		}})
+	}
+	items := []map[string]any{
+		{
+			"apiVersion": "v1", "kind": "Secret",
+			"metadata": map[string]any{"name": rec.ServerName + "-sa", "namespace": rec.Namespace},
+			"type":     "Opaque",
+			"data":     map[string]any{"sa.json": base64.StdEncoding.EncodeToString([]byte(saKeyJSON))},
+		},
+	}
+	if broker != "" && brokerToken != "" {
+		// The broker-token Secret: the value is the CP's own sealed token
+		// for this capability (the litellm store's mcp-<slug>-token) — the
+		// same value the LiteLLM registration's static header carries.
+		items = append(items, map[string]any{
+			"apiVersion": "v1", "kind": "Secret",
+			"metadata": map[string]any{"name": broker, "namespace": rec.Namespace},
+			"type":     "Opaque",
+			"data":     map[string]any{"token": base64.StdEncoding.EncodeToString([]byte(brokerToken))},
+		})
+	}
+	items = append(items,
+		map[string]any{
+			"apiVersion": "apps/v1", "kind": "Deployment",
+			"metadata": map[string]any{
+				"name":      rec.ServerName,
+				"namespace": rec.Namespace,
+				"labels":    map[string]any{"app": rec.ServerName, "app.kubernetes.io/managed-by": "freehold"},
+			},
+			"spec": map[string]any{
+				"replicas": 1,
+				"selector": map[string]any{"matchLabels": map[string]any{"app": rec.ServerName}},
+				"template": map[string]any{
+					"metadata": map[string]any{"labels": map[string]any{"app": rec.ServerName}},
+					"spec": map[string]any{
+						"hostNetwork": true,
+						"containers": []map[string]any{{
+							"name":    "sheets",
+							"image":   agent.SprigImage,
+							"command": []string{"/bin/bash", "-c", bootstrap},
+							"env":     env,
+							"ports":   []map[string]any{{"containerPort": rec.ServicePort}},
+							"readinessProbe": map[string]any{
+								"httpGet":       map[string]any{"path": "/health", "port": rec.ServicePort},
+								"periodSeconds": 10, "failureThreshold": 6, "initialDelaySeconds": 5,
+							},
+						}},
+					},
+				},
+			},
+		},
+		map[string]any{
+			"apiVersion": "v1", "kind": "Service",
+			"metadata": map[string]any{"name": rec.ServerName, "namespace": rec.Namespace},
+			"spec": map[string]any{
+				"selector": map[string]any{"app": rec.ServerName},
+				"ports":    []map[string]any{{"port": rec.ServicePort, "targetPort": rec.ServicePort}},
+			},
+		},
+	)
+	return json.Marshal(map[string]any{"apiVersion": "v1", "kind": "List", "items": items})
 }

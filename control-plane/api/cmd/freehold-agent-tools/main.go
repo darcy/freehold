@@ -774,6 +774,17 @@ func cmdServe(args []string) {
 		}
 		http.ServeFile(w, r, self)
 	})
+	// Serve the MCP plane's sheets service binary — the capability pods
+	// fetch it at bootstrap (the same pattern; the sibling ships beside this
+	// binary on the CP guest).
+	mux.HandleFunc("/mcp-sheets-binary", func(w http.ResponseWriter, r *http.Request) {
+		self, err := os.Executable()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		http.ServeFile(w, r, filepath.Join(filepath.Dir(self), "freehold-mcp-sheets"))
+	})
 	log.Printf("freehold-agent-tools serving on %s (audience %s, self-url %s)", *addr, audience, *selfURL)
 	s := &http.Server{Addr: *addr, Handler: mux}
 	if err := s.ListenAndServe(); err != nil && err != http.ErrServerClosed {

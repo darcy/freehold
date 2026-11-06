@@ -1782,12 +1782,24 @@ func BuildWorldApply(spec *Spec) agent.WorldApply {
 			}
 			report = append(report, "litellm default aliases ensured")
 			cpState := spec.consoleStateDir()
-			if cpStore, err := state.Open(cpState); err != nil {
+			cpStore, err := state.Open(cpState)
+			if err != nil {
 				return "", fmt.Errorf("world-build litellm mcp: %w", err)
-			} else if mcpReport, err := spec.stageLitellmMCP(cpStore); err != nil {
+			}
+			if mcpReport, err := spec.stageLitellmMCP(cpStore); err != nil {
 				return "", fmt.Errorf("world-build litellm mcp: %w", err)
 			} else if mcpReport != "" {
 				report = append(report, "litellm mcp: "+mcpReport)
+			}
+			// The MCP plane's SERVICES: every slotted capability's
+			// Deployment/Service/Secret re-applied from the record + the
+			// CP's sealed material (the kube-slot pattern; a k3s rebuild
+			// re-derives everything). Idempotent; a failure fails the build
+			// loudly.
+			if svcReport, err := spec.stageMCPServices(cpStore); err != nil {
+				return "", fmt.Errorf("world-build mcp services: %w", err)
+			} else if svcReport != "" {
+				report = append(report, "mcp services: "+svcReport)
 			}
 		}
 		// 8. The agent org + world facts are CP-owned now: create the CPA +

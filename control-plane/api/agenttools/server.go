@@ -249,15 +249,16 @@ func ToolList() []map[string]interface{} {
 		{
 			"name": "provision_mcp", "description": "Register an MCP capability and grant it (the MCP plane's grant-giving flow, the sibling of provision_runner): an MCP server registered on the LiteLLM gateway + the named agents' MCP keys granted its tools. The tool is CREDENTIAL-BLIND — no secret field exists (the broker token is CP-generated and sealed; the MCP service's own Google SA key never enters this flow). Two shapes: SLOTTED (namespace + service_port — the URL DERIVES as http://<name>.<namespace>.svc.cluster.local:<port>/{/mcp|/sse}; url is REFUSED — an agent-stated endpoint would hand the broker token to a server the agent controls; the mcp slot's door (kube-api-<namespace>) must exist — Compute carves it through kube-api-root) and EXTERNAL (url required; secret_ref refused — an external server carries no freehold-sealed credential). transport: http (streamable, default) | sse. tools (optional) pins the capability's allowed tool subset. scope (optional) documents the bound. The confirmation discipline + granting skill are the same as provision_runner's; the agent_grants kill switch governs this too.",
 			"inputSchema": i(map[string]interface{}{
-				"name":         map[string]interface{}{"type": "string"},
-				"transport":    map[string]interface{}{"type": "string", "enum": []string{"http", "sse"}},
-				"namespace":    map[string]interface{}{"type": "string"},
-				"service_port": map[string]interface{}{"type": "integer"},
-				"url":          map[string]interface{}{"type": "string"},
-				"scope":        map[string]interface{}{"type": "string"},
-				"tools":        map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
-				"grant_to":     map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
-				"secret_ref":   map[string]interface{}{"type": "string"},
+				"name":           map[string]interface{}{"type": "string"},
+				"transport":      map[string]interface{}{"type": "string", "enum": []string{"http", "sse"}},
+				"namespace":      map[string]interface{}{"type": "string"},
+				"service_port":   map[string]interface{}{"type": "integer"},
+				"url":            map[string]interface{}{"type": "string"},
+				"scope":          map[string]interface{}{"type": "string"},
+				"spreadsheet_id": map[string]interface{}{"type": "string"},
+				"tools":          map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
+				"grant_to":       map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
+				"secret_ref":     map[string]interface{}{"type": "string"},
 			}, []string{"name", "grant_to"}),
 		},
 		{
@@ -441,15 +442,16 @@ type revokeRunnerArgs struct {
 // provisionMCPArgs registers an MCP capability (the MCP plane's
 // grant-giving flow). Credential-blind: no secret field exists.
 type provisionMCPArgs struct {
-	Name        string   `json:"name"`
-	Transport   string   `json:"transport"`
-	Namespace   string   `json:"namespace"`
-	ServicePort int      `json:"service_port"`
-	URL         string   `json:"url"`
-	Scope       string   `json:"scope"`
-	Tools       []string `json:"tools"`
-	GrantTo     []string `json:"grant_to"`
-	SecretRef   string   `json:"secret_ref"`
+	Name          string   `json:"name"`
+	Transport     string   `json:"transport"`
+	Namespace     string   `json:"namespace"`
+	ServicePort   int      `json:"service_port"`
+	URL           string   `json:"url"`
+	Scope         string   `json:"scope"`
+	SpreadsheetID string   `json:"spreadsheet_id"`
+	Tools         []string `json:"tools"`
+	GrantTo       []string `json:"grant_to"`
+	SecretRef     string   `json:"secret_ref"`
 }
 
 // capabilityGrantArgs is grant_capability / revoke_capability's delta.
@@ -880,7 +882,8 @@ func (s *Server) dispatch(w http.ResponseWriter, id json.RawMessage, params json
 		report, err := s.Tools.ProvisionMCP(agent.ProvisionMCPArgs{
 			Name: a.Name, Transport: a.Transport, Namespace: a.Namespace,
 			ServicePort: a.ServicePort, URL: a.URL, Scope: a.Scope,
-			Tools: a.Tools, GrantTo: a.GrantTo, SecretRef: a.SecretRef,
+			SpreadsheetID: a.SpreadsheetID,
+			Tools:         a.Tools, GrantTo: a.GrantTo, SecretRef: a.SecretRef,
 		}, s.callerIsOperator(caller))
 		s.textResult(w, id, err, report)
 	case "grant_capability":
