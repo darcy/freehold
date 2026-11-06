@@ -463,7 +463,7 @@ impl ExecManager {
                         && let Err(e) =
                             write_audit(d, a, &cmd, &target, r, started, caller.as_deref())
                     {
-                        tracing::warn!(error = %e, "audit write failed (exec still succeeded)");
+                        tracing::error!(error = %e, "AUDIT WRITE FAILED (exec still succeeded) — the containment record for this exec is missing");
                     }
                 }
                 Err(e) => {
@@ -525,7 +525,7 @@ impl ExecManager {
                 }
             }
             Err(e) => {
-                tracing::warn!(error = %e, "audit write failed (exec still succeeded)");
+                tracing::error!(error = %e, "AUDIT WRITE FAILED (exec still succeeded) — the containment record for this exec is missing");
             }
         }
     }

@@ -234,13 +234,10 @@ func DoorSandbox(user, pkgDir string) string {
 	if user == "" {
 		return ""
 	}
-	// The package dir sits inside the CP state dir (0700, re-tightened by
-	// state.Open on every open): the door user must be able to TRAVERSE the
-	// ancestors to read its own identity.json, or the unit crash-loops
-	// "no identity found" with the file right there. o+x only (traverse,
-	// never list); the state dir's contents stay 0600/0700. Healed at every
-	// start like the ownership line, so a later Open or re-ship cannot
-	// strand it. systemd needs $$ for a literal $.
+	// The package dir sits inside the CP state dir, which state.Open asserts
+	// at 0711 (traverse-only) on EVERY open — a running door needs that
+	// traversal to append its audit log and re-read its identity, and the
+	// console re-opens state continuously. The unit only heals ownership.
 	return fmt.Sprintf(`User=%s
 NoNewPrivileges=yes
 ProtectSystem=strict
@@ -251,8 +248,7 @@ RestrictSUIDSGID=yes
 ProtectKernelTunables=yes
 ProtectControlGroups=yes
 ProtectClock=yes
-ExecStartPre=+/usr/bin/chown -R %s %s
-ExecStartPre=+/bin/sh -c 'd=$$(/usr/bin/dirname %s); while [ "$$d" != "/" ]; do /usr/bin/chmod o+x "$$d" 2>/dev/null || true; d=$$(/usr/bin/dirname "$$d"); done'`, user, pkgDir, user, pkgDir, pkgDir)
+ExecStartPre=+/usr/bin/chown -R %s %s`, user, pkgDir, user, pkgDir)
 }
 
 func hexToArr(s string) ([32]byte, error) {

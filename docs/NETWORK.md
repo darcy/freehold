@@ -158,8 +158,8 @@ The gateway has TWO shapes, one per substrate:
     to /etc/freehold/dnsmasq.addn-hosts (world-readable, outside the
     dnsmasq conf-dir — Debian's CONFIG_DIR parses every file in
     /etc/dnsmasq.d as config, and a hosts-format file there keeps dnsmasq
-    from ever starting) so dnsmasq never depends on the 0700 state dir's
-    perms.
+    from ever starting) so dnsmasq never depends on the traverse-only (0711)
+    state dir's perms.
 *   **Network's runners:** the PVE host (shared), a `caddy`-scoped kube door, the resolver on
     the CP guest, a Cloudflare door per DNS zone, plus any door the CPA provisions on the fly
     (e.g. a UniFi controller).
