@@ -2661,6 +2661,20 @@ func cpaNameOrDefault(name string) string {
 	return name
 }
 
+// WorldConfigJSON renders THIS box's recorded world coords for the console's
+// build executor. Empty when the box has no provisioning coords (a login-only
+// box): the CP then keeps its deployed config. The provisioning box ships
+// this on every build, so the PROFILE stays the source of truth for
+// operator-authored coords (the pangolin block or its clear, edge riders, an
+// allowlist) without a redeploy.
+func (e *Engine) WorldConfigJSON() string {
+	cfg, err := config.Load(e.F.ConfigPath)
+	if err != nil || cfg == nil {
+		return ""
+	}
+	return e.worldConfigJSON(cfg)
+}
+
 // worldConfigJSON renders the console's build-executor coords (cpbuild.Coords)
 // from the box's recorded config + build flags, as JSON. Empty when there are
 // no runner coords to drive (the deploy then serves ops/status only).

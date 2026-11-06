@@ -6,6 +6,7 @@ package build
 import (
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -543,7 +544,10 @@ func (e *buildEngine) runBuild() error {
 		return err
 	}
 	fmt.Fprintf(e.Out, "building world %s through the CP…\n", cfg.RelayHost())
-	res, err := client.WorldBuild()
+	// Ship this box's rendered world-config: the PROVISIONING box is the
+	// source of truth for operator-authored coords (the pangolin block or its
+	// clear, edge riders). A login-only box renders none and ships nothing.
+	res, err := client.WorldBuild(json.RawMessage(e.WorldConfigJSON()))
 	if err != nil {
 		return fmt.Errorf("world_build (console /api/world-build): %v", err)
 	}

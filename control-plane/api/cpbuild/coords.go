@@ -68,54 +68,63 @@ func EdgeAppsArg(apps map[string]config.EdgeApp) string {
 }
 
 func NewSpec(c Coords, sec []byte, audience string) *Spec {
-	s := &Spec{
-		Name:                c.Name,
-		StateDir:            c.StateDir,
-		RelayURL:            c.RelayURL,
-		RelayAuthURL:        c.RelayAuthURL,
-		RelayWS:             c.RelayWS,
-		RelayPK:             c.RelayPK,
-		RelayHost:           c.RelayHost,
-		RelayIP:             c.RelayIP,
-		CpHost:              c.CpHost,
-		CpIP:                c.CpIP,
-		CpLxc:               c.CpLxc,
-		ProxyIP:             c.ProxyIP,
-		LitellmIP:           c.LitellmIP,
-		PlanePool:           c.PlanePool,
-		PlaneKind:           c.PlaneKind,
-		ThinPool:            c.ThinPool,
-		SizeGB:              c.SizeGB,
-		PoolSizeGB:          c.PoolSizeGB,
-		RootfsGB:            c.RootfsGB,
-		MemoryMB:            c.MemoryMB,
-		StorageName:         c.StorageName,
-		RelayGW:             c.RelayGW,
-		Bridge:              c.Bridge,
-		RelayLxc:            c.RelayLxc,
-		RelayCompose:        c.RelayCompose,
-		K3sVmid:             c.K3sVmid,
-		RunnerAddr:          c.RunnerAddr,
-		RunnerPK:            c.RunnerPK,
-		RunnerTarget:        c.RunnerTarget,
-		CpaName:             c.CpaName,
-		OwnerPub:            c.OwnerPub,
-		OperatorName:        c.OperatorName,
-		WorldDomainOverride: c.WorldDomain,
-		Pangolin:            c.Pangolin,
-		LitellmBaseURL:      c.LitellmBaseURL,
-		SelfURL:             c.SelfURL,
-		GatewayCIDR:         c.GatewayCIDR,
-		GatewayVlan:         c.GatewayVlan,
-		GatewayLxc:          c.GatewayLxc,
-		HostedGateway:       c.HostedGateway,
-		K3sIP:               c.K3sIP,
-		EdgeApps:            c.EdgeApps,
-		Sec:                 sec,
-		Audience:            audience,
-	}
-	s.FillEdgeURLs()
+	s := &Spec{Sec: sec, Audience: audience}
+	s.ApplyCoords(c)
 	return s
+}
+
+// ApplyCoords re-seats the world coords on an already-built Spec (the
+// console's build executor). The PROVISIONING box ships its profile's render
+// before a build, so a coords change — the pangolin block or its clear, an
+// edge rider, an allowlist — reaches the CP without a redeploy. The driving
+// identity (Sec/Audience) is untouched; the caller re-asserts its own dirs and
+// the serve-flag relay overrides after applying (the console owns those).
+// A login-only box renders no coords (empty WorldConfigJSON), so it ships
+// nothing and the CP keeps its deployed config.
+func (s *Spec) ApplyCoords(c Coords) {
+	s.Name = c.Name
+	s.StateDir = c.StateDir
+	s.RelayURL = c.RelayURL
+	s.RelayAuthURL = c.RelayAuthURL
+	s.RelayWS = c.RelayWS
+	s.RelayPK = c.RelayPK
+	s.RelayHost = c.RelayHost
+	s.RelayIP = c.RelayIP
+	s.CpHost = c.CpHost
+	s.CpIP = c.CpIP
+	s.CpLxc = c.CpLxc
+	s.ProxyIP = c.ProxyIP
+	s.LitellmIP = c.LitellmIP
+	s.PlanePool = c.PlanePool
+	s.PlaneKind = c.PlaneKind
+	s.ThinPool = c.ThinPool
+	s.SizeGB = c.SizeGB
+	s.PoolSizeGB = c.PoolSizeGB
+	s.RootfsGB = c.RootfsGB
+	s.MemoryMB = c.MemoryMB
+	s.StorageName = c.StorageName
+	s.RelayGW = c.RelayGW
+	s.Bridge = c.Bridge
+	s.RelayLxc = c.RelayLxc
+	s.RelayCompose = c.RelayCompose
+	s.K3sVmid = c.K3sVmid
+	s.RunnerAddr = c.RunnerAddr
+	s.RunnerPK = c.RunnerPK
+	s.RunnerTarget = c.RunnerTarget
+	s.CpaName = c.CpaName
+	s.OwnerPub = c.OwnerPub
+	s.OperatorName = c.OperatorName
+	s.WorldDomainOverride = c.WorldDomain
+	s.Pangolin = c.Pangolin
+	s.LitellmBaseURL = c.LitellmBaseURL
+	s.SelfURL = c.SelfURL
+	s.GatewayCIDR = c.GatewayCIDR
+	s.GatewayVlan = c.GatewayVlan
+	s.GatewayLxc = c.GatewayLxc
+	s.HostedGateway = c.HostedGateway
+	s.K3sIP = c.K3sIP
+	s.EdgeApps = c.EdgeApps
+	s.FillEdgeURLs()
 }
 
 // FillEdgeURLs fills the gateway URLs that are pure functions of the proxy

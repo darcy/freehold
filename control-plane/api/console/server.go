@@ -3,6 +3,7 @@ package console
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -72,6 +73,12 @@ type Server struct {
 	// RestartDoor restarts a capability door's runner unit (nil = the real
 	// systemd restart on this guest). Injectable for tests.
 	RestartDoor func(name string, port int) error
+
+	// builderMu serializes world-build runs and the coords re-seat the build
+	// request performs (the box ships its profile's world-config so the
+	// PROVISIONING box stays the source of truth without a redeploy). Two
+	// concurrent builds would race the same runner + edge, so they serialize.
+	builderMu sync.Mutex
 
 	// memberMu/memberCache cache the relay's membership answers behind
 	// memberRelayAllowed (lazy — tests build Server literals without them).
@@ -502,6 +509,15 @@ func (s *Server) worldBuild(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusServiceUnavailable, "world-build: the console has no build engine bound (deploy it with the world coords + runner credential, or run `freehold install` first)")
 		return
 	}
+	// The build and its coords re-seat serialize: a concurrent build would
+	// race the same runner + edge, and applying coords mid-build would swap
+	// the Spec under the running stages.
+	s.builderMu.Lock()
+	defer s.builderMu.Unlock()
+	if err := s.applyBuildCoords(r); err != nil {
+		writeErr(w, http.StatusBadRequest, "world-build: "+err.Error())
+		return
+	}
 	applier := cpbuild.BuildWorldApply(s.Builder)
 	report, err := applier()
 	if err != nil {
@@ -521,6 +537,57 @@ func (s *Server) worldBuild(w http.ResponseWriter, r *http.Request) {
 	// must write these back to its profile or the next uninstall cannot find the
 	// guests it created. Non-secret.
 	writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "report": report, "coords": s.Builder.Coords()})
+}
+
+// applyBuildCoords re-seats the console's build executor on the box's shipped
+// world-config (an optional {"coords": {...}} body). The PROVISIONING box is
+// the source of truth for operator-authored coords (the pangolin block or its
+// clear, edge riders, an allowlist); a login-only box ships nothing and the CP
+// keeps its deployed config. The console's own runtime bindings — its state
+// dir, the agent-tools dirs, and the serve-flag relay dial/trust overrides —
+// are re-asserted after the apply (they belong to this process, not the box).
+func (s *Server) applyBuildCoords(r *http.Request) error {
+	if r.Body == nil {
+		return nil
+	}
+	var req struct {
+		Coords json.RawMessage `json:"coords"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
+		if err == io.EOF {
+			return nil // empty body = no coords shipped
+		}
+		return fmt.Errorf("coords body: %w", err)
+	}
+	if len(req.Coords) == 0 {
+		return nil
+	}
+	var c cpbuild.Coords
+	if err := json.Unmarshal(req.Coords, &c); err != nil {
+		return fmt.Errorf("coords not valid world-config JSON: %w", err)
+	}
+	b := s.Builder
+	stateDir, identDir, apps := b.StateDir, b.AgentIdentityDir, b.Apps
+	relayURL, relayAuth, relayPK, relayHost := b.RelayURL, b.RelayAuthURL, b.RelayPK, b.RelayHost
+	b.ApplyCoords(c)
+	b.StateDir = stateDir
+	b.AgentIdentityDir = identDir
+	b.Apps = apps
+	// The serve flags are the authoritative runtime dial/trust split (the CP
+	// dials the relay on the LAN while signing the public URL).
+	if relayHost != "" {
+		b.RelayHost = relayHost
+	}
+	if relayURL != "" {
+		b.RelayURL = relayURL
+	}
+	if relayAuth != "" {
+		b.RelayAuthURL = relayAuth
+	}
+	if relayPK != "" {
+		b.RelayPK = relayPK
+	}
+	return nil
 }
 
 // worldTeardown runs the CP-owned world teardown through the co-located runner
