@@ -675,17 +675,17 @@ func cmdServe(args []string) {
 	tools.Exec = cpbuild.BuildWorldExec(spec)
 	tools.Status = cpbuild.BuildWorldStatus(spec, reg, *consoleStateDir, facts)
 	tools.Provision = cpbuild.BuildProvisionRunner(spec, reg)
-	// The MCP capability plane's grant surface: register + grant/take-away,
-	// bound to the same spec + registry so every plane's flows read the same
-	// capability table through the same handles; the take-away's runner case
-	// delegates to this same Revoke fn.
-	tools.MCPProvision = cpbuild.BuildProvisionMCP(spec, reg)
-	tools.MCPGrant = cpbuild.BuildGrantCapability(spec, reg)
-	tools.MCPRevoke = cpbuild.BuildRevokeCapability(spec, reg, tools.Revoke)
 	// The take-away half of the same carve-out: bound to the same spec + registry
 	// so the two flows share their ownership guards by construction (they read the
 	// same capability table through the same registry handle).
 	tools.Revoke = cpbuild.BuildRevokeRunner(spec, reg)
+	// The MCP capability plane's grant surface: register + grant/take-away,
+	// bound to the same spec + registry so every plane's flows read the same
+	// capability table through the same handles; the take-away's runner case
+	// delegates to the Revoke fn bound above.
+	tools.MCPProvision = cpbuild.BuildProvisionMCP(spec, reg)
+	tools.MCPGrant = cpbuild.BuildGrantCapability(spec, reg)
+	tools.MCPRevoke = cpbuild.BuildRevokeCapability(spec, reg, tools.Revoke)
 	// The no-secret seal leg (fill_door) and the self-hosted package fetch
 	// (door_package) — bound to the same spec so they read the same capability
 	// table the give/take flows wrote.
