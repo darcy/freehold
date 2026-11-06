@@ -491,9 +491,13 @@ func (s *Spec) sweepLitellmMCPAccess(store *state.StateStore) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("open agent registry for the MCP sweep: %w", err)
 	}
+	rows, err := mustRegistryRows(reg)
+	if err != nil {
+		return "", err
+	}
 	agentPods := map[string]bool{}
 	podToAgent := map[string]string{}
-	for _, row := range mustRegistryRows(reg) {
+	for _, row := range rows {
 		pod := agent.PodName(row.Name)
 		agentPods[pod] = true
 		podToAgent[pod] = row.Name
@@ -810,7 +814,10 @@ func (s *Spec) provisionMCP(args agent.ProvisionMCPArgs, callerIsOperator bool, 
 			continue
 		}
 	}
-	if len(stillPending) > 0 {
+	if len(dropped) > 0 {
+		// Re-save UNCONDITIONALLY when take-back legs ran: the successful
+		// ones clear (the field's contract), the failed ones persist for
+		// the retry to re-drive.
 		sort.Strings(stillPending)
 		rec.PendingTakeBacks = stillPending
 		if err := store.InsertMCPCapability(name, rec); err != nil {
@@ -989,9 +996,18 @@ func (s *Spec) revokeCapability(args agent.CapabilityGrantArgs, callerIsOperator
 		grants[g] = true
 	}
 	changed := []string{}
+	converged := []string{}
 	for _, g := range drop {
 		if !grants[g] {
-			return "", fmt.Errorf("revoke_capability %s: %s holds no grant (the roster is [%s]) — a no-op removal must be named, not a silent pass", name, g, strings.Join(rec.Grantees, ", "))
+			// A named drop agent NOT on the roster is a PRIOR leg's pending
+			// convergence (the record was saved narrowed, the key rewrite
+			// failed): converge their key now — named in the report, never
+			// a refusal that blocks the retry from reaching the rewrite.
+			if _, _, err := s.ensureAgentMCPKey(g, store); err != nil {
+				return "", fmt.Errorf("rewrite %s's MCP key: %w", g, err)
+			}
+			converged = append(converged, g+"'s MCP key rewritten from CP state (a prior leg's convergence)")
+			continue
 		}
 		delete(grants, g)
 		changed = append(changed, "-"+g)
@@ -1005,8 +1021,12 @@ func (s *Spec) revokeCapability(args agent.CapabilityGrantArgs, callerIsOperator
 			return "", fmt.Errorf("rewrite %s's MCP key: %w", g, err)
 		}
 	}
-	return fmt.Sprintf("mcp capability %s revoked [%s] (roster now [%s]); every removed grantee's MCP key was rewritten from CP state.",
-		name, strings.Join(changed, " "), strings.Join(rec.Grantees, ", ")), nil
+	report := fmt.Sprintf("mcp capability %s revoked [%s] (roster now [%s]); every removed grantee's MCP key was rewritten from CP state.",
+		name, strings.Join(changed, " "), strings.Join(rec.Grantees, ", "))
+	if len(converged) > 0 {
+		report += "\n" + strings.Join(converged, "\n")
+	}
+	return report, nil
 }
 
 // renameMCPGranteeState rewrites a renamed agent's NAME across the MCP
@@ -1093,10 +1113,10 @@ func BuildRevokeCapability(spec *Spec, reg *agenttools.Registry, revoke agent.Re
 // mustRegistryRows reads the agent registry's rows or fails the caller's
 // flow (a sweep that cannot name the owned agents would misclassify every
 // key as orphaned — fail loud, never sweep blind).
-func mustRegistryRows(reg *agenttools.Registry) []console.AgentInfo {
+func mustRegistryRows(reg *agenttools.Registry) ([]console.AgentInfo, error) {
 	rows, err := reg.Agents()
 	if err != nil {
-		panic(fmt.Sprintf("mcp sweep: read agent registry: %v", err))
+		return nil, fmt.Errorf("read agent registry: %w", err)
 	}
-	return rows
+	return rows, nil
 }

@@ -38,6 +38,9 @@ type mcpKeyGateway struct {
 	servers   map[string]map[string]interface{}
 	regBodies []map[string]interface{}
 	deleted   []string
+	// failUpdates makes every /key/update 500 (a transient gateway error at
+	// exactly the rewrite leg).
+	failUpdates bool
 }
 
 type keyRecord struct {
@@ -109,6 +112,11 @@ func (g *mcpKeyGateway) handler(t *testing.T) http.Handler {
 				ObjectPermission map[string]interface{} `json:"object_permission"`
 			}
 			_ = json.Unmarshal(raw, &body)
+			if g.failUpdates {
+				w.WriteHeader(http.StatusInternalServerError)
+				w.Write([]byte(`{"error":"spike transient"}`))
+				return
+			}
 			rec := g.recordFor(body.Key)
 			if !g.liveDB || rec == nil {
 				w.WriteHeader(http.StatusNotFound)
@@ -1156,5 +1164,81 @@ func TestProvisionMCPNarrowedRoster(t *testing.T) {
 		Name: "some-door", Namespace: "mcp", ServicePort: 8000, GrantTo: []string{"Helper"},
 	}, false, reg, store); err == nil || !strings.Contains(err.Error(), "one plane") {
 		t.Fatalf("a runner-door name must be refused, got %v", err)
+	}
+}
+
+// TestRetirePendingClearsOnSuccess: the take-back legs clear from
+// PendingTakeBacks when their rewrites verify (a retry that succeeds must
+// not leave the completed legs pending forever — every later re-provision
+// would re-drive + re-report them).
+func TestRetirePendingClearsOnSuccess(t *testing.T) {
+	spec, reg, gw, store := provisionFixture(t)
+	seedAgents(t, store, reg, "Helper", "Writer")
+	if _, err := spec.provisionMCP(agent.ProvisionMCPArgs{
+		Name: "sheet-a-ro", Namespace: "mcp", ServicePort: 8000, GrantTo: []string{"Helper", "Writer"},
+	}, false, reg, store); err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	// Force the narrowed re-provision's take-back legs to fail: every
+	// /key/update 500s (a transient gateway error at exactly the rewrite
+	// leg — the store token stays live, so no re-mint dodges the failure).
+	gw.failUpdates = true
+	// The take-back legs do NOT fail the call (the record narrows; the legs
+	// ride PendingTakeBacks + the report names them).
+	if _, err := spec.provisionMCP(agent.ProvisionMCPArgs{
+		Name: "sheet-a-ro", Namespace: "mcp", ServicePort: 8000, GrantTo: []string{"Helper"},
+	}, false, reg, store); err != nil {
+		t.Fatalf("re-provision: %v", err)
+	}
+	if err := store.Reload(); err != nil {
+		t.Fatal(err)
+	}
+	rec, _ := store.GetMCPCapability("sheet-a-ro")
+	if len(rec.PendingTakeBacks) == 0 || !containsRoster(rec.PendingTakeBacks, "Writer") {
+		t.Fatalf("the failed take-back must stay pending, got %+v", rec)
+	}
+	// The gateway heals: the retry re-drives the pending legs and the field
+	// CLEARS.
+	gw.failUpdates = false
+	if _, err := spec.provisionMCP(agent.ProvisionMCPArgs{
+		Name: "sheet-a-ro", Namespace: "mcp", ServicePort: 8000, GrantTo: []string{"Helper"},
+	}, false, reg, store); err != nil {
+		t.Fatalf("retry: %v", err)
+	}
+	if err := store.Reload(); err != nil {
+		t.Fatal(err)
+	}
+	rec, _ = store.GetMCPCapability("sheet-a-ro")
+	if len(rec.PendingTakeBacks) != 0 {
+		t.Fatalf("the verified take-backs must clear, got %v", rec.PendingTakeBacks)
+	}
+}
+
+// TestRevokeCapabilityDropConverges: revoke_capability's removal path
+// converges a named drop agent who is NOT on the roster (a prior leg's
+// pending rewrite) — the retry reaches the rewrite instead of refusing.
+func TestRevokeCapabilityDropConverges(t *testing.T) {
+	spec, reg, gw, store := provisionFixture(t)
+	seedAgents(t, store, reg, "Helper")
+	if _, err := spec.provisionMCP(agent.ProvisionMCPArgs{
+		Name: "sheet-a-ro", Namespace: "mcp", ServicePort: 8000, GrantTo: []string{"Helper"},
+	}, false, reg, store); err != nil {
+		t.Fatalf("provision: %v", err)
+	}
+	// The rewrite leg fails (every /key/update 500s); the revoke saves the
+	// narrowed record then fails.
+	gw.failUpdates = true
+	_, err := spec.revokeCapability(agent.CapabilityGrantArgs{Name: "sheet-a-ro", RevokeFrom: []string{"Helper"}}, false, reg, store, nil)
+	if err == nil {
+		t.Fatalf("the rewrite leg must fail when the update 500s")
+	}
+	// The gateway heals: the RETRY converges (no refusal).
+	gw.failUpdates = false
+	report, err := spec.revokeCapability(agent.CapabilityGrantArgs{Name: "sheet-a-ro", RevokeFrom: []string{"Helper"}}, false, reg, store, nil)
+	if err != nil {
+		t.Fatalf("the retry must converge: %v", err)
+	}
+	if !strings.Contains(report, "rewritten from CP state") {
+		t.Fatalf("the convergence must be named:\\n%s", report)
 	}
 }
