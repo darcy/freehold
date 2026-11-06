@@ -92,7 +92,7 @@ type Site struct {
 	Name       string `json:"name"`
 	Type       string `json:"type"`
 	NewtID     string `json:"newtId"`
-	NewtSecret string `json:"newtSecret"`
+	NewtSecret string `json:"secret"` // the one-time Newt secret: Pangolin names it "secret" in the create response
 	Subnet     string `json:"address"`
 	Online     bool   `json:"online"`
 }
