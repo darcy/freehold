@@ -234,6 +234,10 @@ func DoorSandbox(user, pkgDir string) string {
 	if user == "" {
 		return ""
 	}
+	// The package dir sits inside the CP state dir, which state.Open asserts
+	// at 0711 (traverse-only) on EVERY open — a running door needs that
+	// traversal to append its audit log and re-read its identity, and the
+	// console re-opens state continuously. The unit only heals ownership.
 	return fmt.Sprintf(`User=%s
 NoNewPrivileges=yes
 ProtectSystem=strict
