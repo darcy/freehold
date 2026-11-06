@@ -9,7 +9,9 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"hash/crc32"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -32,6 +34,19 @@ type ProvisionResult struct {
 	NostrPubkey string
 	EncPubkey   string
 	PackageDir  string
+	// Readdressed marks the re-adopt path: a live runner whose substrate
+	// address rotated. The record + package moved on disk; the RUNNER loads
+	// its package once at boot, so the caller owning the runner's unit must
+	// restart it (the console surfaces this itself; a box-side re-adopt
+	// ships the corrected package at deploy-cp, whose restart reloads).
+	Readdressed bool
+	OldAddress  string
+	// RunnerRestarted / RestartError are the CONSOLE's bookkeeping: whether
+	// the unit serving this runner was restarted after the re-address, and
+	// why not when it wasn't (a capability door's own unit, the co-located
+	// unit, or a runner that lives elsewhere and owes a manual restart).
+	RunnerRestarted bool
+	RestartError    string
 }
 
 // ProvisionRequest is the input to provision_runner.
@@ -126,7 +141,7 @@ func ValidateProbeBody(body string) error {
 func defaultRisk(kind string) *string {
 	var v string
 	switch kind {
-	case "vultr", "b2", "hetzner", "github", "websearch", "litellm", "kubernetes", "cloudflare", "unifi":
+	case "vultr", "b2", "hetzner", "github", "websearch", "litellm", "kubernetes", "cloudflare", "unifi", "browser":
 		v = "safe"
 	case "ssh":
 		v = "risky-install"
@@ -146,6 +161,90 @@ func IsPubkey(s string) bool {
 	}
 	_, err := hex.DecodeString(s)
 	return err == nil
+}
+
+// doorNameRe constrains runner names used to DERIVE a system username: the
+// name flows into `useradd` and `chown` as shell-free exec argv, and the
+// charset is pinned so a username can never smuggle option flags or
+// separators. Shape only — NO length cap: derived DNS-zone door names are
+// unbounded (cloudflareRunners), and length is irrelevant to the injection
+// guard. Same character shape as the provision flow's kebab-case rule.
+var doorNameRe = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
+
+// DoorUser derives the per-door unprivileged system user an ssh/api
+// capability runner's unit runs as. A `local` door returns "" — a local door
+// IS root on its own host (the documented contract: its exec is the point),
+// so it keeps the root unit. An unparsable name is an error, never a silent
+// fall-back to root.
+//
+// The derivation is INJECTIVE by construction: verbatim (`fhd-<name>`) only
+// when the whole name body fits the truncation width (≤19), otherwise
+// `fhd-<name[:19]>-<crc32(name)>` (32 chars). A crafted short name can
+// therefore never re-derive a long name's truncated user — its own body
+// exceeds 19 chars and takes the truncated branch, where its crc32 differs —
+// so two doors can share a uid only on a crc32 collision over a shared
+// 19-char prefix. That matters because EnsureRunnerUser chowns the door's
+// package dir to this user: a shared uid would let one door's runner read
+// another door's identity.json (its Nostr/enc private keys + sealed
+// credential).
+func DoorUser(kind, name string) (string, error) {
+	if kind == "local" {
+		return "", nil
+	}
+	if !doorNameRe.MatchString(name) {
+		return "", fmt.Errorf("door user: name %q must be kebab-case [a-z0-9-]", name)
+	}
+	if len(name) <= 19 {
+		return "fhd-" + name, nil
+	}
+	return fmt.Sprintf("fhd-%s-%08x", name[:19], crc32.ChecksumIEEE([]byte(name))), nil
+}
+
+// EnsureRunnerUser idempotently creates a CP-guest capability door's
+// unprivileged system user and gives it the door's package dir. Every
+// re-seal (rotate, fill, the build's re-ship) writes the package root-owned
+// again, so callers run this before every (re)start of a non-root unit.
+// No-op for local doors (root contract) and for empty kind (the co-located
+// CP lifecycle runner, which is root by design).
+func EnsureRunnerUser(kind, name, pkgDir string) (string, error) {
+	user, err := DoorUser(kind, name)
+	if err != nil || user == "" {
+		return user, err
+	}
+	script := fmt.Sprintf("id -u %s >/dev/null 2>&1 || useradd -r -M -s /usr/sbin/nologin %s", user, user)
+	if out, err := exec.Command("sh", "-c", script).CombinedOutput(); err != nil {
+		return "", fmt.Errorf("create door user %s: %v: %s", user, err, strings.TrimSpace(string(out)))
+	}
+	if out, err := exec.Command("chown", "-R", user+":"+user, pkgDir).CombinedOutput(); err != nil {
+		return "", fmt.Errorf("chown %s package: %v: %s", user, err, strings.TrimSpace(string(out)))
+	}
+	return user, nil
+}
+
+// DoorSandbox renders the systemd sandbox lines for a non-root door unit:
+// the whole filesystem read-only except the door's own package dir (its
+// state, sealed package, audit spool), no privilege escalation, its own
+// /tmp. The ExecStartPre (the `+` prefix runs it with full privileges,
+// bypassing User= and the sandbox) re-asserts package ownership at EVERY
+// start: any re-ship (rotate, fill, grant, add-secret, re-address) lands
+// root-owned, and the next start — by the build, the console, the CLI, or a
+// host reboot — heals it. Nothing else needs to know. An empty user (local
+// doors, the co-located runner) renders "" — those run as root by contract.
+func DoorSandbox(user, pkgDir string) string {
+	if user == "" {
+		return ""
+	}
+	return fmt.Sprintf(`User=%s
+NoNewPrivileges=yes
+ProtectSystem=strict
+ReadWritePaths=%s
+PrivateTmp=yes
+ProtectHome=yes
+RestrictSUIDSGID=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ExecStartPre=+/usr/bin/chown -R %s %s`, user, pkgDir, user, pkgDir)
 }
 
 func hexToArr(s string) ([32]byte, error) {
@@ -176,6 +275,12 @@ func ProvisionRunner(store *state.StateStore, req *ProvisionRequest) (*Provision
 			return nil, fmt.Errorf("invalid agent pubkey %q: must be 64 hex chars", g)
 		}
 	}
+	// The address IS the door's endpoint: an empty one re-addresses the
+	// runner to nowhere (a re-run that omitted --address would wipe a live
+	// door). Only a local exec target runs without one.
+	if req.Kind != "local" && strings.TrimSpace(req.Address) == "" {
+		return nil, fmt.Errorf("runner %s: an empty address would wipe the door's endpoint (kind %q dials its address)", req.Name, req.Kind)
+	}
 	probe := ""
 	probeBody := ""
 	if p := strings.TrimSpace(req.Probe); p != "" {
@@ -199,7 +304,13 @@ func ProvisionRunner(store *state.StateStore, req *ProvisionRequest) (*Provision
 		if r.Status == state.RunnerRevoked {
 			return nil, fmt.Errorf("runner %s is revoked — provision a new service or restore it", req.Name)
 		}
-		return nil, fmt.Errorf("runner %s already exists", req.Name)
+		// A LIVE runner re-provisioned: the identity + sealed credential
+		// persist; the substrate ADDRESS may rotate (a re-adopt whose host
+		// was destroyed and recreated — the old address 404s the moment the
+		// CP's world-build dials it). Re-address the record + package when
+		// the request moves the runner; an unchanged address stays the
+		// caller's reuse error.
+		return readdressRunner(store, r, req)
 	}
 	// Refuse to clobber a dir already holding a package.
 	if _, err := os.Stat(filepath.Join(req.RunnerDir, identityFile)); err == nil {
@@ -282,6 +393,94 @@ func ProvisionRunner(store *state.StateStore, req *ProvisionRequest) (*Provision
 		NostrPubkey: nostrPubkey,
 		EncPubkey:   encPubkeyHex,
 		PackageDir:  req.RunnerDir,
+	}, nil
+}
+
+// readdressRunner updates a LIVE runner's substrate address — the re-adopt
+// path, where the runner identity and its sealed credential survive but the
+// host underneath rotated. The state's secret row and the package's targets
+// entry move together (the row is the CP's dial record, the package the
+// runner's own); the sealed blob is untouched. The runner's TOFU known_hosts
+// is keyed by address, so the new host is a fresh trust-on-first-use — no
+// stale entry rejects it.
+func readdressRunner(store *state.StateStore, r state.RunnerRecord, req *ProvisionRequest) (*ProvisionResult, error) {
+	sec, ok := store.GetSecret(req.Name)
+	if !ok {
+		return nil, fmt.Errorf("runner %s already exists but holds no secret record — revoke and re-provision it", req.Name)
+	}
+	// The request's Kind is ignored on this path (the runner keeps its own) —
+	// so the empty-address guard keys on the kind the runner actually IS,
+	// not the caller's declared one.
+	if sec.Kind != "local" && strings.TrimSpace(req.Address) == "" {
+		return nil, fmt.Errorf("runner %s: an empty address would wipe the door's endpoint (the runner is a %q door)", req.Name, sec.Kind)
+	}
+	if sec.Address == req.Address {
+		return nil, fmt.Errorf("runner %s already exists", req.Name)
+	}
+	pkg, err := wire.Load(r.PackageDir)
+	if err != nil {
+		return nil, fmt.Errorf("runner %s package: %w", req.Name, err)
+	}
+	t, ok := pkg.Targets[req.Name]
+	if !ok {
+		return nil, fmt.Errorf("runner %s package holds no target %q", req.Name, req.Name)
+	}
+	old := sec.Address
+	t.Address = req.Address
+	pkg.Targets[req.Name] = t
+	if err := pkg.WriteToDir(r.PackageDir); err != nil {
+		return nil, err
+	}
+	sec.Address = req.Address
+	store.InsertSecret(req.Name, sec)
+	// The capability record is the REBUILD source for a door: the build's
+	// re-assert feeds rec.Address back into the package (reSealRotating →
+	// setTargetAddress) — a record left on the old address silently reverts
+	// this re-address on the next build. Move it with the rest.
+	if cap, ok := store.GetCapability(req.Name); ok && cap.Address != "" {
+		cap.Address = req.Address
+		if err := store.InsertCapability(req.Name, cap); err != nil {
+			// Roll the rows back — they pre-existed. The capability may have
+			// moved before the error; restore it like the secret row.
+			sec.Address = old
+			store.InsertSecret(req.Name, sec)
+			if cap.Address == req.Address {
+				cap.Address = old
+				_ = store.InsertCapability(req.Name, cap)
+			}
+			_ = store.Save()
+			t.Address = old
+			pkg.Targets[req.Name] = t
+			_ = pkg.WriteToDir(r.PackageDir)
+			return nil, fmt.Errorf("move capability record: %w", err)
+		}
+	}
+	if err := store.Save(); err != nil {
+		// Roll the package + records back — they pre-existed, so restore
+		// their old addresses rather than removing anything.
+		t.Address = old
+		pkg.Targets[req.Name] = t
+		if p2, e2 := wire.Load(r.PackageDir); e2 == nil {
+			p2.Targets[req.Name] = t
+			_ = p2.WriteToDir(r.PackageDir)
+		}
+		sec.Address = old
+		store.InsertSecret(req.Name, sec)
+		if cap, ok := store.GetCapability(req.Name); ok && cap.Address == req.Address {
+			cap.Address = old
+			_ = store.InsertCapability(req.Name, cap)
+		}
+		_ = store.Save()
+		return nil, err
+	}
+	fmt.Printf("runner %s already exists — re-addressed %s -> %s (identity + credential unchanged)\n", req.Name, old, req.Address)
+	return &ProvisionResult{
+		Name:        req.Name,
+		NostrPubkey: r.NostrPubkey,
+		EncPubkey:   r.EncPubkey,
+		PackageDir:  r.PackageDir,
+		Readdressed: true,
+		OldAddress:  old,
 	}, nil
 }
 

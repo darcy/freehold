@@ -33,8 +33,10 @@ rests on keeping the two halves on separate volumes.
 *   **Durable PVCs pin under the plane.** k3s's default `local-path` provisioner stores
     PVCs under the rancher daemon root — relocating that root would drag the control-plane
     Postgres PVC (the thing every "reconstructible from" claim depends on) into the
-    excluded half. The provisioner's default path is configured explicitly to
-    `/srv/data/k8s-volumes`; disposable classes ride a `/srv/nobackup`-rooted storage class.
+    excluded half. The provisioner's default path is rendered from the terraform module's
+    source manifest (`terraform/manifests/freehold-local-path.yaml`) at `/srv/data/k8s-volumes`,
+    with k3s's bundled local-storage addon disabled so a guest boot cannot re-render the
+    stock rootfs path.
 *   **Three verbs, all run from the box over root SSH, so they work with the CP down:**
     *   `freehold snapshot` — one name spans every mount; list / rm / guarded rollback.
         Proxmox-only (ZFS or LVM-thin primitives). Rollback takes a safety net first,

@@ -84,3 +84,33 @@ func TestRenderAppVhosts(t *testing.T) {
 		t.Fatal("the composed render must carry base + apps")
 	}
 }
+
+// TestRenderAppVhostsGateDispatch pins the operator-exemption shape: an app
+// with exempt paths and/or the bearer matcher renders the @gated dispatch
+// (caddy 2.8.4 rejects named matchers on forward_auth, so the exemption is a
+// `@gated not { … }` matcher + paired handle blocks — the exempted requests
+// proxy straight through, everything else still authenticates). A bare gated
+// app keeps the flat forward_auth shape.
+func TestRenderAppVhostsGateDispatch(t *testing.T) {
+	apps := []AppVhost{
+		{FQDN: "browns.example", Upstream: "10.0.0.9:3000", Slot: "apps", Gate: "10.0.0.12:8080",
+			ExemptPaths: []string{"/openapi.json", "/api/*"}, ExemptBearer: true},
+		{FQDN: "navidrome.example", Upstream: "10.0.0.8:4533", Slot: "apps", Gate: "10.0.0.12:8080",
+			ExemptPaths: []string{"/rest/*", "/auth/*"}},
+	}
+	out := RenderAppVhosts(apps)
+	browns := out[:strings.Index(out, "navidrome.example {")]
+	if !strings.Contains(browns, "@gated not {\n    path /openapi.json /api/*\n    header Authorization Bearer*\n  }") {
+		t.Fatalf("the bearer + path exemption must render the combined not-matcher:\n%s", browns)
+	}
+	if !strings.Contains(browns, "handle @gated {\n    forward_auth") || !strings.Contains(browns, "  handle {\n    reverse_proxy 10.0.0.9:3000\n  }") {
+		t.Fatalf("the exempt shape dispatches through paired handles:\n%s", browns)
+	}
+	nav := out[strings.Index(out, "navidrome.example {"):]
+	if !strings.Contains(nav, "@gated not {\n    path /rest/* /auth/*\n  }") {
+		t.Fatalf("the path-only exemption must render just the path line:\n%s", nav)
+	}
+	if strings.Contains(nav, "header Authorization") {
+		t.Fatalf("no bearer exemption means no bearer matcher line:\n%s", nav)
+	}
+}

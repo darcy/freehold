@@ -691,7 +691,7 @@ func init() {
 	provisionCmd.Flags().String("domain", "", "Relay identity domain")
 	provisionCmd.Flags().String("storage", "local-lvm", "PVE storage")
 	provisionCmd.Flags().Uint32("rootfs-gb", 16, "rootfs size GB")
-	provisionCmd.Flags().Uint32("memory-mb", 2048, "RAM MB")
+	provisionCmd.Flags().Uint32("memory-mb", 4096, "RAM MB")
 	provisionCmd.Flags().String("bridge", "vmbr0", "network bridge")
 	provisionCmd.Flags().String("lxc-ip", "", "static IPv4 (CIDR)")
 	provisionCmd.Flags().String("lxc-gw", "", "gateway for static IP")

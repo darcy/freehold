@@ -289,7 +289,7 @@ func (s *Server) login(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	setSessionCookie(w, token)
+	setSessionCookie(w, token, s.memberCookieDomain())
 	writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "pubkey": req.Pubkey, "role": role})
 }
 
@@ -341,7 +341,7 @@ func (s *Server) portalLand(w http.ResponseWriter, r *http.Request, token string
 		writeErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	setSessionCookie(w, session)
+	setSessionCookie(w, session, s.memberCookieDomain())
 	w.Header().Set("Location", "/")
 	w.WriteHeader(http.StatusFound)
 }
@@ -843,6 +843,10 @@ func (s *Server) overview(w http.ResponseWriter, r *http.Request) {
 		// presented pubkeys (the fill unlocks on confirm).
 		SelfHosted      bool `json:"self_hosted,omitempty"`
 		EnrollConfirmed bool `json:"enroll_confirmed,omitempty"`
+		// NoSecret marks a door whose credential is declared config (the
+		// provisioning agent seals it via fill_door); the console fill still
+		// works but is not required.
+		NoSecret bool `json:"no_secret,omitempty"`
 	}
 	runners := make([]runnerOut, 0, len(snap.Runners))
 	// Per-runner package state, kept by slice index so the roster results can
@@ -887,9 +891,12 @@ func (s *Server) overview(w http.ResponseWriter, r *http.Request) {
 		// package-mode runner); a live roster result below overwrites it for
 		// relay-mode runners.
 		out.Grants, out.GrantsSource = grantsFor(nil, nil, pkg, readable, false)
-		if capability, ok := snap.Capabilities[name]; ok && capability.SelfHosted() {
-			out.SelfHosted = true
-			out.EnrollConfirmed = capability.EnrollConfirmedAt != nil
+		if capability, ok := snap.Capabilities[name]; ok {
+			if capability.SelfHosted() {
+				out.SelfHosted = true
+				out.EnrollConfirmed = capability.EnrollConfirmedAt != nil
+			}
+			out.NoSecret = capability.NoSecret
 		}
 		// Live readiness probe (the console signs a status call as its own
 		// identity — the runner still fails closed).
@@ -1172,6 +1179,13 @@ func (s *Server) relayAuthFor() string {
 // sign-public split agent-tools and cpbuild use. The port is the relay's LAN
 // HTTP port (pre-Caddy), 3000 as everywhere else.
 func (s *Server) relayDialFor(snapURL *string) string {
+	// The relay guest's raw IP when the builder's coords know it: the NAME
+	// resolves — via the resolver's edge answer — to the k3s node, whose
+	// :3000 refuses. The Host presented stays the canonical community host
+	// (contract/relay takes it from the auth URL).
+	if s.Builder != nil && s.Builder.RelayIP != "" {
+		return "http://" + s.Builder.RelayIP + ":3000"
+	}
 	if d := config.RelayLanDial(s.RelayHost); d != "" {
 		return d
 	}
@@ -1208,6 +1222,28 @@ func (s *Server) provision(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeErr(w, statusForAction(err), err.Error())
 		return
+	}
+	// A re-addressed runner holds the new address on disk only — the runner
+	// loads its package once at boot. Which unit reloads it depends on WHAT
+	// the runner is: a capability door restarts its own unit, the
+	// co-located runner restarts the shared unit; a runner living elsewhere
+	// owes its own restart. Soft: reported, never swallowed.
+	if res.Readdressed {
+		if rec, ok := s.Store.GetCapability(req.Name); ok {
+			if rerr := s.restartDoor(req.Name, rec.Port); rerr != nil {
+				res.RestartError = rerr.Error()
+			} else {
+				res.RunnerRestarted = true
+			}
+		} else if s.Builder != nil && req.Name == s.Builder.RunnerTarget {
+			if rerr := cpbuild.RestartCoLocatedRunner(""); rerr != nil {
+				res.RestartError = rerr.Error()
+			} else {
+				res.RunnerRestarted = true
+			}
+		} else {
+			res.RestartError = "the runner does not run on this guest — restart the unit serving it to pick up the new address"
+		}
 	}
 	var relayURL *string
 	snap := s.Store.Snapshot()
@@ -1257,6 +1293,8 @@ func (s *Server) provision(w http.ResponseWriter, r *http.Request) {
 		"ok": true, "name": res.Name, "nostr_pubkey": res.NostrPubkey,
 		"enc_pubkey": res.EncPubkey, "package_dir": res.PackageDir,
 		"granted": granted, "relay": relayURL, "capability": capability,
+		"readdressed": res.Readdressed, "runner_restarted": res.RunnerRestarted,
+		"restart_error": res.RestartError,
 	})
 }
 
@@ -1429,6 +1467,8 @@ func (s *Server) rotate(w http.ResponseWriter, r *http.Request) {
 	// runner holds its package in memory from boot) — the console runs on the
 	// same guest, so restart the unit + wait for the listen. The seal stands
 	// even when the restart fails (soft: reported, never blocks the rotate).
+	// Package ownership needs no re-assertion here: a sandboxed door's unit
+	// carries ExecStartPre=+chown, so every start heals a root-owned re-ship.
 	restarted := false
 	restartErr := ""
 	if rec, ok := fresh.GetCapability(req.Name); ok {

@@ -410,10 +410,16 @@ func checkOrigin(r *http.Request, publicOrigin *string, worldDomain string) erro
 // (trustworthy origin) and the TLS-fronted public domain both accept it — a
 // plain-HTTP LAN bind refuses the cookie, which is the correct failure mode
 // (the bearer token must not ride cleartext).
-func setSessionCookie(w http.ResponseWriter, token string) {
+// setSessionCookie takes the DOMAIN the session scopes to: the world root
+// (the member cookie's scope) for a public-origin world — the verify's
+// operator pass-out runs on EVERY gated app's host, and a host-only cookie
+// never leaves admin.<root>, so the operator's gated-app requests fell to
+// the member path's channel check instead. Empty = host-only (loopback/dev).
+func setSessionCookie(w http.ResponseWriter, token, domain string) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     sessionCookie,
 		Value:    token,
+		Domain:   domain,
 		Path:     "/",
 		MaxAge:   sessionMaxAge,
 		HttpOnly: true,

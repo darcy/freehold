@@ -140,6 +140,14 @@ func TestMergeKeepsDnsAndLitellm(t *testing.T) {
 		Litellm: config.LitellmSpec{URL: "http://192.168.30.7:31400", Host: "192.168.30.7"},
 		Plane:   config.PlaneSpec{Backend: ptr("pve")},
 		Managed: []string{"relay", "cp", "litellm"},
+		// The operator's edge shape: world_domain + [edge.apps] are SOURCE —
+		// the merge must carry them or every build/update re-rendered the
+		// wrong world shape and stripped the riders' vhosts (the casaq strip).
+		WorldDomain: "casaquerencia.net",
+		Pangolin:    &config.PangolinCoords{Domain: "example.test"},
+		Edge: config.EdgeSpec{Apps: map[string]config.EdgeApp{
+			"browns": {ExemptPaths: []string{"/api/*"}, ExemptBearer: true},
+		}},
 	}
 	ans := &config.Config{Managed: []string{"relay", "cp"}}
 	got := mergeFromAnswers(ans, prev)
@@ -151,6 +159,15 @@ func TestMergeKeepsDnsAndLitellm(t *testing.T) {
 	}
 	if got.Plane.Backend == nil || *got.Plane.Backend != "pve" {
 		t.Errorf("plane must still merge: %+v", got.Plane)
+	}
+	if got.WorldDomain != "casaquerencia.net" {
+		t.Errorf("world_domain dropped by merge: %q", got.WorldDomain)
+	}
+	if len(got.Edge.Apps) != 1 || !got.Edge.Apps["browns"].ExemptBearer {
+		t.Errorf("edge riders dropped by merge: %+v", got.Edge)
+	}
+	if got.Pangolin == nil || got.Pangolin.Domain != "example.test" {
+		t.Errorf("pangolin dropped by merge: %+v", got.Pangolin)
 	}
 }
 
@@ -236,7 +253,7 @@ func TestRecordCoords(t *testing.T) {
 	if err := e.RecordCoords(config.Coords{
 		RelayLxc: 100, RelayIP: "192.168.30.20",
 		CpLxc: 101, CpIP: "192.168.30.21",
-		K3sVmid: 102, ProxyIP: "192.168.30.8",
+		K3sVmid: 102, ProxyIP: "192.168.30.8", K3sIP: "10.77.0.13",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -250,11 +267,29 @@ func TestRecordCoords(t *testing.T) {
 	if got.Lxc.Cp.Vmid == nil || *got.Lxc.Cp.Vmid != 101 || got.Lxc.Cp.Ip == nil || *got.Lxc.Cp.Ip != "192.168.30.21/24" {
 		t.Errorf("cp coords not recorded: %+v", got.Lxc.Cp)
 	}
-	if got.Lxc.K3s.Vmid == nil || *got.Lxc.K3s.Vmid != 102 || got.Lxc.K3s.Ip == nil || *got.Lxc.K3s.Ip != "192.168.30.8/24" {
+	// Behind a gateway the k3s record is the node's INTERNAL address — the
+	// gateway guest carries ProxyIP, and writing that here re-clobbered the
+	// record with the gateway's LAN address on every build.
+	if got.Lxc.K3s.Vmid == nil || *got.Lxc.K3s.Vmid != 102 || got.Lxc.K3s.Ip == nil || *got.Lxc.K3s.Ip != "10.77.0.13/24" {
 		t.Errorf("k3s coords not recorded: %+v", got.Lxc.K3s)
 	}
 	if !containsStr(got.Managed, "k3s") {
 		t.Errorf("managed missing k3s: %v", got.Managed)
+	}
+	// A CP predating the K3s coord reports no k3s_ip: its k3s node still IS
+	// the proxy, so ProxyIP is the right fallback.
+	if err := e.RecordCoords(config.Coords{
+		RelayLxc: 100, RelayIP: "192.168.30.20",
+		CpLxc: 101, CpIP: "192.168.30.21",
+		K3sVmid: 102, ProxyIP: "192.168.30.8",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got, err = config.Load(cfgPath); err != nil {
+		t.Fatal(err)
+	}
+	if got.Lxc.K3s.Ip == nil || *got.Lxc.K3s.Ip != "192.168.30.8/24" {
+		t.Errorf("k3s fallback to ProxyIP not recorded: %+v", got.Lxc.K3s)
 	}
 }
 
@@ -537,6 +572,18 @@ func TestExtractNip11Pubkey(t *testing.T) {
 	}
 	if _, ok := extractNip11Pubkey(`{"pubkey":"` + strings.Repeat("g", 64) + `"}`); ok {
 		t.Error("non-hex pubkey must be rejected")
+	}
+	// Newer Buzz documents publish "pubkey": null and carry the relay's
+	// identity in "self" — the same signing pubkey.
+	selfBody := `{"name":"x","pubkey":null,"self":"` + pk + `","supported_nips":[1]}`
+	if got, ok := extractNip11Pubkey(selfBody); !ok || got != pk {
+		t.Errorf("self fallback: pubkey = %q ok=%v", got, ok)
+	}
+	if _, ok := extractNip11Pubkey(`{"pubkey":null,"self":"short"}`); ok {
+		t.Error("short self must be rejected")
+	}
+	if _, ok := extractNip11Pubkey(`{"pubkey":null}`); ok {
+		t.Error("null pubkey with no self must be rejected")
 	}
 }
 

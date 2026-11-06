@@ -72,6 +72,7 @@ const (
 // killed-but-healthy run resumable.
 var longMigrations = map[string]time.Duration{
 	"1799960000.sh": 20 * time.Minute,
+	"1799970000.sh": 10 * time.Minute,
 }
 
 // scriptMigrationTimeout resolves the bound for one script.
@@ -148,6 +149,12 @@ type Spec struct {
 	// world AT the apex. Resolved through Spec.worldDomain() — consumed only
 	// when the CP host is actually its child. Empty = the derived shape.
 	WorldDomainOverride string
+	// EdgeApps is the operator's at-source edge riders (the profile's
+	// [edge.apps], via the world-config): gate exemptions for registry apps
+	// by name + gate-less rider vhosts for apps with no registry row. The
+	// edge render merges them in — a restart converges to the operator's
+	// shape instead of stripping what only the rendered configmap carried.
+	EdgeApps map[string]config.EdgeApp
 	// RepoURL is the source repository the shared system-orientation block
 	// points agents at. Empty = the agents package's upstream default.
 	RepoURL string
@@ -810,11 +817,19 @@ func (s *Spec) worldBootK3s(mounts []planebase.MountSpec) error {
 
 // worldGateway (re)writes the gateway's nftables ruleset — a pure
 // function of the recorded coords, so every build re-asserts it (a rebuilt
-// k3s with a new internal IP must not leave a stale DNAT). The gateway is
-// created by the BOX install (before the CP, whose default route it
-// becomes); the CP build only owns the config. No-op without one. On a
-// hosted gateway (api-vultr) the assert rides the host itself — same script,
-// no pct wrapper.
+// k3s with a new internal IP must not leave a stale DNAT) — and the HOST's
+// route into the subnet: kernel runtime state a host reboot drops, and the
+// host-side dials (terraform's kubernetes provider, pct-side probes) have no
+// other path into the RFC1918 subnet than the default route to the LAN
+// router, which blackholes them. The route goes VIA the gateway (its LAN
+// IP), never L2-direct: the gateway is stateful, and a flow that bypasses it
+// gets replies its conntrack never saw — the edge's reverse-DNAT then dies
+// for every LAN client while the subnet itself looks healthy (the casaq
+// outage). The gateway is created by the BOX install (before the CP, whose
+// default route it becomes); the CP build only owns the config. No-op
+// without one. On a hosted gateway (api-vultr) the assert rides the host
+// itself — same script, no pct wrapper, and no route (the host owns the
+// bridge's connected route).
 func (s *Spec) worldGateway() error {
 	if s.GatewayCIDR == "" || (s.GatewayLxc == 0 && !s.HostedGateway) {
 		return nil
@@ -861,6 +876,12 @@ systemctl restart nftables dnsmasq >/dev/null 2>&1 || nft -f /etc/nftables.conf
 	}
 	if err := s.run(cmd, 300); err != nil {
 		return fmt.Errorf("gateway nftables: %w", err)
+	}
+	if !s.HostedGateway {
+		if err := s.run(fmt.Sprintf("ip route replace %s via %s dev %s",
+			s.GatewayCIDR, config.StripCIDR(s.ProxyIP), bridge), 30); err != nil {
+			return fmt.Errorf("gateway host route: %w", err)
+		}
 	}
 	return nil
 }
@@ -1087,6 +1108,14 @@ var runnerLitellmSecrets = []struct{ name, env string }{
 // door package; nothing requests it from the provisioning runner anymore).
 var runnerLitellmRetiredSecrets = []string{"provider-key"}
 
+// runnerBrowserSecrets maps the CP store's browser env keys to the secret
+// NAMES the world-build requests from the co-located runner: the pool's
+// shared access token only (tf.sh's TF_VAR_ input; the door re-seals from
+// the same store itself).
+var runnerBrowserSecrets = []struct{ name, env string }{
+	{"browser-token", "token"},
+}
+
 // dropRetiredRunnerSecrets removes runnerLitellmRetiredSecrets entries from
 // the package in memory; the caller writes it back. Returns the names dropped.
 func dropRetiredRunnerSecrets(pkg *wire.SecretPackage) []string {
@@ -1125,6 +1154,11 @@ func (s *Spec) reseedCoLocatedRunner() error {
 	}
 	need := false
 	for _, m := range runnerLitellmSecrets {
+		if _, ok := pkg.Secrets[m.name]; !ok {
+			need = true
+		}
+	}
+	for _, m := range runnerBrowserSecrets {
 		if _, ok := pkg.Secrets[m.name]; !ok {
 			need = true
 		}
@@ -1175,6 +1209,18 @@ func (s *Spec) reseedCoLocatedRunner() error {
 					return fmt.Errorf("re-seed co-located runner %s: %w", m.name, err)
 				}
 			}
+			// The browser store is its OWN sealed record — the pool's token
+			// re-seeds from it the same way (the tf phase requests it by
+			// name; the door re-seals from the store itself).
+			btok, berr := s.browserToken()
+			if berr != nil {
+				return fmt.Errorf("browser store: %w", berr)
+			}
+			for _, m := range runnerBrowserSecrets {
+				if _, err := provisioner.AddSecret(store, s.RunnerTarget, m.name, btok); err != nil {
+					return fmt.Errorf("re-seed co-located runner %s: %w", m.name, err)
+				}
+			}
 			// AddSecret reloaded + rewrote the package file; the prune must be
 			// re-applied to the fresh on-disk package or the retired name rides.
 			pkg, err = wire.Load(rec.PackageDir)
@@ -1191,12 +1237,23 @@ func (s *Spec) reseedCoLocatedRunner() error {
 	// The runner loads its package at boot (in-memory keyring), so restart it.
 	// systemctl is LOCAL to the console's own CP guest — the runner cannot
 	// restart itself through the exec channel it is serving.
+	if err := RestartCoLocatedRunner(s.RunnerAddr); err != nil {
+		return err
+	}
+	return nil
+}
+
+// RestartCoLocatedRunner restarts the LOCAL freehold-runner unit and waits for
+// it to re-listen. The runner loads its package (target addresses included)
+// once at boot, so any on-disk package change — a re-seed, a re-address —
+// needs this to take effect on a live runner. systemctl is LOCAL to the
+// console's own CP guest; a box driving a remote CP must not call it.
+func RestartCoLocatedRunner(addr string) error {
 	if out, err := exec.Command("systemctl", "restart", "freehold-runner").CombinedOutput(); err != nil {
 		return fmt.Errorf("restart co-located runner: %v: %s", err, strings.TrimSpace(string(out)))
 	}
 	// `systemctl restart` returns before the runner has re-bound its port; wait
 	// so the next exec doesn't race a refused connection.
-	addr := s.RunnerAddr
 	if addr == "" {
 		addr = config.CoLocatedRunnerMCPAddr
 	}
@@ -1798,6 +1855,23 @@ func BuildWorldApply(spec *Spec) agent.WorldApply {
 		// 9. The release pulse: the CPA posts the world's RUNNING version to
 		// Pulse — a stable build its own release's notes + link, a dev build
 		// the updated sha. Deduped; best-effort.
+		// 9.25. Re-assert the guests' resolver point LAST — after every stage
+		// that boots or re-provisions a guest (the substrate's guest ensure
+		// re-runs the docker install, whose apt window pins public
+		// resolvers). A guest left on public resolvers dials the public edge
+		// name into the node's own DNAT — a martian drop where the gateway
+		// is the host — and the agents' relay connect dies with it. The
+		// resolve re-fills any vmid the early pass missed; the point is
+		// idempotent.
+		if err := spec.resolveGuestVmids(); err != nil {
+			return "", fmt.Errorf("world-build dns re-point resolve: %w", err)
+		}
+		if spec.CpLxc != 0 && spec.CpIP != "" {
+			if err := spec.pointGuestsAtResolver(); err != nil {
+				return "", fmt.Errorf("world-build dns re-point: %w", err)
+			}
+			report = append(report, "guest resolver point re-asserted")
+		}
 		report = spec.stageReleasePulse(report)
 		if len(report) == 0 {
 			return "", fmt.Errorf("world-build: no world coords recorded (k3s vmid / relay lxc)")
@@ -2695,6 +2769,90 @@ func litellmModelFor(cpaName, name, model string) string {
 // minted pubkey to Tools.CreateAgent (which registers the registry row). Branches
 // to the CPA manifest/prompt when the name is the CPA's, so stageCpa's dogfooded
 // create_agent produces the CPA.
+// orgWideRunnerCoords resolves the ORG-WIDE doors' coords for ANY agent name
+// (they match everyone) and grants the channel membership live, so a freshly
+// created agent's exec authorizes on first use — before the next build's
+// stage/reconcile would wire it. Computed per create (DepartmentRunners only
+// carries staged names); the caller dedupes against what it already holds.
+func (s *Spec) orgWideRunnerCoords(name string) ([]agent.RunnerCoords, error) {
+	store, err := state.Open(s.consoleStateDir())
+	if err != nil {
+		return nil, err
+	}
+	pub, ok := "", false
+	if rec, exists := store.Snapshot().Agents[name]; exists && rec.Pubkey != "" {
+		pub, ok = rec.Pubkey, true
+	}
+	if !ok {
+		// First create: the identity was just minted; the pubkey lookup
+		// happens after RegisterAgent — resolve from the freshly minted
+		// identity instead.
+		dir := filepath.Join(s.agentIdentityDir(), "agents", sanitizeDir(name))
+		id, ierr := identity.Load(dir)
+		if ierr != nil {
+			return nil, fmt.Errorf("resolve identity: %w", ierr)
+		}
+		pk, ierr := id.NostrPubkeyHex()
+		if ierr != nil {
+			return nil, ierr
+		}
+		pub = pk
+	}
+	out := []agent.RunnerCoords{}
+	for _, r := range capabilityRunners() {
+		if !r.orgWide {
+			continue
+		}
+		rec, ok := store.GetRunner(r.name)
+		if !ok || rec.NostrPubkey == "" {
+			continue
+		}
+		dialHost := s.CpIP
+		coords := agent.RunnerCoords{
+			URL:    fmt.Sprintf("http://%s:%d", dialHost, r.port),
+			Pubkey: rec.NostrPubkey,
+			Target: r.name,
+			Secret: r.name,
+		}
+		if err := provisioner.PutUserMembership(store, s.relayDialURL(), s.relaySignURL(), r.name, pub, s.consoleStateDir()); err != nil {
+			return nil, fmt.Errorf("org-wide grant %s: %w", r.name, err)
+		}
+		out = append(out, coords)
+	}
+	return out, nil
+}
+
+// revokeOrgWideMemberships removes the agent's seat on every org-wide door —
+// the take-back leg of orgWideRunnerCoords' grant at create. Runs while the
+// agent's row (and identity dir) still exist, from the remove flow.
+func (s *Spec) revokeOrgWideMemberships(name string) error {
+	store, err := state.Open(s.consoleStateDir())
+	if err != nil {
+		return err
+	}
+	dir := filepath.Join(s.agentIdentityDir(), "agents", sanitizeDir(name))
+	id, err := identity.Load(dir)
+	if err != nil {
+		return fmt.Errorf("read the removed agent's identity: %w", err)
+	}
+	pub, err := id.NostrPubkeyHex()
+	if err != nil {
+		return err
+	}
+	for _, r := range capabilityRunners() {
+		if !r.orgWide {
+			continue
+		}
+		if _, ok := store.GetRunner(r.name); !ok {
+			continue
+		}
+		if err := provisioner.RemoveUserMembership(store, s.relayDialURL(), s.relaySignURL(), r.name, pub, s.consoleStateDir()); err != nil {
+			return fmt.Errorf("revoke %s: %w", r.name, err)
+		}
+	}
+	return nil
+}
+
 func BuildCreateAgentFn(spec *Spec) agent.CreateAgentFn {
 	return func(name, purpose string, channels []string, private bool, model string) (string, error) {
 		model = litellmModelFor(spec.CpaName, name, model)
@@ -2896,18 +3054,42 @@ func BuildCreateAgentFn(spec *Spec) agent.CreateAgentFn {
 			}
 		}
 		var manifest string
+		// Org-wide doors (the browser pool) reach the CPA too — the CPA is
+		// an agent; the operator's org-wide decision includes it.
+		orgWide, err := spec.orgWideRunnerCoords(name)
+		if err != nil {
+			return "", fmt.Errorf("create-agent %q: org-wide runners: %w", name, err)
+		}
 		if name == spec.CpaName {
-			manifest = agent.CPAManifestScript(spec.K3sVmid, spec.RelayWS, agents.CPASystemPrompt(spec.RepoURL, spec.operatorTZ()), name, spec.LitellmBaseURL, "", spec.SelfURL, audience, authTag, spec.operatorTZ(), spec.litellmProviderMaxTokens())
+			manifest = agent.CPAManifestScript(spec.K3sVmid, spec.RelayWS, agents.CPASystemPrompt(spec.RepoURL, spec.operatorTZ()), name, spec.LitellmBaseURL, "", spec.SelfURL, audience, authTag, spec.operatorTZ(), spec.litellmProviderMaxTokens(), orgWide...)
 		} else {
 			// A reserved department name selects that department's embedded
 			// prompt; any other name renders the custom template (agents.SystemPrompt).
 			// A department with capability runners gets their FREEHOLD_RUNNER_* env
-			// (the CPA and custom agents get none, so their bridge has no exec).
-			// The inbound author gate: a reserved department wakes for the
-			// operator + every core identity; a custom agent wakes for its
-			// asker (today the operator — the CP cannot see chat threads) +
-			// the CPA. The CPA itself runs "anyone" (CPAManifestScript).
+			// (plus every org-wide door — the CPA included). The inbound author
+			// gate: a reserved department wakes for the operator + every core
+			// identity; a custom agent wakes for its asker (today the operator —
+			// the CP cannot see chat threads) + the CPA. The CPA itself runs
+			// "anyone" (CPAManifestScript).
 			runner := spec.DepartmentRunners[name]
+			// The durable records MERGE unconditionally (not only when the
+			// in-memory map is empty): a door whose stage failed this build
+			// (a transient token read — logged, skipped) still has its coords
+			// on disk, and gating on emptiness would re-apply the pod without
+			// it — silent capability loss. Dedupe keeps the double-sourced
+			// door (department roster + org-wide + durable) to one entry.
+			if store, serr := state.Open(spec.consoleStateDir()); serr == nil {
+				for _, c := range spec.agentRunnerCoords(store, name) {
+					if !containsCoords(runner, c) {
+						runner = append(runner, c)
+					}
+				}
+			}
+			for _, c := range orgWide {
+				if !containsCoords(runner, c) {
+					runner = append(runner, c)
+				}
+			}
 			manifest = agent.AgentManifestScript(spec.K3sVmid, spec.RelayWS, agents.SystemPrompt(name, purpose, spec.RepoURL, spec.operatorTZ()), spec.LitellmBaseURL, model, name, agent.KeySecretFor(name), spec.SelfURL, audience, "allowlist", spec.respondAllowlist(name), authTag, spec.operatorTZ(), spec.litellmProviderMaxTokens(), runner...)
 		}
 		if err := spec.run(manifest, 420); err != nil {

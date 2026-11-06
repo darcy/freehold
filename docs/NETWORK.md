@@ -64,7 +64,10 @@ The gateway has TWO shapes, one per substrate:
     the zone, so `cp.example.com` keeps its name — else the CP host itself:
     `cp.librem.freehold.technology` → `litellm.librem.freehold.technology`;
     `sandbox.freehold.technology` → `litellm.sandbox.freehold.technology`; the member
-    cookie scopes to the same world domain — the world's boundary, never the shared zone), a cert — ONE SHARED wildcard for the world domain, issued once through the same
+    cookie scopes to the same world domain — the world's boundary, never the shared zone;
+    an operator who owns the whole zone pins the root explicitly with `world_domain` in
+    the profile config — `admin.casaquerencia.net` + `world_domain = 'casaquerencia.net'`
+    puts the world AT the zone apex: the portal at the root, every app a child), a cert — ONE SHARED wildcard for the world domain, issued once through the same
     in-process lego chain (an expose after that is DNS + config only — no per-app LE order), the Caddy config rendered + applied live — and the record lands
     in the **apps registry** (`apps.json`, the toolset's durable dir), which the build tail
     re-ensures so teardown/rebuild restores the apps (a row written by an older naming
@@ -75,8 +78,11 @@ The gateway has TWO shapes, one per substrate:
     groups the requester belongs to** (below). The gate is the console's **member identity
     tier**: NIP-07 Nostr login admitted by the relay's NIP-43 membership list plus
     single-use device-link invites (the no-Nostr path); gated apps verify through
-    `/auth/verify` (a browser gets the 302 to the login page, an API client the 401), and
-    the operator session passes the same gate. The **gate is the standing default
+    `/auth/verify` (a browser gets the 302 to the login page, an API client the 401, a
+    NIP-98-signed request the same channel check with no session — the machine path
+    agents' `gate_fetch` tool rides: the expose validated the requester is in the
+    group, so the requester (the exposing agent, by default) can verify its own work), and the operator session passes the
+    same gate. The **gate is the standing default
     posture**: every exposed app is member-gated unless the OPERATOR says otherwise for
     that specific app — gate-off (`auth: app`/`none`, `visibility: public`) is an
     operator-only exception, never an agent's default. Scope is structural: only the **network**
@@ -149,18 +155,26 @@ The gateway has TWO shapes, one per substrate:
     pin in the guest's /etc/hosts reaches CP-side dials via the guest's own
     resolver chain and must never leak into the subnet's answers, where the
     edge record is the one every pod dial depends on; the addn-hosts deploys
-    to /etc/dnsmasq.d (world-readable) so dnsmasq never depends on the 0700
-    state dir's perms.
+    to /etc/freehold/dnsmasq.addn-hosts (world-readable, outside the
+    dnsmasq conf-dir — Debian's CONFIG_DIR parses every file in
+    /etc/dnsmasq.d as config, and a hosts-format file there keeps dnsmasq
+    from ever starting) so dnsmasq never depends on the 0700 state dir's
+    perms.
 *   **Network's runners:** the PVE host (shared), a `caddy`-scoped kube door, the resolver on
     the CP guest, a Cloudflare door per DNS zone, plus any door the CPA provisions on the fly
     (e.g. a UniFi controller).
 
 ## Known gaps
 
-*   The gateway's host route isn't persisted — it is asserted by the box's gateway stage
-    (`ip route replace`), lost on a PVE host reboot until the next install/re-adopt. A switch
-    reboot lost it once and the world kept serving — only the box-side verbs went dark until
-    the route returned.
+*   The relay's image updates only when someone runs the bundle's `run.sh pull` on the relay
+    guest — the converge's `compose up -d --wait` re-runs the locally cached image and never
+    pulls, so a relay fix upstream does not reach a world until a human pulls (a bounce is
+    not an update).
+*   The gateway's host route rides the gateway (its LAN IP) and is re-asserted by every
+    build's gateway stage (before the terraform dial that needs it, so a post-reboot build
+    self-heals) — but between builds it is kernel runtime state: until the next build, any
+    host-side dial into the subnet (the box's pct-side probes, a thin box's verbs) has no
+    path and blackholes. A persisted `if-up.d` route on the host is the stopgap.
 *   Port 80 reaches Caddy but nothing redirects to 443; no per-guest vhosts; the DNAT list
     is hard-coded.
 *   Pre-gateway worlds' guests are DHCP, so a reboot can strand recorded addresses.

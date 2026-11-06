@@ -93,10 +93,10 @@ func TestServerToolList(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatal(err)
 	}
-	if len(resp.Result.Tools) != 20 {
-		t.Fatalf("expected 20 tools, got %d", len(resp.Result.Tools))
+	if len(resp.Result.Tools) != 22 {
+		t.Fatalf("expected 22 tools, got %d", len(resp.Result.Tools))
 	}
-	for _, name := range []string{"create_agent", "update_agent", "grant_agent", "provision_runner", "revoke_runner", "manage_agent", "expose_app", "unexpose_app", "create_job", "list_jobs", "delete_job", "pause_job", "world_status", "world_teardown", "world_migrate", "world_build", "world_exec", "world_authorize_door", "world_revoke_door", "world_register_facts"} {
+	for _, name := range []string{"create_agent", "update_agent", "grant_agent", "provision_runner", "revoke_runner", "fill_door", "door_package", "manage_agent", "expose_app", "unexpose_app", "create_job", "list_jobs", "delete_job", "pause_job", "world_status", "world_teardown", "world_migrate", "world_build", "world_exec", "world_authorize_door", "world_revoke_door", "world_register_facts"} {
 		found := false
 		for _, tl := range resp.Result.Tools {
 			if tl["name"] == name {
@@ -152,6 +152,45 @@ func TestServerUpdateAgentValidation(t *testing.T) {
 	}
 	if msg := call(`{"name":"bob"}`); !strings.Contains(msg, "no update path bound") {
 		t.Fatalf("the call did not reach the bound flow: %s", msg)
+	}
+}
+
+// TestServerProvisionRunnerNoSecretWiring pins the dispatch's flag wiring:
+// no_secret is the door's fill-authority declaration and the dispatch is the
+// only place a tools/call becomes ProvisionArgs — an unmarshalled-but-dropped
+// field would silently record every door agent-unfillable (fill_door would
+// then refuse every call). The bound flow is a capture, so the assertion is
+// on the args the flow actually receives.
+func TestServerProvisionRunnerNoSecretWiring(t *testing.T) {
+	aud := "aa55aa55aa55aa55aa55aa55aa55aa55aa55aa55aa55aa55aa55aa55aa55aa55"
+	secret := make([]byte, 32)
+	secret[0] = 1
+	pk, err := crypto.PubkeyFromSecret(secret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got *agent.ProvisionArgs
+	srv := &Server{
+		Audience: aud,
+		Grants:   func() ([]string, error) { return []string{pk}, nil },
+		Tools: &agent.Tools{Provision: func(args agent.ProvisionArgs) (string, error) {
+			got = &args
+			return "ok", nil
+		}},
+	}
+	raw := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"provision_runner","arguments":{"name":"audio-box-local","kind":"local","grant_to":["compute"],"hosted":"self","host":"audio-box","pubkey":"dd88dd88dd88dd88dd88dd88dd88dd88dd88dd88dd88dd88dd88dd88dd88dd88","enc_pubkey":"dd88dd88dd88dd88dd88dd88dd88dd88dd88dd88dd88dd88dd88dd88dd88dd88","no_secret":true}}}`
+	ts := time.Now().Unix()
+	req := httptest.NewRequest(http.MethodPost, "/mcp", bytes.NewBufferString(raw))
+	req.Header.Set(PubkeyHeader, pk)
+	req.Header.Set(TSHeader, strconv.FormatInt(ts, 10))
+	req.Header.Set(SigHeader, signForTest(secret, aud, ts, raw))
+	rec := httptest.NewRecorder()
+	srv.ServeHTTP(rec, req)
+	if got == nil {
+		t.Fatalf("the call never reached the flow: %s", rec.Body.String())
+	}
+	if !got.NoSecret {
+		t.Fatal("no_secret was dropped at the dispatch — the flow would record every door agent-unfillable")
 	}
 }
 

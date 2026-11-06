@@ -2,6 +2,7 @@ package console
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -550,17 +551,17 @@ func TestSafeNext(t *testing.T) {
 	pub := "https://cp.example.com"
 	s := &Server{PublicOrigin: &pub}
 	cases := map[string]string{
-		"":                                  "",
-		"/x":                                "/x",
-		"//evil.com":                        "",
-		`/\evil.com`:                        "",
-		"https://app.cp.example.com/y":      "https://app.cp.example.com/y",
-		"https://yuvomi.cp.example.com/y":   "https://yuvomi.cp.example.com/y",
-		"https://cp.example.com/z":          "https://cp.example.com/z",
-		"https://yuvomi.example.com/y":      "", // outside the world's tree
-		"https://evil.com":                  "",
-		"https://cp.example.com.evil.com/":  "",
-		"http://app.cp.example.com/y":       "http://app.cp.example.com/y",
+		"":                                 "",
+		"/x":                               "/x",
+		"//evil.com":                       "",
+		`/\evil.com`:                       "",
+		"https://app.cp.example.com/y":     "https://app.cp.example.com/y",
+		"https://yuvomi.cp.example.com/y":  "https://yuvomi.cp.example.com/y",
+		"https://cp.example.com/z":         "https://cp.example.com/z",
+		"https://yuvomi.example.com/y":     "", // outside the world's tree
+		"https://evil.com":                 "",
+		"https://cp.example.com.evil.com/": "",
+		"http://app.cp.example.com/y":      "http://app.cp.example.com/y",
 	}
 	for in, want := range cases {
 		if got := s.safeNext(in); got != want {
@@ -845,6 +846,94 @@ func TestGateResolvesOldShapeRows(t *testing.T) {
 	f.s.ServeHTTP(rec, req)
 	if rec.Code != http.StatusNoContent {
 		t.Fatalf("the gate must resolve the old-shape row at its derived hostname: %d", rec.Code)
+	}
+}
+
+// TestGateNip98MachineAuth pins the agents' machine path: a NIP-98-signed
+// request admits when the SIGNING KEY is in the app's channel (the same
+// check a member session passes — no cookie, no session), an
+// out-of-channel key gets the actionable 403, the operator's key passes
+// outright, and every malformed/misdirected header is a 401 (stale,
+// tampered, signed for a DIFFERENT app — the u-tag replay binding).
+func TestGateNip98MachineAuth(t *testing.T) {
+	f := newMemberFixture(t)
+	gate := func(auth, fwdHost string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodGet, "/auth/verify", nil)
+		req.Header.Set("X-Original-Host", fwdHost)
+		req.Header.Set("X-Original-Uri", "/")
+		if auth != "" {
+			req.Header.Set("Authorization", auth)
+		}
+		rec := httptest.NewRecorder()
+		f.s.ServeHTTP(rec, req)
+		return rec
+	}
+	signed := func(sec []byte, url string, ts int64) string {
+		h, err := wire.Nip98Auth(sec, "GET", url, ts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return h
+	}
+	app := "https://yuvomi.cp.example.com/"
+
+	// The member's key IS in the app's channel (the fixture roster): 204 —
+	// no cookie ever existed.
+	if rec := gate(signed(f.memberSec, app, time.Now().Unix()), "yuvomi.cp.example.com"); rec.Code != http.StatusNoContent {
+		t.Fatalf("an in-channel key must admit via NIP-98: %d %s", rec.Code, rec.Body.String())
+	}
+
+	// The operator's key passes outright — like the operator cookie.
+	if rec := gate(signed(f.opSec, app, time.Now().Unix()), "yuvomi.cp.example.com"); rec.Code != http.StatusNoContent {
+		t.Fatalf("the operator key must pass outright: %d %s", rec.Code, rec.Body.String())
+	}
+
+	// An out-of-channel key: 403 that NAMES the problem (the agent's
+	// actionable diagnostic — not a generic 401).
+	f2 := newMemberFixtureOpts(t, false)
+	req := httptest.NewRequest(http.MethodGet, "/auth/verify", nil)
+	req.Header.Set("X-Original-Host", "yuvomi.cp.example.com")
+	req.Header.Set("X-Original-Uri", "/")
+	h, _ := wire.Nip98Auth(f2.memberSec, "GET", app, time.Now().Unix())
+	req.Header.Set("Authorization", h)
+	rec := httptest.NewRecorder()
+	f2.s.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden || !strings.Contains(rec.Body.String(), "not in this app's group") {
+		t.Fatalf("an out-of-channel key must be 403 named as such: %d %s", rec.Code, rec.Body.String())
+	}
+
+	// A stale signature is refused (the 60s login-freshness window).
+	if rec := gate(signed(f.memberSec, app, time.Now().Add(-10*time.Minute).Unix()), "yuvomi.cp.example.com"); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("a stale header must be 401, got %d", rec.Code)
+	}
+
+	// A header signed for a DIFFERENT app must not open this one (the
+	// replay binding is the forwarded URL).
+	if rec := gate(signed(f.memberSec, "https://other.cp.example.com/", time.Now().Unix()), "yuvomi.cp.example.com"); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("a cross-app header must be 401, got %d", rec.Code)
+	}
+
+	// A tampered signature is refused: a real event shape, garbage sig.
+	tags := [][]string{{"u", app}, {"method", "GET"}}
+	_, _, _, err := wire.SignEvent(f.memberSec, wire.KINDHTTPAuth, time.Now().Unix(), tags, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	forged, _ := json.Marshal(map[string]interface{}{
+		"pubkey": f.memberPK, "created_at": time.Now().Unix(), "kind": wire.KINDHTTPAuth,
+		"tags": tags, "content": "", "sig": "deadbeef",
+	})
+	if rec := gate("Nostr "+base64.StdEncoding.EncodeToString(forged), "yuvomi.cp.example.com"); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("a forged signature must be 401, got %d", rec.Code)
+	}
+
+	// Garbage in the header: not base64, and not Nostr at all — the latter
+	// falls through to the anonymous 401.
+	if rec := gate("Nostr !!!", "yuvomi.cp.example.com"); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("non-base64 Nostr header must be 401, got %d", rec.Code)
+	}
+	if rec := gate("Bearer xyz", "yuvomi.cp.example.com"); rec.Code != http.StatusUnauthorized {
+		t.Fatalf("a foreign auth scheme must stay a plain 401, got %d", rec.Code)
 	}
 }
 

@@ -9,23 +9,27 @@ package main
 
 import (
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
 
 	"freehold/contract/crypto"
 	"freehold/contract/version"
+	"freehold/contract/wire"
 	"freehold/control-plane/api/agenttools"
 	"freehold/control-plane/api/console"
 	"freehold/control-plane/api/cpbuild"
 	"freehold/control-plane/secret-management"
 	"freehold/control-plane/state"
+	"freehold/platform/services/certificates/letsencrypt"
 )
 
 func main() {
@@ -50,6 +54,8 @@ func main() {
 		err = cmdAdopt(os.Args[2:])
 	case "add-secret":
 		err = cmdAddSecret(os.Args[2:])
+	case "litellm-key":
+		err = cmdLitellmKey(os.Args[2:])
 	case "revoke":
 		err = cmdRevoke(os.Args[2:])
 	case "identity":
@@ -61,7 +67,7 @@ func main() {
 	case "settings":
 		err = cmdSettings(os.Args[2:])
 	default:
-		fmt.Fprintf(os.Stderr, "unknown subcommand %q (serve|provision|grant|grants-mode|adopt|add-secret|revoke|identity|services|dns|settings)\n", os.Args[1])
+		fmt.Fprintf(os.Stderr, "unknown subcommand %q (serve|provision|grant|grants-mode|adopt|add-secret|revoke|identity|services|dns|settings|litellm-key)\n", os.Args[1])
 		os.Exit(2)
 	}
 	if err != nil {
@@ -112,7 +118,7 @@ func cmdServe(args []string) error {
 	fs.Uint64Var(&sizeGB, "size-gb", 10, "per-tenant LV size GB")
 	fs.Uint64Var(&poolSizeGB, "pool-size-gb", 40, "thin-pool size GB")
 	rootfsGB := fs.Uint("rootfs-gb", 16, "LXC rootfs size GB")
-	memoryMB := fs.Uint("memory-mb", 2048, "LXC memory MB")
+	memoryMB := fs.Uint("memory-mb", 4096, "LXC memory MB")
 	storageName := fs.String("storage", "local-lvm", "PVE LXC storage")
 	relayGW := fs.String("relay-gw", "192.168.30.1", "gateway for the k3s STATIC guest IP")
 	bridge := fs.String("bridge", "vmbr0", "PVE LXC bridge")
@@ -624,7 +630,31 @@ func cmdProvision(args []string) error {
 	fmt.Printf("  nostr pubkey:      %s\n", res.NostrPubkey)
 	fmt.Printf("  encryption pubkey: %s\n", res.EncPubkey)
 	fmt.Printf("  package:           %s\n", res.PackageDir)
-	if generatedPub != "" {
+	if res.Readdressed {
+		// A re-address keeps the runner's EXISTING sealed credential — the
+		// generated keypair above was ignored (its private half exists
+		// nowhere). The door presents the OLD key still: the operator carries
+		// the runner's OWN public line to the new host. Unseal it from the
+		// package (the runner's identity is local) and print THAT line.
+		doorLine, err := existingDoorLine(res.PackageDir, name)
+		if err != nil {
+			fmt.Printf("  (re-addressed %s -> %s; the runner's existing door key could not be read: %v — carry the runner's public line to the new host by hand)\n", res.OldAddress, *address, err)
+		} else {
+			fmt.Printf("  PUBLIC KEY (the runner's EXISTING door credential — the generated one was not sealed) — add this line to %s's ~/.ssh/authorized_keys:\n  %s\n", *address, doorLine)
+		}
+		// The runner loads its package once at boot — a re-address is paper
+		// until its unit reloads. Only a CAPABILITY door's unit is nameable
+		// from here (freehold-runner-<name>, local when this guest runs the
+		// door); anything else — a static department door or the co-located
+		// runner on the CP guest while this runs on a box — owes a restart
+		// this verb will not guess at.
+		if err := restartRunnerUnitFor(store, name); err != nil {
+			fmt.Printf("  (re-addressed on disk — restart the unit serving %s to pick it up: %v)\n", name, err)
+		} else {
+			res.RunnerRestarted = true
+			fmt.Printf("  restarted the local runner unit (the new address is live)\n")
+		}
+	} else if generatedPub != "" {
 		fmt.Printf("  PUBLIC KEY — add this line to %s's ~/.ssh/authorized_keys:\n  %s\n", *address, generatedPub)
 		fmt.Println("  (the private half is the sealed credential — it never leaves this box)")
 	}
@@ -633,6 +663,60 @@ func cmdProvision(args []string) error {
 			return err
 		}
 		fmt.Printf("synced runner channel on the relay (%s)\n", *relayURL)
+	}
+	return nil
+}
+
+// existingDoorLine unseals the runner's own SSH credential from its package
+// (the runner's identity.json is local to the box that provisioned it) and
+// returns its authorized_keys line — the door line the NEW host needs on a
+// re-address, where the runner's key is kept and the generated one discarded.
+func existingDoorLine(runnerDir, name string) (string, error) {
+	pkg, err := wire.Load(runnerDir)
+	if err != nil {
+		return "", err
+	}
+	blob, err := hex.DecodeString(pkg.Secrets[name])
+	if err != nil {
+		return "", err
+	}
+	idRaw, err := os.ReadFile(filepath.Join(runnerDir, "identity.json"))
+	if err != nil {
+		return "", err
+	}
+	var id struct {
+		EncSecretHex string `json:"enc_secret_hex"`
+	}
+	if err := json.Unmarshal(idRaw, &id); err != nil {
+		return "", err
+	}
+	enc, err := hex.DecodeString(id.EncSecretHex)
+	if err != nil {
+		return "", err
+	}
+	plain, err := crypto.Open(enc, []byte(name), blob)
+	if err != nil {
+		return "", err
+	}
+	return crypto.ExtractED25519PublicKeyLine(plain)
+}
+
+// restartRunnerUnitFor restarts the unit that serves THIS runner, when that
+// unit is nameable AND local: a capability door's freehold-runner-<name> unit
+// (a recorded capability). Static department doors and the co-located runner
+// are runner records WITHOUT a capability row — restarting the shared
+// freehold-runner unit for those would reload the WRONG runner's package —
+// so anything else returns an error naming the owed restart.
+func restartRunnerUnitFor(store *state.StateStore, name string) error {
+	if _, ok := store.GetCapability(name); !ok {
+		return fmt.Errorf("no local unit is known to serve %q (only a capability door's freehold-runner-%s unit restarts from here)", name, name)
+	}
+	return restartUnit("freehold-runner-" + name)
+}
+
+func restartUnit(unit string) error {
+	if out, err := exec.Command("systemctl", "restart", unit).CombinedOutput(); err != nil {
+		return fmt.Errorf("restart %s: %v: %s", unit, err, strings.TrimSpace(string(out)))
 	}
 	return nil
 }
@@ -837,6 +921,67 @@ func cmdAddSecret(args []string) error {
 		return err
 	}
 	fmt.Printf("added extra secret %s to runner %s (sealed to the runner's key)\n", name, runner)
+	return nil
+}
+
+// cmdLitellmKey rotates the CP litellm store's provider key. The sealed
+// world-secret is the durable source the build registers gateway aliases
+// from — a key pasted wrong at first build (a mangled TUI entry) would
+// otherwise ride every later alias registration. Opens the store with the
+// console identity, replaces the provider value in memory, re-seals:
+// plaintext never lands on disk or in argv.
+func cmdLitellmKey(args []string) error {
+	fs := flag.NewFlagSet("litellm-key", flag.ExitOnError)
+	secretEnv := fs.String("secret-env", "", "read the replacement provider key from this env var")
+	stateDir := fs.String("state-dir", "", "CP state dir")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *stateDir == "" {
+		return fmt.Errorf("litellm-key needs --state-dir")
+	}
+	if *secretEnv == "" {
+		return fmt.Errorf("litellm-key needs --secret-env — paste the key via the env, never argv")
+	}
+	v, ok := os.LookupEnv(*secretEnv)
+	if !ok || strings.TrimSpace(v) == "" {
+		return fmt.Errorf("--secret-env %s is not set", *secretEnv)
+	}
+	path := filepath.Join(*stateDir, "world-secrets", "litellm.json")
+	if _, err := os.Stat(path); err != nil {
+		return fmt.Errorf("no CP litellm store at %s", path)
+	}
+	idRaw, err := os.ReadFile(filepath.Join(*stateDir, "console", "identity.json"))
+	if err != nil {
+		return fmt.Errorf("console identity: %w", err)
+	}
+	var id struct {
+		EncSecretHex string `json:"enc_secret_hex"`
+	}
+	if err := json.Unmarshal(idRaw, &id); err != nil {
+		return fmt.Errorf("console identity parse: %w", err)
+	}
+	secret, err := hex.DecodeString(id.EncSecretHex)
+	if err != nil || len(secret) != 32 {
+		return fmt.Errorf("console identity enc_secret is not a 32-byte seed")
+	}
+	open := func(sec, aad, blob []byte) ([]byte, error) { return crypto.Open(sec, aad, blob) }
+	_, env, err := cert.LoadCreds(path, open, secret)
+	if err != nil {
+		return fmt.Errorf("open CP litellm store: %w", err)
+	}
+	if env == nil {
+		env = map[string]string{}
+	}
+	env["provider"] = strings.TrimSpace(v)
+	pub, err := crypto.X25519PublicKey(secret)
+	if err != nil {
+		return err
+	}
+	if err := cert.SaveCreds(path, "litellm", env, crypto.Seal, pub, "litellm"); err != nil {
+		return fmt.Errorf("re-seal CP litellm store: %w", err)
+	}
+	fmt.Println("CP litellm store: provider key replaced + re-sealed")
 	return nil
 }
 

@@ -270,6 +270,13 @@ func BuildRemoveAgentFn(spec *Spec) agent.RemoveAgentFn {
 		if err != nil {
 			return "", fmt.Errorf("%s %s: %w", verb, name, err)
 		}
+		// The ORG-WIDE doors' seats go too (the browser pool's kind-9000 put):
+		// a membership that outlives the row is a live grant on a key whose
+		// nsec stays on disk as data. Revoked before the row drops, same
+		// loud-retry shape.
+		if err := spec.revokeOrgWideMemberships(name); err != nil {
+			return "", fmt.Errorf("%s %s: revoking the org-wide door seats FAILED (%v) — the registry row is untouched; retry once the relay answers", verb, name, err)
+		}
 		return fmt.Sprintf("%s %s: pod %q retired (pod, service, prompt configmap, identity secret); %s; the durable workspace dir %s is kept — it is data", verb, name, agent.PodName(name), seat, agent.AgentWorkspaceDir(agent.PodName(name))), nil
 	}
 }

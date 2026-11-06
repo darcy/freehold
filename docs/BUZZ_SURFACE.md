@@ -79,7 +79,6 @@ Kinds are u32; custom range 40000+ is sanctioned. Used kinds we must NOT collide
 | 44100–44101 | Member added / removed notifications |
 | 45001–45003 | Forum post / vote / comment |
 | 46001–46012, 46020, 46030–31 | Workflow execution + approval grant/deny |
-| 48001 | **`KIND_AUDIT_ENTRY`** — relay-level audit events |
 | 48100–48106, 49001 | Huddles, media upload |
 | 20001 | Presence (ephemeral) |
 
@@ -127,10 +126,16 @@ must be a CURRENT state (grants; later, scope bookkeeping) uses the addressable 
 ## 8. Audit
 
 - The relay runs its own **hash-chain tamper-evident audit log** (`buzz-audit`) for every
-  stored event — so anything we publish is relay-audited by construction.
-- Runner exec-audit publishes as **kind 48001 (AUDIT_ENTRY)** — verify schema in D1; the
-  Chunk-1 local spool stays the authoritative log, relay publish is best-effort and
-  degrades to spool-only on failure (D5 stands).
+  event it stores — anything the relay STORES is hash-chained by construction; exec-audit
+  is the exception (below): rejected at ingest, never stored.
+- Runner exec-audit publishes as **kind 48001 (AUDIT_ENTRY)**; the Chunk-1 local spool
+  stays the authoritative log, relay publish is best-effort and degrades to spool-only on
+  failure (D5 stands). **The running relay rejects 48001 ingest** (`restricted: unknown
+  event kind`) — the kind is in no relay build and there is no relay-side registration
+  (the allowlist is compiled in; buzz-admin has no command for it), so exec-audit is
+  spool-only in practice and the relay-side copy waits on an upstream buzz change. The
+  kind range below 48200 that the relay does accept is closed to us: the free-range kinds
+  (48200+) are rejected too — do not switch the audit kind to escape this.
 
 ## 9. Per-capability port decision (the Phase 0 deliverable)
 
@@ -139,7 +144,7 @@ must be a CURRENT state (grants; later, scope bookkeeping) uses the addressable 
 | **Membership** | NATIVE | kind 13534 (relay-signed); `buzz-admin add-member`; relay enforces at auth + channel ingest | No |
 | **Grants** | NATIVE (NIP-29) | a runner is a private channel (9007 create); a grant is adding the agent's pubkey as a channel member (9000 put-user / 9001 remove-user, owner-gated); the runner's live whitelist is its own relay-signed 39002 roster, read fresh per call (fail-closed); profile/status is a kind-9 message tagged `t=fh-profile` | No |
 | **Memory** | NATIVE + encrypted payloads | kind 30174 engram + event-log FTS | Payload encryption is ours (D3) |
-| **Audit** | NATIVE | kind 48001 audit entry + relay hash-chain; the local spool stays authoritative (D5) | No |
+| **Audit** | NATIVE (spec) / SPOOL-ONLY (running relay) | the local spool stays authoritative (D5); the kind-48001 relay copy waits on an upstream ingest registration — see §8 | relay-side, blocked upstream |
 | **Delegation** | NATIVE | kind-9 channel messages in a CPA-created OPEN channel — `job-request`/`job-result` content envelopes (§9.7; the native job kinds 43001–43006 are NOT in the ingest scope) | No |
 | **Surface (F)** | NATIVE | stream channels (kind 9) + DMs (41001); scripted @freehold CPA via its own NIP-42 client | No |
 

@@ -101,10 +101,15 @@ func EnsureConsoleIdentity(stateDir string) (secret []byte, pubkey string, err e
 // reloadDnsmasq ensures dnsmasq is installed, pointed at the state-dir conf
 // (copied into /etc/dnsmasq.d/), and reloaded (web.rs dns_reload).
 func reloadDnsmasq(stateDir string) error {
-	ensure := "command -v dnsmasq >/dev/null 2>&1 || (export DEBIAN_FRONTEND=noninteractive; apt-get update -qq >/dev/null 2>&1 && apt-get install -y -qq dnsmasq >/dev/null 2>&1); mkdir -p /etc/dnsmasq.d"
+	ensure := "command -v dnsmasq >/dev/null 2>&1 || (export DEBIAN_FRONTEND=noninteractive; apt-get update -qq >/dev/null 2>&1 && apt-get install -y -qq dnsmasq >/dev/null 2>&1); mkdir -p /etc/dnsmasq.d /etc/freehold"
 	if _, err := runShell(ensure); err != nil {
 		return err
 	}
+	// A world that ran the conf-dir bug's render carries a hosts-format file
+	// inside /etc/dnsmasq.d — Debian's CONFIG_DIR tests every file there as
+	// config, so its mere presence keeps dnsmasq's ExecStartPre failing.
+	// Removed best-effort on every sync.
+	_ = os.Remove(DeprecatedAddnHostsPath)
 	conf, err := os.ReadFile(DnsmasqConfPath(stateDir))
 	if err != nil {
 		return err
@@ -112,10 +117,10 @@ func reloadDnsmasq(stateDir string) error {
 	if err := os.WriteFile("/etc/dnsmasq.d/freehold-names.conf", conf, 0o644); err != nil {
 		return err
 	}
-	// The addn-hosts deploys NEXT TO the conf: the state dir is 0700 (the
-	// store's ensurePrivateDir re-tightens it on every open) and dnsmasq must
-	// never depend on its perms — a failed addn load is silent and drops every
-	// explicit record from the resolver's answers.
+	// The addn-hosts deploys OUTSIDE the conf-dir (DeployedAddnHostsPath): the
+	// state dir is 0700 (the store's ensurePrivateDir re-tightens it on every
+	// open) and dnsmasq must never depend on its perms — a failed addn load is
+	// silent and drops every explicit record from the resolver's answers.
 	addn, err := os.ReadFile(AddnHostsPath(stateDir))
 	if err != nil {
 		return err

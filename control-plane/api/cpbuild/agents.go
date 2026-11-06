@@ -81,11 +81,14 @@ func (s *Spec) agentToolsAudience() (string, error) {
 
 // relayDial is the relay DIAL URL for event publishes/queries: the relay's
 // own hostname on the LAN HTTP port when known (buzz keys the community to
-// the HOST header, and the relay client presents the dial URL's hostname — a
-// raw-IP dial presents the IP and reads "no community is configured for this
-// host"), the recorded RelayURL otherwise. The NIP-98 signature covers the
+// the HOST header, which contract/relay now takes from the CANONICAL auth
+// URL — so a raw-IP dial (below) still presents the community's own name —
+// the recorded RelayURL otherwise. The NIP-98 signature covers the same
 // CANONICAL public origin (RelayAuthURL) — the dial-LAN / sign-public split.
 func (s *Spec) relayDial() string {
+	if s.RelayIP != "" {
+		return "http://" + s.RelayIP + ":3000"
+	}
 	if d := config.RelayLanDial(s.RelayHost); d != "" {
 		return d
 	}
@@ -97,7 +100,12 @@ func (s *Spec) relayDial() string {
 // (and reload it) without re-running the one-time seed/grant/pin steps.
 func (s *Spec) agentToolsServeFlags() string {
 	atState := s.agentToolsRoot()
-	relayDial := config.RelayLanDial(s.RelayHost)
+	// The relay DIAL prefers the relay guest's raw IP (relayDialURL): the
+	// name resolves — via the resolver's edge answer — to the k3s node,
+	// whose :3000 refuses; the relay's raw port lives on the relay guest.
+	// The Host presented stays the canonical community host (the auth URL —
+	// contract/relay's Host override), so the raw-IP dial ingests.
+	relayDial := s.relayDialURL()
 	serveFlags := fmt.Sprintf(
 		"--state-dir %s --addr 0.0.0.0:"+AgentToolsPort+" --relay-url %s --relay-lxc %d --relay-compose %s --k3s-vmid %d --runner-addr %s --runner-pubkey %s --runner-target %s --cpa-name %s --owner-pubkey %s --self-url %s",
 		atState, relayDial, s.RelayLxc, s.RelayCompose, s.K3sVmid,
@@ -116,6 +124,20 @@ func (s *Spec) agentToolsServeFlags() string {
 		if b, err := json.Marshal(s.Pangolin); err == nil {
 			serveFlags += " --pangolin-b64 " + base64.StdEncoding.EncodeToString(b)
 		}
+	}
+	if ea := EdgeAppsArg(s.EdgeApps); ea != "" {
+		// The verb path's Spec must carry the operator's edge riders too:
+		// an expose/unexpose re-applies the edge config, and a render without
+		// the riders silently strips them (the two-appliers invariant).
+		serveFlags += " --edge-apps-b64 " + ea
+	}
+	if s.WorldDomainOverride != "" {
+		// The verb path's appFQDN/appWildcard derive from the CP host's shape
+		// without this — on an apex-shaped world the derivation stays
+		// admin.<root>, the cert gate then covers *.admin. against the real
+		// *.root wildcard, fails, and the verb re-applies an edge with every
+		// app + rider vhost silently stripped.
+		serveFlags += " --world-domain " + s.WorldDomainOverride
 	}
 	if s.RelayPK != "" {
 		serveFlags += " --relay-pubkey " + s.RelayPK
@@ -511,6 +533,14 @@ func (s *Spec) manualDNSNote() string {
 	// console has moved off it — the operator must create its record too.
 	if p := s.portalHost(); p != "" {
 		hosts = append(hosts, p)
+	}
+	// The rider vhosts render beside the registry apps' — their records are
+	// the operator's to place in a manual-DNS world too.
+	for name, ea := range s.EdgeApps {
+		if ea.Upstream == "" {
+			continue
+		}
+		hosts = append(hosts, appFQDN(s.CpHost, s.WorldDomainOverride, name))
 	}
 	var missing, verified []string
 	for _, h := range hosts {

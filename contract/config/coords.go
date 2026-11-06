@@ -99,6 +99,12 @@ type Coords struct {
 	// bridge carries the subnet. GatewayLxc is then 0.
 	HostedGateway bool   `json:"hosted_gateway,omitempty"`
 	K3sIP         string `json:"k3s_ip,omitempty"`
+	// EdgeApps is the operator's at-source edge riders (config's [edge.apps]):
+	// gate exemptions for registry apps by name + gate-less rider vhosts for
+	// apps that exist only in the rendered edge otherwise. Rides the
+	// world-config so every console restart re-renders them instead of
+	// stripping what only the configmap carried.
+	EdgeApps map[string]EdgeApp `json:"edge_apps,omitempty"`
 	// OperatorName is the operator's display name in Buzz — published as the
 	// operator's kind:0 profile at build (which is what makes the Buzz desktop
 	// app skip its first-run onboarding). Empty renders "Operator".

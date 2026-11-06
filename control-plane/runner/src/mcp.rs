@@ -819,12 +819,19 @@ async fn handle_status(
         let state_str = if entry == "local" {
             local_status(state).await?
         } else if let Some(meta) = state.ctx.package.targets.get(&entry) {
-            match meta.kind.as_str() {
-                "ssh" => ssh_status(state, &entry, meta).await?,
-                "vultr" | "b2" | "hetzner" | "github" | "websearch" | "litellm" => {
-                    api_status(state, meta).await?
+            if meta.probe.is_some() {
+                // A target carrying a parameterized verify arm (data, not
+                // code) probes by that arm whatever its kind — a new api-class
+                // door never needs a runner rebuild for its status either.
+                api_status(state, meta).await?
+            } else {
+                match meta.kind.as_str() {
+                    "ssh" => ssh_status(state, &entry, meta).await?,
+                    "vultr" | "b2" | "hetzner" | "github" | "websearch" | "litellm" => {
+                        api_status(state, meta).await?
+                    }
+                    k => format!("red(unsupported kind {k})"),
                 }
-                k => format!("red(unsupported kind {k})"),
             }
         } else {
             return Err(exec::ExecError::UnknownTarget(entry));

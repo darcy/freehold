@@ -13,19 +13,22 @@ import (
 	"bufio"
 	"bytes"
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
-	"strconv"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
 	"freehold/contract/crypto"
+	"freehold/contract/wire"
 	"freehold/control-plane/api/agent"
 	"freehold/control-plane/api/agenttools"
 )
@@ -92,13 +95,23 @@ func freeholdToolDefs(hasRunner bool, targets []string) []map[string]interface{}
 				"enc_pubkey": map[string]interface{}{"type": "string"},
 				"ns":         map[string]interface{}{"type": "string"},
 				"quota":      map[string]interface{}{"type": "string"},
+				"no_secret":  map[string]interface{}{"type": "boolean"},
 			}, []string{"name", "kind", "grant_to"})},
 		{"name": "revoke_runner", "description": "Take a capability away — the counterpart of provision_runner. With revoke_from set, those agent NAMES lose their grant on the door while it keeps serving the rest of its roster; with revoke_from empty the WHOLE door is retired (roster cleared, credential erased from the CP, its unit stopped where freehold hosts it, its record dropped). Every leg says whether it was VERIFIED (the roster is re-read from the relay, the unit is asked whether it is still active and its port probed, the sealed package is re-opened). Relay the unverified legs to the operator verbatim rather than claiming a clean teardown: a revoked door that is still running is a known state, never a silent one. The door's audit channel is KEPT read-only. Only doors provision_runner gave are touchable — build-time, cloudflare-api-, and console-provisioned doors stay operator-scoped.",
 			"inputSchema": i(map[string]interface{}{
 				"name":        map[string]interface{}{"type": "string"},
 				"revoke_from": map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
 			}, []string{"name"})},
-		{"name": "expose_app", "description": "Make a service reachable by the people it serves: a public TLS vhost on the edge (DNS pointed, cert issued, Caddy config applied live), gated by the member login. auth=gate is the STANDING DEFAULT POSTURE — every app is member-gated unless the operator says otherwise for that app; auth=app (the app has its own auth) | none, and visibility=public, are operator-only exceptions, never an agent's default. name is a DNS label — the app's hostname is <name>.<the world's own domain>, the world's subtree derived from YOUR cp host (cp.librem.freehold.technology → librem.freehold.technology; sandbox.freehold.technology → itself — so an app named litellm lands at litellm.librem.freehold.technology or litellm.sandbox.freehold.technology; the member cookie scopes to the same world domain). NEVER compose the hostname from the DNS zone, another world's records, or a guess — derive it from your own world's cp host. SCOPE: exposure is Network's capability — only the network department (or the operator) may call this; other agents are refused, so route the ask through Network in conversation. group is the relay CHANNEL the access rides (name or id; default general — the everyone-channel): the requester must ALREADY be in it — access narrows to groups the requester belongs to and never widens; the gate enforces the channel per request (IsMemberAuth), so removing someone from the channel revokes them within the cache TTL. requester is the pubkey of whoever asked (default: you). target is the service's internal host:port (the edge proxies plain HTTP to it). visibility: family (public DNS + gate — the default) | public (NO gate — operator-only) | lan (no public DNS). The record survives rebuilds; a failed apply is re-ensured by the next build and the report names which legs landed.",
+		{"name": "fill_door", "description": "Seal a NON-SECRET credential value into a door you provisioned with no_secret=true — config you stated in conversation (an address, a public token). A door WITHOUT that declaration is refused: its credential is operator-sealed (the console's fill is the only path), and \"is this one secret?\" is never your judgment call — the declaration at provision time is. The value rides the same seal path the console uses (sealed to the door's own key, never plaintext on disk); a CP-guest door restarts to pick it up, a resident door's grantee then fetches the package with door_package.",
+			"inputSchema": i(map[string]interface{}{
+				"name":  map[string]interface{}{"type": "string"},
+				"value": map[string]interface{}{"type": "string"},
+			}, []string{"name", "value"})},
+		{"name": "door_package", "description": "Fetch a self-hosted door's ready-to-ship package JSON (secrets.json: the sealed credential + the door's connection spec) from the control plane's own record — the operator never copy-pastes it through chat. Only the door's GRANTEES may fetch: the gate is the door's live relay roster (the same signed source the runner checks per call), failing closed on a relay outage. Write the package beside the runner's identity.json on the guest and restart the unit there.",
+			"inputSchema": i(map[string]interface{}{
+				"name": map[string]interface{}{"type": "string"},
+			}, []string{"name"})},
+		{"name": "expose_app", "description": "Make a service reachable by the people it serves: a public TLS vhost on the edge (DNS pointed, cert issued, Caddy config applied live), gated by the member login. auth=gate is the STANDING DEFAULT POSTURE — every app is member-gated unless the operator says otherwise for that app; auth=app (the app has its own auth) | none, and visibility=public, are operator-only exceptions, never an agent's default. name is a DNS label — the app's hostname is <name>.<the world's own domain>, the world's subtree derived from YOUR cp host (cp.librem.freehold.technology → librem.freehold.technology; sandbox.freehold.technology → itself — so an app named litellm lands at litellm.librem.freehold.technology or litellm.sandbox.freehold.technology; the member cookie scopes to the same world domain). NEVER compose the hostname from the DNS zone, another world's records, or a guess — derive it from your own world's cp host. SCOPE: exposure is Network's capability — only the network department (or the operator) may call this; other agents are refused, so route the ask through Network in conversation. group is the relay CHANNEL the access rides (name or id; default general — the everyone-channel): the requester must ALREADY be in it — access narrows to groups the requester belongs to and never widens; the gate enforces the channel per request (IsMemberAuth), so removing someone from the channel revokes them within the cache TTL. requester is the pubkey of whoever asked (default: you). target is the service's internal host:port (the edge proxies plain HTTP to it). visibility: family (public DNS + gate — the default) | public (NO gate — operator-only) | lan (no public DNS). The record survives rebuilds; a failed apply is re-ensured by the next build and the report names which legs landed. VERIFY your work with gate_fetch: your own signed request passes the same channel check a member session does (expose validated the requester is in the group — verify as yourself only when requester defaults to you), so a 200 with the app's body proves the exposure serves through the edge; a 403 names the signer out of the group.",
 			"inputSchema": i(map[string]interface{}{
 				"name":       map[string]interface{}{"type": "string"},
 				"target":     map[string]interface{}{"type": "string"},
@@ -141,6 +154,24 @@ func freeholdToolDefs(hasRunner bool, targets []string) []map[string]interface{}
 	return defs
 }
 
+// bridgeToolDefs are answered LOCALLY by the bridge (never forwarded, no
+// server-side counterpart — they ride THIS agent's identity, not the CP's).
+// gate_fetch is the machine path through a member-gated app: the agent's own
+// key signs the request (NIP-98) and the console's gate applies the same
+// channel check a member session passes — how an agent verifies an exposure
+// it made (the expose validation put it in the group, so its key admits).
+func bridgeToolDefs() []map[string]interface{} {
+	return []map[string]interface{}{
+		{"name": "gate_fetch", "description": "Fetch a URL AS YOURSELF through the member gate: your key signs the request and the gate applies the same channel check your membership passes. This is how you VERIFY an exposure: status + body prove the app serves through the edge to someone in its group; 403 means the signing key is not in the app's group; 401 names a gate problem. body (optional) sends a request body (method defaults GET); insecure (optional) skips TLS verification for a private-CA world.",
+			"inputSchema": map[string]interface{}{"type": "object", "properties": map[string]interface{}{
+				"url":      map[string]interface{}{"type": "string"},
+				"method":   map[string]interface{}{"type": "string"},
+				"body":     map[string]interface{}{"type": "string"},
+				"insecure": map[string]interface{}{"type": "boolean"},
+			}, "required": []string{"url"}}},
+	}
+}
+
 func isFreeholdTool(name string) bool {
 	switch name {
 	// grant_agent is deliberately absent: it is operator-scoped (a grant hands
@@ -151,8 +182,12 @@ func isFreeholdTool(name string) bool {
 	// revoke_runner is its take-away twin and is advertised for the same reason:
 	// the half that hands capability out is not governable without the half that
 	// takes it back, and it is bounded by the same ownership guards (only doors
-	// the agent flow gave) and the same agent_grants kill switch.
+	// the agent flow gave) and the same agent_grants kill switch. fill_door is
+	// the grant flow's seal leg for declared no-secret doors (the same gate);
+	// door_package is the grantee's fetch — advertised to every agent, refused
+	// server-side to anyone off the door's live roster.
 	case "create_agent", "update_agent", "manage_agent", "provision_runner", "revoke_runner",
+		"fill_door", "door_package",
 		"expose_app", "unexpose_app",
 		"create_job", "list_jobs", "delete_job", "pause_job":
 		return true
@@ -297,6 +332,84 @@ func (b *mcpBridge) targetNames() []string {
 		out = append(out, r.target)
 	}
 	return out
+}
+
+// gateFetch answers gate_fetch: the agent's own key signs a NIP-98 event for
+// the URL and the bridge performs the request — the machine path through a
+// member-gated app (the console's gate verifies the signature and runs the
+// same channel check a member session passes). Status + a 64KB-capped body
+// come back: 200 + the app's body proves the exposure serves through the
+// edge; the gate's 403/401 name an out-of-group key / a gate problem
+// verbatim, which is exactly the diagnostic the exposing agent needs.
+func (b *mcpBridge) gateFetch(raw []byte) ([]byte, error) {
+	var req struct {
+		ID     json.RawMessage `json:"id"`
+		Params json.RawMessage `json:"params"`
+	}
+	if err := json.Unmarshal(raw, &req); err != nil {
+		return nil, err
+	}
+	var call struct {
+		Arguments map[string]interface{} `json:"arguments"`
+	}
+	if err := json.Unmarshal(req.Params, &call); err != nil {
+		return nil, err
+	}
+	rawURL, _ := call.Arguments["url"].(string)
+	if rawURL == "" {
+		return nil, fmt.Errorf("gate_fetch needs url")
+	}
+	method := "GET"
+	if m, _ := call.Arguments["method"].(string); m != "" {
+		method = strings.ToUpper(m)
+	}
+	body, _ := call.Arguments["body"].(string)
+	insecure, _ := call.Arguments["insecure"].(bool)
+	// NIP-98 signs the URL the gate reconstructs (https://host + uri) — a
+	// pathless URL gets the "/" the edge will see (rebuilt through the parsed
+	// URL so a query-only form lands it in the path, not the query), or the
+	// u check 401s.
+	if u, perr := url.Parse(rawURL); perr == nil && u.Path == "" {
+		u.Path = "/"
+		rawURL = u.String()
+	}
+	auth, err := wire.Nip98Auth(b.secret[:], method, rawURL, time.Now().Unix())
+	if err != nil {
+		return nil, err
+	}
+	hreq, err := http.NewRequest(method, rawURL, strings.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	hreq.Header.Set("Authorization", auth)
+	hc := b.hc
+	if insecure {
+		// ponytail: fresh client per insecure call — a private-CA world is
+		// the exception, not a pool worth caching.
+		hc = &http.Client{Timeout: 60 * time.Second, Transport: &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}}
+	}
+	resp, err := hc.Do(hreq)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
+	if len(respBody) == 64<<10 {
+		respBody = append(respBody, []byte("\n…(truncated at 64KB)")...)
+	}
+	text := fmt.Sprintf("status: %d\ncontent-type: %s\n\n%s", resp.StatusCode, resp.Header.Get("Content-Type"), respBody)
+	id := req.ID
+	if len(id) == 0 {
+		id = json.RawMessage("null")
+	}
+	out, _ := json.Marshal(map[string]interface{}{
+		"jsonrpc": "2.0", "id": id,
+		"result": map[string]interface{}{
+			"content": []map[string]interface{}{{"type": "text", "text": text}},
+			"isError": false,
+		},
+	})
+	return out, nil
 }
 
 // runnerCallRequest rewrites an exec tools/call for the runner: the target +
@@ -458,6 +571,7 @@ func mergeToolsList(line string, hasRunner bool, targets []string) string {
 		_ = json.Unmarshal(b, &tools)
 	}
 	tools = append(tools, freeholdToolDefs(hasRunner, targets)...)
+	tools = append(tools, bridgeToolDefs()...)
 	result["tools"] = tools
 	out, _ := json.Marshal(env)
 	return string(out)
@@ -488,6 +602,19 @@ func runBridge(in io.Reader, out io.Writer, b *mcpBridge) error {
 				Name string `json:"name"`
 			}
 			_ = json.Unmarshal(req.Params, &call)
+			// A bridge-local tool is answered HERE, signed as this agent — it
+			// never forwards (the identity is the pod's own, not the CP's).
+			if call.Name == "gate_fetch" {
+				resp, err := b.gateFetch(raw)
+				if err != nil {
+					logBridge("gate_fetch", err.Error())
+					resp = rpcErrorWrapper(raw, err)
+				}
+				writeResp(w, resp)
+				continue
+			}
+			// A freehold tool call is answered by agent-tools (signed), never
+			// buzz-dev-mcp.
 			if isFreeholdTool(call.Name) {
 				resp, err := b.signedForward(raw, b.agentToolsPub)
 				if err != nil {

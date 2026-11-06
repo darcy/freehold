@@ -17,6 +17,8 @@ import (
 	"strings"
 	"time"
 
+	"crypto/rand"
+
 	cert "freehold/platform/services/certificates/letsencrypt"
 
 	"freehold/contract/config"
@@ -24,8 +26,10 @@ import (
 	"freehold/contract/litellm"
 	"freehold/contract/wire"
 	"freehold/control-plane/api/agent"
+	"freehold/control-plane/api/agenttools"
 	"freehold/control-plane/secret-management"
 	"freehold/control-plane/state"
+	"freehold/platform/provisioning/stages"
 )
 
 // Capability runners: the unit of grant is the RUNNER — one runner per
@@ -52,6 +56,13 @@ type capabilityRunner struct {
 	port int
 	// rosters are the departments granted onto this runner.
 	rosters []string
+	// orgWide marks a door EVERY agent holds (custom agents included): the
+	// operator's policy for a shared, audited surface (the browser pool) —
+	// the audit is the containment, not the roster. An org-wide door still
+	// names its OWNING department in rosters (the pool's health is AI's);
+	// the coords + channel grant reach every registered agent at stage and
+	// every new agent at create.
+	orgWide bool
 	// kubernetes doors only: the SA-token Secret (declared in doors.tf) the
 	// token is read back from, re-sealed every build (a k3s rebuild rotates
 	// the CA, so a stale token would fail closed).
@@ -123,6 +134,8 @@ func capabilityRunners() []capabilityRunner {
 			probe: kubernetesProbe, probeBody: kubernetesProbeBody},
 		{name: "litellm-api-admin", kind: "litellm", port: 8795,
 			rosters: []string{"ai"}, probe: "GET /health/liveliness bearer"},
+		{name: "browser-pool", kind: "browser", port: 8799,
+			rosters: []string{"ai"}, orgWide: true, probe: "GET /meta bearer 200"},
 		{name: "dnsmasq-local-root", kind: "local", port: 8796,
 			rosters: []string{"network"}},
 		// cp-local-root: local exec ON the cp guest as root, for the data
@@ -149,6 +162,14 @@ const dynamicRunnerPortBase = 8800
 // community hostname on :3000 (the CP resolver maps it to the relay guest), so
 // the request Host matches the community. Falls back to the recorded RelayURL.
 func (s *Spec) relayDialURL() string {
+	// The relay GUEST's raw IP when known: the runner dials it directly — no
+	// DNS dependency. The NAME resolves (via the resolver's edge answer) to
+	// the k3s node, whose :3000 refuses — the relay's raw port lives only on
+	// the relay guest (the edge fronts it on 443). The canonical URL the
+	// runner SIGNS rides --relay-auth-url regardless.
+	if s.RelayIP != "" {
+		return "http://" + s.RelayIP + ":3000"
+	}
 	if s.RelayHost != "" {
 		return "http://" + s.RelayHost + ":3000"
 	}
@@ -182,8 +203,22 @@ func (s *Spec) consoleStateDir() string {
 // every build, and relay channels re-sync. A no-op without relay +
 // co-located-runner wiring.
 func (s *Spec) stageDepartmentRunners() error {
-	if s.CpLxc == 0 || s.CpIP == "" || s.RelayHost == "" || s.RunnerTarget == "" || s.RelayPK == "" {
+	if s.CpLxc == 0 || s.CpIP == "" || s.RelayHost == "" || s.RunnerTarget == "" {
 		return nil
+	}
+	// The doors' roster reads filter the relay's kind-13534 list by its
+	// signing pubkey — without it every grant query fails closed. A world
+	// whose coords were rendered BEFORE the relay existed (every fresh
+	// install: the key is captured at the build tail, but the console binds
+	// its coords at serve start) carries an empty RelayPK here; resolve the
+	// key in-guest now rather than silently staging nothing while the build
+	// reports the runners reconciled.
+	if s.RelayPK == "" {
+		pk, perr := s.resolveRelaySigningPubkey()
+		if perr != nil || pk == "" {
+			return fmt.Errorf("department runners: the world coords carry no relay_pubkey and the relay's signing key is unreadable in-guest (%v) — ensure the relay is up and re-run the build (the in-guest read resolves it), or record relay_pubkey in the profile config and run `freehold update` (the console binds its coords at serve start)", perr)
+		}
+		s.RelayPK = pk
 	}
 	cpState := s.consoleStateDir()
 	store, err := state.Open(cpState)
@@ -226,6 +261,34 @@ func (s *Spec) stageDepartmentRunners() error {
 	// department never loses exec across the build.
 	s.retireRunner(store, "data-pve")
 	return nil
+}
+
+// resolveRelaySigningPubkey reads the relay's signing secret IN the relay
+// guest (through the co-located runner, the same transport every door stage
+// rides) and derives its pubkey — the deterministic source the box's
+// relaySigningPubkey uses at deploy-cp, run CP-side so a world whose coords
+// predate the relay's key still stages its doors on the next build. The
+// secret never leaves the relay guest; only the derived pubkey is returned.
+func (s *Spec) resolveRelaySigningPubkey() (string, error) {
+	if s.RelayLxc == 0 {
+		return "", fmt.Errorf("no relay guest recorded")
+	}
+	out, err := s.runOut(fmt.Sprintf(
+		`pct exec %d -- sh -c "sed -n 's/^BUZZ_RELAY_PRIVATE_KEY=//p' %s/.env 2>/dev/null"`,
+		s.RelayLxc, stages.RelayComposeDir), 30)
+	if err != nil {
+		return "", err
+	}
+	secret := strings.TrimSpace(out)
+	raw, derr := hex.DecodeString(secret)
+	if derr != nil || len(raw) != 32 {
+		return "", fmt.Errorf("the relay compose .env carries no 32-byte hex BUZZ_RELAY_PRIVATE_KEY")
+	}
+	pk, kerr := crypto.PubkeyFromSecret(raw)
+	if kerr != nil {
+		return "", kerr
+	}
+	return pk, nil
 }
 
 // cloudflareRunners derives one cloudflare-api-<domain> runner per DISTINCT
@@ -477,7 +540,40 @@ func (s *Spec) ensureCapabilityRunner(store *state.StateStore, cpState string, r
 	for _, dept := range r.rosters {
 		s.DepartmentRunners[dept] = append(s.DepartmentRunners[dept], coords)
 	}
+	if r.orgWide {
+		// Every registered agent holds an org-wide door (the coords the pod
+		// re-apply consumes + the channel grant the reconcile's per-agent
+		// grantDepartmentRunner makes live).
+		reg, err := agenttools.OpenRegistry(filepath.Join(s.agentToolsRoot(), "registry.json"))
+		if err != nil {
+			return fmt.Errorf("org-wide %s: open agent registry: %w", r.name, err)
+		}
+		rows, err := reg.Agents()
+		if err != nil {
+			return fmt.Errorf("org-wide %s: list agents: %w", r.name, err)
+		}
+		for _, a := range rows {
+			if a.Name == "" {
+				continue
+			}
+			if !containsCoords(s.DepartmentRunners[a.Name], coords) {
+				s.DepartmentRunners[a.Name] = append(s.DepartmentRunners[a.Name], coords)
+			}
+		}
+	}
 	return nil
+}
+
+// containsCoords reports whether coords already holds a matching runner entry
+// (same target + pubkey) — the dedupe for a runner reaching one agent through
+// TWO paths (its department roster AND org-wide).
+func containsCoords(coords []agent.RunnerCoords, c agent.RunnerCoords) bool {
+	for _, x := range coords {
+		if x.Target == c.Target && x.Pubkey == c.Pubkey {
+			return true
+		}
+	}
+	return false
 }
 
 // reSealRotating is the build-time re-seal for every rotating-credential door
@@ -583,6 +679,21 @@ func (s *Spec) runnerCredential(r capabilityRunner, hostAddr string) (runnerCred
 		// The credential is a placeholder by convention (secret name = runner
 		// name); the door IS the runner's own host.
 		return runnerCred{secret: []byte("local")}, nil
+	case "browser":
+		// The browser pool: browserless's LAN NodePort on the k3s node (the
+		// litellm 31400 pattern). The credential is the pool's shared token,
+		// minted once into the CP's browser store — the deployment's TOKEN
+		// env (via the tf secret mapping) and the door's credential read the
+		// SAME value, so they never drift. The AUDIT is the door: every agent
+		// exec names agent/session in the runner's audit log.
+		token, err := s.browserToken()
+		if err != nil {
+			return runnerCred{}, err
+		}
+		return runnerCred{
+			addr:   "http://" + config.StripCIDR(s.k3sIP()) + ":31401",
+			secret: token,
+		}, nil
 	default:
 		// A DNS-provider door (cloudflare today): the API token is the target
 		// credential (the runner's own self-check verifies it), the remaining
@@ -956,6 +1067,54 @@ func (s *Spec) saveLitellmStoreEnv(path string, secret []byte, env map[string]st
 		return err
 	}
 	return cert.SaveCreds(path, "litellm", env, crypto.Seal, pub, "litellm")
+}
+
+// browserStorePath is the CP browser store's ONE home: the CONSOLE's
+// world-secrets — the same invariant as litellmStorePath (the agent-tools
+// root must never mint a second store).
+func (s *Spec) browserStorePath() (root, path string) {
+	root = s.consoleStateRoot()
+	return root, filepath.Join(root, "world-secrets", "browser.json")
+}
+
+// browserToken returns the browser pool's shared access token, minting the
+// store on first use. ONE token — the deployment's TOKEN env (the tf secret
+// mapping) and the browser door's credential both read it, so they never
+// drift. Plaintext lives in memory only; the store seals to the console
+// identity.
+func (s *Spec) browserToken() ([]byte, error) {
+	root, path := s.browserStorePath()
+	if cert.CredExists(path) {
+		secret, err := s.consoleEncSecretAt(root)
+		if err != nil {
+			return nil, err
+		}
+		open := func(sec, aad, blob []byte) ([]byte, error) { return crypto.Open(sec, aad, blob) }
+		_, env, err := cert.LoadCreds(path, open, secret)
+		if err != nil {
+			return nil, fmt.Errorf("open CP browser store: %w", err)
+		}
+		if t := env["token"]; t != "" {
+			return []byte(t), nil
+		}
+	}
+	token := make([]byte, 24)
+	if _, err := rand.Read(token); err != nil {
+		return nil, err
+	}
+	hexed := hex.EncodeToString(token)
+	secret, err := s.consoleEncSecretAt(root)
+	if err != nil {
+		return nil, err
+	}
+	pub, err := crypto.X25519PublicKey(secret)
+	if err != nil {
+		return nil, err
+	}
+	if err := cert.SaveCreds(path, "browser", map[string]string{"token": hexed}, crypto.Seal, pub, "browser"); err != nil {
+		return nil, fmt.Errorf("seal CP browser store: %w", err)
+	}
+	return []byte(hexed), nil
 }
 
 // ensureAgentLitellmKey returns the agent's own gateway virtual key: the
@@ -1349,20 +1508,27 @@ func (s *Spec) addRelayCommunityMember(pubkey string) error {
 // way — the module direction forbids a shared helper.
 // doorUnitText renders a capability door's systemd unit file — a REAL file
 // (Restart=on-failure, enabled): a crash or a guest reboot returns; a
-// --collect transient removed the unit on the first crash.
-func doorUnitText(description, name, bin, flags string) string {
+// --collect transient removed the unit on the first crash. sandbox carries
+// the unit's privilege lines (provisioner.DoorSandbox): an ssh/api door runs
+// as its own unprivileged user with a read-only-except-package filesystem —
+// an api door's exec is curl, never root; a local door passes "" and runs as
+// root (the documented contract: a local door IS root on its host).
+func doorUnitText(description, name, bin, flags, sandbox string) string {
+	if sandbox != "" {
+		sandbox += "\n"
+	}
 	return fmt.Sprintf(`[Unit]
 Description=%s
 After=network-online.target
 
 [Service]
-ExecStart=%s serve %s
+%sExecStart=%s serve %s
 Restart=on-failure
 RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
-`, description, bin, flags)
+`, description, sandbox, bin, flags)
 }
 
 func (s *Spec) startCapabilityRunner(r capabilityRunner, pkgDir string) error {
@@ -1377,7 +1543,19 @@ func (s *Spec) startCapabilityRunner(r capabilityRunner, pkgDir string) error {
 	flags := fmt.Sprintf("--state-dir %s --addr 0.0.0.0:%d --relay-url %s --relay-pubkey %s --relay-auth-url %s --allow-remote",
 		pkgDir, r.port, s.relayDialURL(), s.RelayPK, s.relaySignURL())
 	unit := "freehold-runner-" + r.name
-	unitFile := doorUnitText("freehold capability runner "+r.name, r.name, bin, flags)
+	// The unit's privilege level is the door's kind: ssh/api doors run as a
+	// per-door unprivileged user (their exec is ssh into the target or a
+	// local curl — root buys nothing) with the package dir as their only
+	// writable ground. EnsureRunnerUser creates the user + asserts the
+	// initial ownership; the unit's ExecStartPre re-asserts ownership at
+	// EVERY start, so any later root-owned re-ship (rotate, fill, grant,
+	// add-secret, re-address) self-heals at the next restart or reboot. A
+	// local door runs as root — root IS the job on its own host.
+	user, err := provisioner.EnsureRunnerUser(r.kind, r.name, pkgDir)
+	if err != nil {
+		return fmt.Errorf("stage %s door user: %w", r.name, err)
+	}
+	unitFile := doorUnitText("freehold capability runner "+r.name, r.name, bin, flags, provisioner.DoorSandbox(user, pkgDir))
 	script := fmt.Sprintf(
 		"echo %s | base64 -d > /etc/systemd/system/%s.service && systemctl daemon-reload && systemctl stop %s 2>/dev/null; systemctl enable --now %s",
 		base64.StdEncoding.EncodeToString([]byte(unitFile)), unit, unit, unit)

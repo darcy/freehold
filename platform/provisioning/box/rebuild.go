@@ -796,6 +796,13 @@ func (e *Engine) RecordCoords(c config.Coords) error {
 	if cfg == nil {
 		return fmt.Errorf("no config at %s", e.F.ConfigPath)
 	}
+	k3sIP := c.K3sIP
+	if k3sIP == "" {
+		// A CP predating the K3sIP coord reports no k3s_ip; its world's
+		// k3s node then still IS the proxy (the pre-gateway shape), so the
+		// old assumption is the right fallback.
+		k3sIP = c.ProxyIP
+	}
 	for _, g := range []struct {
 		role string
 		vmid uint32
@@ -803,9 +810,13 @@ func (e *Engine) RecordCoords(c config.Coords) error {
 	}{
 		{"relay", c.RelayLxc, c.RelayIP},
 		{"cp", c.CpLxc, c.CpIP},
-		// The k3s node's address IS the static proxy IP (k3s carries no Ip of
-		// its own), so the CP reports it as ProxyIP.
-		{"k3s", c.K3sVmid, c.ProxyIP},
+		// K3sIP is the k3s node's OWN address — with a gateway the INTERNAL
+		// one (the gateway guest carries ProxyIP, the edge). Recording
+		// ProxyIP here (the pre-gateway assumption) re-clobbered the k3s
+		// record with the gateway's LAN address on every build, so the
+		// config lied about the k3s guest forever (casaq's stale
+		// 192.168.30.5).
+		{"k3s", c.K3sVmid, k3sIP},
 	} {
 		if g.vmid == 0 {
 			continue
@@ -1460,6 +1471,17 @@ func mergeFromAnswers(ans *config.Config, prev *config.Config) *config.Config {
 	} else {
 		cfg.Gateway = prev.Gateway
 	}
+	// The operator's edge shape is SOURCE, not pipeline output: the world
+	// root override, the [edge.apps] riders, and the [pangolin] public path
+	// are operator-authored (no pipeline stage writes them; the coords carry
+	// them verbatim) — a merge that drops them makes the next build
+	// re-render the WRONG shape, strip the riders' vhosts, and silently drop
+	// the apps' tunnel public path (the casaq strip: browns.admin. over
+	// browns., the portal gone). The answers never carry these; prev always
+	// wins.
+	cfg.WorldDomain = prev.WorldDomain
+	cfg.Edge = prev.Edge
+	cfg.Pangolin = prev.Pangolin
 	// The post-world recorder (recordPostWorld) persists the coords + sections
 	// world_build established to disk; finalSave rebuilds from answers and must
 	// keep them (like Plane) or it would silently erase them on every run —
@@ -1597,7 +1619,10 @@ func (e *Engine) FinalSave() error {
 	// would make teardown say "skipped k3s LXC (not managed)" and leak the
 	// guest + its thin LV forever.
 	cfg.Managed = worldManaged(e.F.NoK3s, e.F.NoLitellm, cfg.Lxc.K3s.Vmid, cfg.Lxc.Gateway.Vmid)
-	if rpk, ok := e.relayPubkeyNip11(); ok {
+	// The relay's signing key is the deterministic in-guest read when the
+	// relay is up (the NIP-11 best-effort comes back empty on Buzz documents
+	// whose "pubkey" is null); the config value is the last-resort carry.
+	if rpk := e.relaySigningPubkey(); rpk != "" {
 		cfg.RelayPubkey = &rpk
 	}
 	return cfg.Save(e.F.ConfigPath)
@@ -2715,6 +2740,7 @@ func (e *Engine) worldConfigJSON(cfg *config.Config) string {
 		OwnerPub:       e.F.OperatorPubkey,
 		OperatorName:   firstNonBlank(e.F.OperatorName, cfg.OperatorName),
 		WorldDomain:    firstNonBlank(e.F.WorldDomain, cfg.WorldDomain),
+		EdgeApps:       edgeAppsFromConfig(cfg),
 		Pangolin:       cfg.Pangolin,
 		LitellmBaseURL: cfg.Litellm.URL,
 		// The agent-tools server's reachable URL, NOT the console's: this is the
@@ -2900,6 +2926,21 @@ func firstNonBlank(a, b string) string {
 	return b
 }
 
+// edgeAppsFromConfig lifts the profile's [edge.apps] riders into the coords —
+// the world-config is the console's only input, and the edge render converges
+// from it (the operator's gate-less exceptions + gate exemptions ride every
+// restart instead of living in a rendered configmap a pass can strip).
+func edgeAppsFromConfig(cfg *config.Config) map[string]config.EdgeApp {
+	if len(cfg.Edge.Apps) == 0 {
+		return nil
+	}
+	out := make(map[string]config.EdgeApp, len(cfg.Edge.Apps))
+	for name, ea := range cfg.Edge.Apps {
+		out[name] = ea
+	}
+	return out
+}
+
 func derefU32(p *uint32) uint32 {
 	if p == nil {
 		return 0
@@ -2938,14 +2979,24 @@ func (e *Engine) relayPubkeyNip11() (string, bool) {
 }
 
 // extractNip11Pubkey pulls "pubkey" out of a NIP-11 JSON body without a
-// JSON dep: a minimal scan for the 64-hex value.
+// JSON dep: a minimal scan for the 64-hex value. Newer Buzz documents
+// publish "pubkey": null and carry the relay's identity in "self" — the
+// same 64-hex signing pubkey — so that field is the fallback.
 func extractNip11Pubkey(text string) (string, bool) {
-	const key = `"pubkey"`
-	i := strings.Index(text, key)
+	if pk, ok := nip11HexAfter(text, `"pubkey"`); ok {
+		return pk, true
+	}
+	return nip11HexAfter(text, `"self"`)
+}
+
+// nip11HexAfter scans for `field` and returns the 64-hex string that
+// immediately follows it, if any.
+func nip11HexAfter(text, field string) (string, bool) {
+	i := strings.Index(text, field)
 	if i < 0 {
 		return "", false
 	}
-	rest := text[i+len(key):]
+	rest := text[i+len(field):]
 	start := strings.Index(rest, `"`)
 	if start < 0 {
 		return "", false

@@ -484,8 +484,13 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     audit. A custom agent that self-serves a department-owned capability is a
     containment failure even if a grant would technically allow it — the
     department's prompt is the first line of defense, the grant the second.
+    **The one org-wide door is `browser-pool`** — the operator's explicit
+    decision: every agent (custom agents included) holds it, because the
+    door's audit (the agent named on every exec) IS the containment for a
+    shared browser.
     Today's enforcement is the existing grant model: custom agents hold no raw
-    capability grants on the build-time runners (`grant_agent` is
+    capability grants on the build-time runners other than the one org-wide
+    door (`grant_agent` is
     operator-scoped), and the CPA's `provision_runner` grants only onto
     NEW capability doors it stages — the department that gets the grant is
     named in the flow itself.
@@ -641,7 +646,9 @@ resident-runner mode, the retired-name guard — is in `docs/AI.md` ("Runners an
     and must
     present it) and
     validated on `/auth/verify` (the gate exposed apps point Caddy
-    `forward_auth` at — `docs/NETWORK.md`, the launch surface). It also
+    `forward_auth` at — `docs/NETWORK.md`, the launch surface; it also takes
+    a per-request NIP-98 header as the agents' machine path — the signing
+    key runs the same channel check a member session does). It also
     carries the box-side CP CLI verbs (`provision`/`grant`/`adopt`/`add-secret`/`identity`),
     so the deploy and the rebuild engine ship + drive a Go console end to end. The console
     is the CP's own identity (0600, minted on the box at first serve — never
@@ -698,8 +705,12 @@ resident-runner mode, the retired-name guard — is in `docs/AI.md` ("Runners an
     freehold-console grants-mode --mode off --state-dir /srv/data/cp/control-plane # deny the flow
     ```
 
-    Provision refuses to clobber: a name that exists, or a `--runner-dir` that
-    already holds a package, errors instead of destroying a runner's key.
+    Provision refuses to clobber: a `--runner-dir` that already holds a
+    package errors instead of destroying a runner's key. A name that exists
+    is the **re-address** path: an unchanged address errors (the reuse
+    refusal); a rotated address moves the runner's target (state row +
+    package together — identity and sealed credential untouched) and
+    restarts the unit that serves it, the re-adopt's substrate rotation.
 
     **The no-master-key recipe** — verify the property yourself: grep the CP's
     `state.json` (`/srv/data/cp/control-plane/state.json`) for a credential and

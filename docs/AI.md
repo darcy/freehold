@@ -163,7 +163,9 @@ action it causes is signed, authorized, and audited by machinery that cannot rea
     its own doors (`FREEHOLD_RUNNER_*`) and a scoped `exec`/`list` bridge that routes by
     target and signs as the department's own key. The CPA and custom agents hold no runner
     coords and never see exec — a capability grant attaches to a department identity, never
-    to a custom agent that would self-serve an ungoverned path.
+    to a custom agent that would self-serve an ungoverned path. **The one exception is the
+    browser-pool door: it is org-wide** (every agent holds it — the operator's decision; the
+    audit names the agent, which is the containment for a shared browser).
 
     | Runner | Kind | Port | Roster |
     | --- | --- | --- | --- |
@@ -172,6 +174,7 @@ action it causes is signed, authorized, and audited by machinery that cannot rea
     | `kube-api-caddysa` | kubernetes (`caddy` ns SA) | 8793 | network |
     | `kube-api-litellmsa` | kubernetes (`litellm` ns SA) | 8794 | ai |
     | `litellm-api-admin` | litellm (master + provider key) | 8795 | ai |
+    | `browser-pool` | browser (browserless token; the pool's own NodePort) | 8799 | **every agent** (org-wide); AI owns the pool's health |
     | `dnsmasq-local-root` | local (CP guest) | 8796 | network |
     | `cp-local-root` | local (CP guest) | 8797 | data |
     | `cloudflare-api-<zone>` | api, one per stored DNS zone | from 8798 | network |
@@ -190,7 +193,13 @@ action it causes is signed, authorized, and audited by machinery that cannot rea
     **Credentials never ride chat:** an ssh door mints its own keypair (the operator
     installs the returned public key once); an api door provisions EMPTY and the agent DMs
     the operator the door's console page, whose kind-aware form seals the credential and
-    restarts the door. The api door's **verify arm is data, not code**: the requesting
+    restarts the door — UNLESS the door was DECLARED `no_secret` at provision time. The
+    declaration is made once, while constructing the door, so the agent never judges "is
+    this one secret?": a no-secret door's credential is config the agent stated in
+    conversation (an address, a public token), and the agent seals it itself via
+    `fill_door` — the same seal path the console uses (sealed to the door's key, never
+    plaintext on disk). A door without the declaration is agent-unfillable forever. The
+    api door's **verify arm is data, not code**: the requesting
     agent names the probe (`"<METHOD> <path> [auth] [want] [insecure]"`, e.g. `GET
     /user/tokens/verify bearer`), it ships in the door's package (with its optional
     `probe_body`), and the runner composes its self-check curl
@@ -201,7 +210,12 @@ action it causes is signed, authorized, and audited by machinery that cannot rea
     audited leg, never the CPA's — and the CP then reads the SA token from the slot and
     seals it CP-side, so the door is live with no console fill; the record re-creates the
     slot and re-seals the token on every rebuild, the same role `doors.tf` plays for the
-    static kube doors. The grant surface itself is the CPA's identity alone,
+    static kube doors. A **self-hosted door's package** (the sealed credential + its
+    connection spec, which the guest needs placed as `secrets.json`) is fetched by the
+    door's GRANTEE from the CP's own record via `door_package` — the gate is the door's
+    live relay roster (the same signed source the runner checks per call, fail-closed on
+    relay outage), so the package never transits the operator's clipboard or the CPA's
+    context. The grant surface itself is the CPA's identity alone,
     server-enforced: a created agent (or department) calling
     `provision_runner`/`revoke_runner` is refused — capability asks route
     through freehold in conversation. Confirmation is governed by
@@ -273,6 +287,21 @@ action it causes is signed, authorized, and audited by machinery that cannot rea
     `docs/ARCHITECTURE.md` ("Runners"); the open gaps in the mechanics (replay window,
     rotate reach, revocation) are in `docs/FREEHOLD.md`.
 
+## The browser pool
+
+A shared headless-Chromium service (browserless, k3s namespace `browser`, LAN NodePort on
+the k3s node) reached through the **browser-pool** door. The door is **org-wide** — every
+agent (custom agents included) holds its coords and its roster membership, by the
+operator's decision: the AUDIT is the containment (each exec names the agent in the
+runner's audit log), not the roster. AI owns the pool's health and the door's verify arm.
+The pool's access token is minted once into the CP's browser store
+(`world-secrets/browser.json`, sealed to the console identity) and carried by BOTH the
+deployment's TOKEN env and the door's credential — one source, never drift. A freshly
+created agent is wired at create time (coords + a live roster grant), before the next
+build's stage/reconcile. The pod is STATELESS: every request is a fresh session. The
+authenticated profile-borrowing design (sealed login profiles borrowed per-session, the
+one-time human login over a headed browser) is future work, not this.
+
 ## Known gaps
 
 *   A gateway whose Postgres was wiped (a full teardown of the k3s state)
@@ -287,6 +316,13 @@ action it causes is signed, authorized, and audited by machinery that cannot rea
     default set; managing an agent's choice beyond the registry row is not built.
 *   AI's prompt says the provider key rides each exec; the bridge doesn't inject it.
 *   The sprig image is a moving tag (no digest pin).
+*   The relay's ingest rejects the runner's kind-48001 audit events (`restricted: unknown
+    event kind`) — the kind is in no relay build, buzz-admin has no registration command,
+    and the free-range kinds (48200+) are rejected too, so exec-audit is spool-only and
+    the relay-side audit copy waits on an upstream buzz change (register 48001 ingest or
+    ship an allowlist config). Zero loss: the local spool stays authoritative (D5), and
+    every stored event is relay-hash-chained by construction. Verified against
+    ghcr.io/block/buzz:main digest df8772ac (built 2026-10-11) on casaq — both legs.
 *   The `buzz` CLI (the sprig image's relay client) panics on a closed stdout pipe:
     piping a large response into a reader that exits early
     (`buzz messages get --channel <busy> --since <wide> | head -c 1000`) aborts it

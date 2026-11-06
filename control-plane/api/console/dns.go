@@ -89,10 +89,20 @@ func RemoveDNSRecord(store *state.StateStore, name string) error {
 // re-tightens it on every open — and dnsmasq must never depend on its perms).
 func AddnHostsPath(stateDir string) string { return filepath.Join(stateDir, "dnsmasq.addn-hosts") }
 
-// DeployedAddnHostsPath is where reloadDnsmasq lands the addn-hosts next to
-// the deployed conf: root-owned 0644 in /etc/dnsmasq.d, readable by dnsmasq
-// regardless of the state dir's perms.
-const DeployedAddnHostsPath = "/etc/dnsmasq.d/freehold-names.hosts"
+// DeployedAddnHostsPath is where reloadDnsmasq lands the addn-hosts:
+// root-owned 0644 in the resolver's own dir, readable by dnsmasq regardless
+// of the state dir's perms. Deliberately NOT inside /etc/dnsmasq.d/: the
+// Debian default CONFIG_DIR points dnsmasq's own conf load AND the unit's
+// checkconfig at that directory with no extension filter, so a hosts-format
+// file there is parsed as config ("bad option at line 1") and dnsmasq can
+// never start.
+const DeployedAddnHostsPath = "/etc/freehold/dnsmasq.addn-hosts"
+
+// DeprecatedAddnHostsPath is where the pre-conf-dir-fix render deployed the
+// addn-hosts — worlds that ran it carry a hosts-format file inside Debian's
+// conf-dir, where its mere presence keeps dnsmasq's checkconfig failing.
+// reloadDnsmasq removes it best-effort on every sync.
+const DeprecatedAddnHostsPath = "/etc/dnsmasq.d/freehold-names.hosts"
 
 // DnsmasqConfPath is the dnsmasq config file.
 func DnsmasqConfPath(stateDir string) string { return filepath.Join(stateDir, "dnsmasq.conf") }
