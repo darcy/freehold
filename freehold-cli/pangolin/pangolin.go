@@ -27,10 +27,9 @@ import (
 	"freehold/contract/crypto"
 	"freehold/freehold-cli/internal/certcred"
 	oplogin "freehold/freehold-cli/login"
+	"freehold/freehold-cli/uninstall"
 	"freehold/platform/provisioning"
 	"freehold/platform/provisioning/box"
-	cert "freehold/platform/services/certificates/letsencrypt"
-	dnsman "freehold/platform/services/externaldns/cloudflare"
 	"freehold/providers/proxmox"
 	"freehold/providers/vultr"
 )
@@ -76,6 +75,10 @@ func run(cmd *cobra.Command, args []string) error {
 	cfg, err := config.Load(cfgPath)
 	if err != nil || cfg == nil {
 		return fmt.Errorf("pangolin needs an installed world — no config at %s (run `freehold install` first)", cfgPath)
+	}
+	if destroy, _ := cmd.Flags().GetBool("destroy"); destroy {
+		yes, _ := cmd.Flags().GetBool("yes")
+		return runDestroy(cfg, cfgPath, yes)
 	}
 	if cfg.CPURL == "" {
 		return fmt.Errorf("pangolin needs the world's control plane up (no cp_url on record) — run `freehold install` + `freehold build` first")
@@ -136,10 +139,10 @@ func run(cmd *cobra.Command, args []string) error {
 	cfg.PangolinHost = &config.PangolinHostSpec{Provider: "vultr", ID: host.ID, IP: host.IP, Endpoint: endpoint}
 	cfg.Pangolin = &config.PangolinCoords{Org: "freehold", Site: cfg.Name, Domain: worldDomain, DNSIP: host.IP}
 	// The edge's own hostname (pangolin.<world>) points at the VPS: its ACME
-	// cert issues there (HTTP-01) and Newt dials TLS through it.
-	if err := pointPangolinHost(cfg, "pangolin."+worldDomain, host.IP); err != nil {
-		fmt.Printf("  (the pangolin.<world> record could not be written: %v — the edge cert + the Newt TLS dial need it; write %s A %s by hand)\n", err, "pangolin."+worldDomain, host.IP)
-	}
+	// cert issues there (HTTP-01, on-demand) and Newt dials TLS through it.
+	// The CP owns the zone credential, so `freehold build` asserts the record
+	// (pangolinHostDNSEnsure) before the Newt stage — a box without a local
+	// zone cred still gets the record.
 	if err := cfg.Save(cfgPath); err != nil {
 		return fmt.Errorf("record the pangolin host: %w", err)
 	}
@@ -201,8 +204,9 @@ func run(cmd *cobra.Command, args []string) error {
                (sealed on the CP as secret "pangolin"; stored 0600 on the VPS)
 
   Now run `+"`freehold build`"+`: the coords carry the pangolin path and the build
-  tail asserts the tunnels (the CP's forward + the gateway's Newt). Exposed
-  apps then point at the VPS instead of at home.
+  tail asserts the edge hostname record, the tunnels (the CP's forward + the
+  gateway's Newt), and the exposed apps' resources. Exposed apps then point
+  at the VPS instead of at home.
 `, host.ID, region, plan, worldDomain, worldDomain, keyLine)
 	return nil
 }
@@ -379,32 +383,6 @@ func freeholdExec(cfgPath, target string, args ...string) (string, error) {
 	return string(out), err
 }
 
-// pointPangolinHost writes the edge's own hostname record
-// (pangolin.<world>) — its ACME cert issues on the VPS (HTTP-01) and Newt
-// dials TLS through it. The zone credential = the box's own sealed DNS copy
-// (the one the build's record management reads); a manual-DNS world returns
-// an error the caller surfaces as the by-hand instruction.
-func pointPangolinHost(cfg *config.Config, host, ip string) error {
-	cc := &certcred.Engine{Out: os.Stdout, Yes: true}
-	_, identSecret, _, err := cc.CertIdent()
-	if err != nil {
-		return err
-	}
-	open := func(sec, aad, blob []byte) ([]byte, error) { return crypto.Open(sec, aad, blob) }
-	provider, env, err := cert.LoadCreds(cc.CertCredPath("relay"), open, identSecret)
-	if err != nil {
-		return err
-	}
-	if provider == "manual" {
-		return fmt.Errorf("manual DNS mode")
-	}
-	mgr, err := dnsman.For(provider, env)
-	if err != nil {
-		return err
-	}
-	return mgr.UpsertA(host, ip)
-}
-
 func consoleLogin(cfg *config.Config) (*console.Client, error) {
 	secStr, err := oplogin.SecretHex()
 	if err != nil {
@@ -442,6 +420,41 @@ func init() {
 	pangolinCmd.Flags().String("email", "", "ACME contact email for the edge's certificates (required)")
 	pangolinCmd.Flags().String("region", "", "Vultr region (default "+vultr.DefaultRegion+")")
 	pangolinCmd.Flags().String("plan", "", "Vultr plan (default vc2-2c-4gb — the edge is light)")
+	pangolinCmd.Flags().Bool("destroy", false, "Destroy the recorded Pangolin VPS and clear the profile's pangolin record")
+	pangolinCmd.Flags().Bool("yes", false, "Skip the destroy confirmation")
+}
+
+// runDestroy tears the recorded VPS down (the bill stops now) and clears the
+// profile's pangolin block so the next build repoints the app A records at
+// the home proxy. The CP-side sealed "pangolin" secret and the tunnel unit
+// linger harmlessly; the edge hostname record is printed for the operator.
+func runDestroy(cfg *config.Config, cfgPath string, yes bool) error {
+	if cfg.PangolinHost == nil || cfg.PangolinHost.ID == "" {
+		fmt.Println("  no pangolin VPS on record — nothing to destroy")
+		return nil
+	}
+	p := cfg.PangolinHost
+	domain := ""
+	if cfg.Pangolin != nil {
+		domain = cfg.Pangolin.Domain
+	}
+	if err := uninstall.DestroyPangolinHost(cfg, yes, true); err != nil {
+		return err
+	}
+	cfg.PangolinHost = nil
+	cfg.Pangolin = nil
+	if err := cfg.Save(cfgPath); err != nil {
+		return fmt.Errorf("clear the pangolin record: %w", err)
+	}
+	fmt.Printf(`
+  cleared the profile's pangolin record (the instance %s is gone).
+  `+"`freehold build`"+` now repoints the exposed apps' A records at the home proxy.
+`, p.ID)
+	if domain != "" {
+		fmt.Printf("  remove the edge hostname record by hand if the build does not: pangolin.%s\n", domain)
+	}
+	fmt.Println("  the CP-side sealed \"pangolin\" secret and the pangolin-tunnel unit linger harmlessly.")
+	return nil
 }
 
 // Command returns the pangolin command for root registration.

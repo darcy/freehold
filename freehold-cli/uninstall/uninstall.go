@@ -75,7 +75,7 @@ var uninstallCmd = &cobra.Command{
 			} else {
 				fmt.Println("  no world to tear down (a half-installed host, or the runner is not serving) — destroying the instance directly; the API needs no host access")
 			}
-			if perr := destroyPangolinHost(cfg, yes, true); perr != nil {
+			if perr := DestroyPangolinHost(cfg, yes, true); perr != nil {
 				return perr
 			}
 			running, derr := destroyHostViaProvider(cfg, yes, true)
@@ -117,7 +117,7 @@ var uninstallCmd = &cobra.Command{
 			if err := runUninstallTransient(cfg, host, removeData, keepHostAccess); err != nil {
 				return err
 			}
-			if perr := destroyPangolinHost(cfg, yes, destroyHost); perr != nil {
+			if perr := DestroyPangolinHost(cfg, yes, destroyHost); perr != nil {
 				return perr
 			}
 			instanceRunning, derr := destroyHostViaProvider(cfg, yes, destroyHost)
@@ -136,7 +136,7 @@ var uninstallCmd = &cobra.Command{
 		if err := runUninstall(cfg, configPath, host, removeData, keepHostAccess); err != nil {
 			return err
 		}
-		if perr := destroyPangolinHost(cfg, yes, destroyHost); perr != nil {
+		if perr := DestroyPangolinHost(cfg, yes, destroyHost); perr != nil {
 			return perr
 		}
 		instanceRunning, derr := destroyHostViaProvider(cfg, yes, destroyHost)
@@ -201,11 +201,11 @@ func destroyHostViaProvider(cfg *config.Config, yes, destroy bool) (bool, error)
 	return false, nil
 }
 
-// destroyPangolinHost destroys the recorded Pangolin VPS — the same
+// DestroyPangolinHost destroys the recorded Pangolin VPS — the same
 // --destroy-host gate and the same confirm as the world's host (it is a
 // bill: nothing on it is durable plane; the edge's config dies with it and
 // a re-provision re-mints).
-func destroyPangolinHost(cfg *config.Config, yes, destroy bool) error {
+func DestroyPangolinHost(cfg *config.Config, yes, destroy bool) error {
 	if cfg.PangolinHost == nil || cfg.PangolinHost.ID == "" {
 		return nil // no pangolin VPS on record — nothing to destroy
 	}

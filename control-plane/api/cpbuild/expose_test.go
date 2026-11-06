@@ -733,9 +733,14 @@ func TestExposeRidesThePangolinPath(t *testing.T) {
 			t.Fatalf("pangolin call %d: got %v want %s", i, calls, w)
 		}
 	}
-	// The app's A record points at the VPS, not the proxy.
-	if !strings.Contains(strings.Join(*te.cfBodies, "\n"), "203.0.113.9") {
+	// The app's A record points at the VPS, not the proxy — and the edge's
+	// own hostname (pangolin.<world>) is asserted by the CP, before Newt dials.
+	all := strings.Join(*te.cfBodies, "\n")
+	if !strings.Contains(all, "203.0.113.9") {
 		t.Fatalf("the A record must ride the VPS: %v", *te.cfBodies)
+	}
+	if !strings.Contains(all, "pangolin.librem.example.test") {
+		t.Fatalf("the edge hostname record must be asserted CP-side: %v", *te.cfBodies)
 	}
 	// The local edge still converges (the LAN surface).
 	if len(te.cmds) == 0 || !strings.Contains(strings.Join(te.cmds, "\n"), "kubectl") {

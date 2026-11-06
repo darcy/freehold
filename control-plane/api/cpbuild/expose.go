@@ -493,6 +493,9 @@ func (s *Spec) pangolinEnsure(rec agenttools.AppRecord) error {
 	if rec.Visibility == agenttools.VisibilityLAN {
 		return nil
 	}
+	if err := s.pangolinHostDNSEnsure(); err != nil {
+		return err
+	}
 	base, key, endpoint, err := s.pangolinCreds()
 	if err != nil {
 		return err
@@ -708,6 +711,31 @@ func (s *Spec) newtIdentity() (struct{ ID, Secret string }, error) {
 		return out, fmt.Errorf("the Newt identity record lacks NEWT_ID/NEWT_SECRET")
 	}
 	return out, nil
+}
+
+// pangolinHostDNSEnsure points the edge's own hostname (pangolin.<world>)
+// at the VPS: its ACME cert issues there (HTTP-01, on-demand) and Newt dials
+// TLS through it. The CP owns the zone credential — a box installed without
+// one has no local copy, so the record is asserted here, BEFORE the Newt
+// stage dials. The dev/test posture (no DNSIP) moves no public DNS.
+func (s *Spec) pangolinHostDNSEnsure() error {
+	p := s.Pangolin
+	if p == nil || p.Domain == "" || p.DNSIP == "" {
+		return nil
+	}
+	host := "pangolin." + p.Domain
+	provider, env, err := s.dnsCredFromStore("relay")
+	if err != nil {
+		return fmt.Errorf("pangolin host dns %s: %w", host, err)
+	}
+	mgr, err := dnsman.For(provider, env)
+	if err != nil {
+		return fmt.Errorf("pangolin host dns %s: %w", host, err)
+	}
+	if err := mgr.UpsertA(host, p.DNSIP); err != nil {
+		return fmt.Errorf("pangolin host dns %s: %w", host, err)
+	}
+	return nil
 }
 
 // pangolinRemove takes one app off the Pangolin public path: resolve the
