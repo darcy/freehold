@@ -41,7 +41,7 @@ func PangolinInstallScript(worldDomain, email string) string {
 	traefik := pangolinTraefikConf(email)
 	dynamic := pangolinDynamicConf()
 	return fmt.Sprintf(`set -e
-if [ -f /srv/pangolin/root-key.env ] && docker ps --format "{{.Names}}" 2>/dev/null | grep -q pangolin && curl -sf http://localhost:3003/v1/org/freehold -H "Authorization: Bearer $(cat /srv/pangolin/root-key.env)" >/dev/null 2>&1; then
+if [ -f /srv/pangolin/root-key.env ] && docker ps --format "{{.Names}}" 2>/dev/null | grep -q pangolin && curl -sf http://localhost:3003/v1/org/freehold/sites -H "Authorization: Bearer $(cat /srv/pangolin/root-key.env)" >/dev/null 2>&1; then
   echo "PANGOLIN_ROOT_KEY=$(cat /srv/pangolin/root-key.env)"
   echo pangolin-install-ok
   exit 0
@@ -91,8 +91,6 @@ KEY_JSON=$(curl -s -b /srv/pangolin/admin.cookies -X PUT http://localhost:3000/a
 KEY_ID=$(echo "$KEY_JSON" | tr ",{}" "\n" | grep apiKeyId | sed "s/.*://; s/\"//g")
 KEY_SECRET=$(echo "$KEY_JSON" | tr ",{}" "\n" | grep -w apiKey | sed "s/.*://; s/\"//g")
 if [ -z "$KEY_ID" ] || [ -z "$KEY_SECRET" ]; then echo "PANGOLIN_KEY_JSON=$KEY_JSON"; echo pangolin-key-mint-failed; exit 1; fi
-printf "%%s\n" "$KEY_ID.$KEY_SECRET" > /srv/pangolin/root-key.env
-chmod 600 /srv/pangolin/root-key.env
 ORG_JSON=$(curl -s -X PUT http://localhost:3003/v1/org -H "Authorization: Bearer $KEY_ID.$KEY_SECRET" -H "Content-Type: application/json" -d "{\"orgId\":\"freehold\",\"name\":\"freehold\",\"subnet\":\"100.90.0.0/16\",\"utilitySubnet\":\"100.91.0.0/24\"}")
 if ! echo "$ORG_JSON" | grep -q orgId; then
   echo "$ORG_JSON" | grep -qi "exist" || { echo "PANGOLIN_ORG_JSON=$ORG_JSON"; echo pangolin-org-create-failed; exit 1; }
