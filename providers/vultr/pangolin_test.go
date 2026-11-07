@@ -20,7 +20,7 @@ import (
 // the whole thing carries no apostrophes (the script rides a single-quoted
 // sh -c).
 func TestPangolinInstallScriptRendersTheWorld(t *testing.T) {
-	script := PangolinInstallScript("librem.example.test", "darcy@freehold.technology")
+	script := PangolinInstallScript("librem.example.test", "cp.librem.example.test", "darcy@freehold.technology")
 	if !strings.Contains(script, `base_domain: "librem.example.test"`) {
 		t.Fatal("the stack must serve the world domain as its base")
 	}
@@ -102,7 +102,7 @@ func TestPreparePangolinMintsAndInstalls(t *testing.T) {
 	}
 	t.Cleanup(func() { clientForBuilder = defaultClientFor })
 
-	host, err := PreparePangolin(context.Background(), s, "", "librem.example.test", "darcy@freehold.technology")
+	host, err := PreparePangolin(context.Background(), s, "", "librem.example.test", "cp.librem.example.test", "darcy@freehold.technology")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -127,7 +127,7 @@ func TestPreparePangolinMintsAndInstalls(t *testing.T) {
 	// re-ensure the PVE payload's Prepare does.
 	created = false
 	installed = nil
-	host, err = PreparePangolin(context.Background(), s, "pang1", "librem.example.test", "darcy@freehold.technology")
+	host, err = PreparePangolin(context.Background(), s, "pang1", "librem.example.test", "cp.librem.example.test", "darcy@freehold.technology")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -150,7 +150,7 @@ func TestPreparePangolinMintsAndInstalls(t *testing.T) {
 // the rendered script (the heredocs filled) must parse under sh -n — the
 // mint is a ROOT script on a billed host; a parse error strands everything.
 func TestPangolinInstallScriptParsesClean(t *testing.T) {
-	script := PangolinInstallScript("librem.example.test", "darcy@freehold.technology")
+	script := PangolinInstallScript("librem.example.test", "cp.librem.example.test", "darcy@freehold.technology")
 	f := filepath.Join(t.TempDir(), "install.sh")
 	if err := os.WriteFile(f, []byte(script), 0o644); err != nil {
 		t.Fatal(err)

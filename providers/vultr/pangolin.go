@@ -35,8 +35,8 @@ import (
 // re-printing the persisted key. The admin credentials persist root-only
 // (/srv/pangolin/admin.env), so a lost key is recoverable: the re-run's
 // bootstrap re-logs in with the persisted admin and mints a fresh key.
-func PangolinInstallScript(worldDomain, email string) string {
-	compose := pangolinCompose(worldDomain, email)
+func PangolinInstallScript(worldDomain, cpHost, email string) string {
+	compose := pangolinCompose(worldDomain, cpHost, email)
 	conf := pangolinConfig(worldDomain)
 	traefik := pangolinTraefikConf(email)
 	dynamic := pangolinDynamicConf(worldDomain)
@@ -131,7 +131,7 @@ echo pangolin-install-ok
 // stack serves (the world's own domain — the app siblings ride it); email
 // is the ACME contact. The root integration key prints ONCE on the
 // session's output.
-func PreparePangolin(ctx context.Context, s *provisioning.HostSession, existingID, worldDomain, email string) (*provisioning.Host, error) {
+func PreparePangolin(ctx context.Context, s *provisioning.HostSession, existingID, worldDomain, cpHost, email string) (*provisioning.Host, error) {
 	if s.ExecOnHost == nil {
 		return nil, fmt.Errorf("the vultr provider needs the session's host transport (ExecOnHost)")
 	}
@@ -166,7 +166,7 @@ func PreparePangolin(ctx context.Context, s *provisioning.HostSession, existingI
 	if err := waitSSH(ctx, s, sshdWaitTimeout); err != nil {
 		return nil, fmt.Errorf("instance %s: %w", hostID, err)
 	}
-	if err := s.ExecOnHost(PangolinInstallScript(worldDomain, email), 1800); err != nil {
+	if err := s.ExecOnHost(PangolinInstallScript(worldDomain, cpHost, email), 1800); err != nil {
 		return nil, fmt.Errorf("pangolin install on instance %s: %w", hostID, err)
 	}
 	return &provisioning.Host{ID: hostID, IP: hostIP}, nil
@@ -181,8 +181,8 @@ const pangolinGerbilVersion = "1.6.0"
 // the instance's NIC (the public path): web (traefik), the Newt WireGuard
 // listener, the external/integration API ports (the world's CP dials the
 // integration one), and the internal API for the bootstrap curls.
-func pangolinCompose(worldDomain, email string) string {
-	return `name: pangolin
+func pangolinCompose(worldDomain, cpHost, email string) string {
+	return fmt.Sprintf(`name: pangolin
 services:
   pangolin:
     image: fosrl/pangolin:1.24.0
@@ -192,6 +192,13 @@ services:
       - "127.0.0.1:3000:3000"
       - "127.0.0.1:3001:3001"
       - "127.0.0.1:3003:3003"
+    # The server-side OIDC token exchange calls the CP public URL back. A
+    # VPS cannot reach its own public IP (no hairpin NAT), so resolve the CP
+    # host to the host gateway: the request enters Traefik, matches the CP
+    # router, and reaches the CP through the Newt tunnel - with the right
+    # Host (the router) and the issued cert (the client SNI).
+    extra_hosts:
+      - "%s:host-gateway"
     volumes:
       - ./config:/app/config
     healthcheck:
@@ -233,7 +240,7 @@ services:
     volumes:
       - ./config/traefik:/etc/traefik:ro
       - ./config/letsencrypt:/letsencrypt
-`
+`, cpHost)
 }
 
 // pangolinConfig renders the stack's config.yml: the world domain is the

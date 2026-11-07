@@ -122,7 +122,7 @@ func run(cmd *cobra.Command, args []string) error {
 	// A mint + an install takes minutes.
 	ctx, cancel := context.WithTimeout(context.Background(), 30*60*time.Second)
 	defer cancel()
-	host, err := vultr.PreparePangolin(ctx, session, existingID, worldDomain, email)
+	host, err := vultr.PreparePangolin(ctx, session, existingID, worldDomain, cfg.CPHost(), email)
 	if err != nil {
 		return err
 	}
