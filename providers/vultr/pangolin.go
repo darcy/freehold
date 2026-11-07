@@ -42,6 +42,10 @@ func PangolinInstallScript(worldDomain, cpHost, email string) string {
 	dynamic := pangolinDynamicConf(worldDomain)
 	return fmt.Sprintf(`set -e
 mkdir -p /srv/pangolin/config/traefik /srv/pangolin/config/letsencrypt
+# Capture the static renders before rewriting: a re-run whose payload changed
+# reconciles the stack even when the bootstrap short-circuits (a compose edit
+# needs a recreate; the static Traefik config needs a restart).
+OLD_TRK=$(md5sum /srv/pangolin/config/traefik/traefik_config.yml 2>/dev/null | cut -d" " -f1)
 # The static renders carry Traefik rule BACKTICKS: a QUOTED heredoc keeps the
 # shell from command-substituting them (an unquoted one ran the host as a
 # command and emitted Host() — no router, no cert, no tunnel). Re-rendered
@@ -52,6 +56,7 @@ cat > /srv/pangolin/config/traefik/traefik_config.yml <<"TRK"
 %sTRK
 cat > /srv/pangolin/config/traefik/dynamic_config.yml <<"DYN"
 %sDYN
+NEW_TRK=$(md5sum /srv/pangolin/config/traefik/traefik_config.yml 2>/dev/null | cut -d" " -f1)
 if [ -f /srv/pangolin/root-key.env ] && docker ps --format "{{.Names}}" 2>/dev/null | grep -q pangolin && curl -sf http://localhost:3003/v1/org/freehold/sites -H "Authorization: Bearer $(cat /srv/pangolin/root-key.env)" >/dev/null 2>&1; then
   # Re-assert the key actions: the payload grant list grows over time, and
   # a re-run must heal an existing instance (a key without the SSO/policy
@@ -62,6 +67,8 @@ if [ -f /srv/pangolin/root-key.env ] && docker ps --format "{{.Names}}" 2>/dev/n
     echo "$LOGIN" | grep -q "\"success\":true" && KEY_ID=$(cut -d. -f1 /srv/pangolin/root-key.env) && curl -sf -b /srv/pangolin/admin.cookies -X POST http://localhost:3000/api/v1/api-key/$KEY_ID/actions -H "Content-Type: application/json" -H "X-CSRF-Token: x-csrf-protection" -d "{\"actionIds\":[\"createOrg\",\"createSite\",\"deleteSite\",\"createResource\",\"deleteResource\",\"createTarget\",\"deleteTarget\",\"getSite\",\"getResource\",\"listSites\",\"listResources\",\"listTargets\",\"getDomain\",\"listOrgDomains\",\"generateAccessToken\",\"updateResource\",\"createRole\",\"listRoles\",\"createIdp\",\"createIdpOrg\",\"updateIdpOrg\",\"setResourcePolicyUsers\",\"setResourcePolicyRoles\",\"createResourceRule\",\"listResourceRules\"]}" >/dev/null 2>&1 || true
     rm -f /srv/pangolin/admin.cookies
   fi
+  cd /srv/pangolin && docker compose up -d 2>/dev/null || docker-compose up -d 2>/dev/null || true
+  if [ "$OLD_TRK" != "$NEW_TRK" ]; then docker restart traefik >/dev/null 2>&1 || true; fi
   echo "PANGOLIN_ROOT_KEY=$(cat /srv/pangolin/root-key.env)"
   echo pangolin-install-ok
   exit 0
