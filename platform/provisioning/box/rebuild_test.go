@@ -143,8 +143,9 @@ func TestMergeKeepsDnsAndLitellm(t *testing.T) {
 		// The operator's edge shape: world_domain + [edge.apps] are SOURCE —
 		// the merge must carry them or every build/update re-rendered the
 		// wrong world shape and stripped the riders' vhosts (the casaq strip).
-		WorldDomain: "casaquerencia.net",
-		Pangolin:    &config.PangolinCoords{Domain: "example.test"},
+		WorldDomain:  "casaquerencia.net",
+		Pangolin:     &config.PangolinCoords{Domain: "example.test"},
+		PangolinHost: &config.PangolinHostSpec{Provider: "vultr", ID: "inst-1", IP: "203.0.113.9"},
 		Edge: config.EdgeSpec{Apps: map[string]config.EdgeApp{
 			"browns": {ExemptPaths: []string{"/api/*"}, ExemptBearer: true},
 		}},
@@ -168,6 +169,11 @@ func TestMergeKeepsDnsAndLitellm(t *testing.T) {
 	}
 	if got.Pangolin == nil || got.Pangolin.Domain != "example.test" {
 		t.Errorf("pangolin dropped by merge: %+v", got.Pangolin)
+	}
+	// The VPS handle is the bill's record: a build that drops it orphans a
+	// live instance (the next mint creates a second one; uninstall loses it).
+	if got.PangolinHost == nil || got.PangolinHost.ID != "inst-1" {
+		t.Errorf("pangolin host handle dropped by merge: %+v", got.PangolinHost)
 	}
 }
 

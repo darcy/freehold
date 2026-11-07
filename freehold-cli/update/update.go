@@ -9,6 +9,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -162,7 +163,7 @@ func run(ctx context.Context, o options) error {
 	// grants re-assert, the pods re-apply, and the world-build's own tail runs
 	// the pending migrations.
 	fmt.Println("→ reconciling the world (doors re-stage, migrations run in the build tail)")
-	if err := reconcileWorld(cfg); err != nil {
+	if err := reconcileWorld(cfg, json.RawMessage(eng.WorldConfigJSON())); err != nil {
 		return fmt.Errorf("world reconcile failed (the deploy landed; run `freehold build` then `freehold update` to finish): %w", err)
 	}
 
@@ -321,7 +322,7 @@ func (t hostTransport) Upload(string, string, uint64) (uint64, error) {
 // `freehold build` uses): the CP re-runs its build stages through its
 // co-located runner — the capability doors re-stage, grants re-assert, the
 // agent pods re-apply.
-func reconcileWorld(cfg *config.Config) error {
+func reconcileWorld(cfg *config.Config, coords json.RawMessage) error {
 	secStr, err := oplogin.SecretHex()
 	if err != nil {
 		return fmt.Errorf("no operator identity: %v", err)
@@ -335,7 +336,7 @@ func reconcileWorld(cfg *config.Config) error {
 	if err != nil {
 		return fmt.Errorf("console login at %s: %v", loginURL, err)
 	}
-	res, err := c.WorldBuild()
+	res, err := c.WorldBuild(coords)
 	if err != nil {
 		return fmt.Errorf("world_build (console /api/world-build): %v", err)
 	}

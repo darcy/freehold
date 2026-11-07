@@ -79,8 +79,8 @@ func TestResolveTarget(t *testing.T) {
 		{"relay", "192.168.30.230"},
 		{"cp", "192.168.30.214"},
 		{"proxy", "192.168.30.7"},
-		{"k3s", ""},       // k3s sits behind the proxy; no own record
-		{"bogus", ""},     // unknown role => no target
+		{"k3s", ""},   // k3s sits behind the proxy; no own record
+		{"bogus", ""}, // unknown role => no target
 		{"unknown", ""},
 	}
 	for _, c := range cases {

@@ -7,11 +7,14 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
+	"freehold/contract/config"
 	"freehold/contract/crypto"
 	"freehold/control-plane/api/agenttools"
+	"freehold/control-plane/api/cpbuild"
 )
 
 // loginWorldSession drives the challenge/login dance against s and returns the
@@ -146,5 +149,41 @@ func TestWorldMigrateProxy(t *testing.T) {
 	}
 	if err := json.Unmarshal(rec.Body.Bytes(), &v); err != nil || v.Report != "001-ok" {
 		t.Fatalf("world-migrate report: %q err=%v", rec.Body.String(), err)
+	}
+}
+
+// TestApplyBuildCoordsReseatsAndPreservesRuntime: the box's shipped coords
+// re-seat the build executor (an explicit pangolin clear included) while the
+// console's own state dir + agent-tools bindings + serve-flag relay overrides
+// stay (they belong to this process, not the box).
+func TestApplyBuildCoordsReseatsAndPreservesRuntime(t *testing.T) {
+	base := cpbuild.NewSpec(cpbuild.Coords{
+		Name: "librem", RelayHost: "relay.example", RelayIP: "192.168.30.10",
+		RelayURL: "http://relay.example:3000", RelayAuthURL: "https://relay.example",
+		CpHost: "cp.example", CpIP: "192.168.30.11", ProxyIP: "192.168.30.8",
+		Pangolin: &config.PangolinCoords{Org: "freehold", Site: "librem", Domain: "librem.example.test", DNSIP: "203.0.113.9"},
+	}, make([]byte, 32), "aud")
+	base.StateDir = "/srv/data/cp/control-plane"
+	base.AgentIdentityDir = "/srv/data/cp/agent-tools"
+	apps := &agenttools.AppsStore{}
+	base.Apps = apps
+	s := &Server{StateDir: "/srv/data/cp/control-plane", Builder: base}
+
+	body := `{"coords":{"name":"librem","relay_host":"relay.example","cp_host":"cp.example","proxy_ip":"192.168.30.9","pangolin":null}}`
+	r := httptest.NewRequest(http.MethodPost, "/api/world-build", strings.NewReader(body))
+	if err := s.applyBuildCoords(r); err != nil {
+		t.Fatalf("apply: %v", err)
+	}
+	if base.ProxyIP != "192.168.30.9" {
+		t.Fatalf("coords not applied: proxy %q", base.ProxyIP)
+	}
+	if base.Pangolin != nil {
+		t.Fatalf("an explicit pangolin clear must stick: %+v", base.Pangolin)
+	}
+	if base.StateDir != "/srv/data/cp/control-plane" || base.AgentIdentityDir != "/srv/data/cp/agent-tools" || base.Apps != apps {
+		t.Fatal("the console's runtime bindings must survive the apply")
+	}
+	if base.RelayURL != "http://relay.example:3000" || base.RelayAuthURL != "https://relay.example" {
+		t.Fatalf("the serve-flag relay overrides must survive: %+v", base)
 	}
 }

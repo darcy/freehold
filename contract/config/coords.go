@@ -123,6 +123,17 @@ type Coords struct {
 	Pangolin *PangolinCoords `json:"pangolin,omitempty"`
 }
 
+// PangolinHostSpec records the created Pangolin VPS — the handle the
+// uninstall's --destroy-host destroys and the door page the operator can
+// find it by. The integration origin rides here (non-secret); the root key
+// never lands in the profile (it seals to the console identity).
+type PangolinHostSpec struct {
+	Provider string `toml:"provider,omitempty"`
+	ID       string `toml:"id,omitempty"`
+	IP       string `toml:"ip,omitempty"`
+	Endpoint string `toml:"endpoint,omitempty"`
+}
+
 // PangolinCoords carries the world's Pangolin public path SHAPE — the
 // non-secret parts only (coords ride the console's argv and the update
 // flow's world-config scrape; NO credential lives here). The instance's
@@ -136,4 +147,14 @@ type PangolinCoords struct {
 	Site   string `json:"site"`   // the newt site's name (the gateway's dial-out identity)
 	Domain string `json:"domain"` // the base domain Pangolin serves (the world domain)
 	DNSIP  string `json:"dns_ip,omitempty"`
+	// Apps is the operator's public-path allowlist: only these registry app
+	// names ride the Pangolin tunnel (empty = every registry app, the
+	// pre-allowlist behaviour). An app not listed keeps its A record on the
+	// proxy and no resource — "we have a public path" is not "expose
+	// everything".
+	Apps []string `json:"apps,omitempty"`
+	// Relay exposes the relay community host through the public path, UNGATED:
+	// Buzz clients authenticate with their own Nostr keys and cannot do a
+	// browser SSO, so SSO on the relay host would break every client.
+	Relay bool `json:"relay,omitempty"`
 }

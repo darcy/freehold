@@ -116,18 +116,43 @@ The gateway has TWO shapes, one per substrate:
     The verbs drive Pangolin's REST integration server (verified against 1.24.0 — Pangolin
     generates its Traefik config from its own DB, so a file-provider door would fight it):
     a Bearer root key sealed to the console identity (`world-secrets/pangolin.json`)
-    calls org/site/resource/target — the resource is created **SSO-gated** (nothing it
-    fronts is publicly open by default; the tunnel is proven with a resource access
-    token via the `p_token` param) and the target points at the app's freehold-subnet
-    address, reachable from the gateway where Newt dials out. A created site's one-time
-    Newt secret seals to the console identity immediately (`pangolin-newt.json`), and the
-    gateway's Newt client is re-asserted by every build — the binary ensured (downloaded
-    on the host, pushed to the guest; a hosted gateway installs bare), the identity and
-    the instance endpoint riding a root-only env file, the unit restarted so a re-minted
-    secret lands live. `unexpose` removes the resource; a failed removal names the
-    recovery (re-expose then unexpose). The coords carry no credential. Still open on
-    this path: the freehold member gate's exact shape (today Pangolin's own SSO gates
-    it), and the pangolin-compose VPS payload through the created-host lifecycle.
+    calls org/site/resource/target. A created site's one-time Newt secret seals to the
+    console identity immediately (`pangolin-newt.json`), and the gateway's Newt client is
+    re-asserted by every build — the binary ensured (downloaded on the host, pushed to
+    the guest; a hosted gateway installs bare), the identity and the instance endpoint
+    riding a root-only env file, the unit restarted so a re-minted secret lands live.
+    `unexpose` removes the resource; a failed removal names the recovery (re-expose then
+    unexpose). The coords carry no credential. The `[pangolin]` block also carries the
+    operator's allowlist (`apps`: only those registry apps ride the tunnel; empty = all)
+    and `relay` (expose the relay host, ungated) — "we have a public path" is not
+    "expose everything".
+    The VPS itself is provisioned through the created-host lifecycle
+    (`freehold pangolin` — the Vultr mint, the pangolin-compose payload
+    installed instead of PVE-on-Debian): the admin + the root integration key
+    bootstrap on the instance at install, the key prints ONCE and seals to
+    the console identity (the CP secret `pangolin`), and the profile records
+    the bill (`[pangolin_host]`) that `freehold uninstall --destroy-host`
+    destroys; `freehold pangolin --destroy` tears it down without the world.
+
+    The gate on this path is **Pangolin at the edge, freehold at home** (model D). The
+    CP is an OIDC identity provider: `/api/oidc/authorize` reuses the member NIP-07 login
+    (only relay members get a code), `/api/oidc/token` exchanges it for a signed
+    `id_token` whose `sub` is the member's pubkey — Pangolin auto-provisions a shadow
+    user per key into a `family` org role (no passwords; a global OIDC IdP, the Community
+    edition's supported shape) and gates each resource on it (`skipToIdpId` = the CP's
+    IdP). Native clients (navidrome `/rest`, browns `/api`) cannot do a browser SSO: the
+    operator's `[edge.apps]` exempt paths become Pangolin `ACCEPT` (bypass) rules and
+    reach the app's own auth. The resource's target is the HOME EDGE (`https`, SNI = the
+    app's vhost), not the raw app — so the member gate runs: the vhost's `forward_auth`
+    carries the edge's shared token + the original client address, and `/auth/verify`
+    trusts Pangolin's `Remote-User` pubkey only from the gateway (the only client that
+    reaches the vhost through the tunnel), re-checking the app's relay channel per
+    request — removal revokes immediately, without a session expiry. A LAN client
+    reaches the vhost directly and keeps the cookie gate. The relay host rides the
+    tunnel UNGATED (Buzz clients authenticate with their own keys; a browser SSO would
+    break every websocket). The `oidc` client record is sealed to the console identity
+    (`world-secrets/oidc.json`); the IdP's callback is the one redirect the authorize
+    endpoint accepts.
 *   **Groups are relay channels.** Every exposed app rides a relay channel as its ACL —
     the record stores the channel ID (names change; the display layer resolves the current
     name), `#general` is the everyone-channel and the default, and the expose validates
@@ -152,8 +177,8 @@ The gateway has TWO shapes, one per substrate:
     to /etc/freehold/dnsmasq.addn-hosts (world-readable, outside the
     dnsmasq conf-dir — Debian's CONFIG_DIR parses every file in
     /etc/dnsmasq.d as config, and a hosts-format file there keeps dnsmasq
-    from ever starting) so dnsmasq never depends on the 0700 state dir's
-    perms.
+    from ever starting) so dnsmasq never depends on the traverse-only (0711)
+    state dir's perms.
 *   **Network's runners:** the PVE host (shared), a `caddy`-scoped kube door, the resolver on
     the CP guest, a Cloudflare door per DNS zone, plus any door the CPA provisions on the fly
     (e.g. a UniFi controller).

@@ -1482,6 +1482,10 @@ func mergeFromAnswers(ans *config.Config, prev *config.Config) *config.Config {
 	cfg.WorldDomain = prev.WorldDomain
 	cfg.Edge = prev.Edge
 	cfg.Pangolin = prev.Pangolin
+	// The Pangolin VPS handle is the BILL's record: dropping it on a build
+	// orphans a live, billing instance (the next `freehold pangolin` mints a
+	// second one beside it, and uninstall can no longer destroy it).
+	cfg.PangolinHost = prev.PangolinHost
 	// The post-world recorder (recordPostWorld) persists the coords + sections
 	// world_build established to disk; finalSave rebuilds from answers and must
 	// keep them (like Plane) or it would silently erase them on every run —
@@ -2655,6 +2659,20 @@ func cpaNameOrDefault(name string) string {
 		return "freehold"
 	}
 	return name
+}
+
+// WorldConfigJSON renders THIS box's recorded world coords for the console's
+// build executor. Empty when the box has no provisioning coords (a login-only
+// box): the CP then keeps its deployed config. The provisioning box ships
+// this on every build, so the PROFILE stays the source of truth for
+// operator-authored coords (the pangolin block or its clear, edge riders, an
+// allowlist) without a redeploy.
+func (e *Engine) WorldConfigJSON() string {
+	cfg, err := config.Load(e.F.ConfigPath)
+	if err != nil || cfg == nil {
+		return ""
+	}
+	return e.worldConfigJSON(cfg)
 }
 
 // worldConfigJSON renders the console's build-executor coords (cpbuild.Coords)

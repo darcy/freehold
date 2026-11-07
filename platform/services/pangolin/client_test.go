@@ -27,7 +27,7 @@ func fakePangolin(t *testing.T) (*Client, *[]string) {
 		case "/v1/org":
 			body += `{"orgId":"freehold","name":"freehold","subnet":"100.90.0.0/16"}`
 		case "/v1/org/freehold/site":
-			body += `{"siteId":1,"name":"librem","type":"newt","newtId":"noo1","newtSecret":"sek","address":"100.90.0.0/16","online":false}`
+			body += `{"siteId":1,"name":"librem","type":"newt","newtId":"noo1","secret":"sek","address":"100.90.0.0/16","online":false}`
 		case "/v1/org/freehold/resource":
 			body += `{"resourceId":1,"name":"litellm","subdomain":"litellm","fullDomain":"litellm.pangolin.local","domainId":"domain1","ssl":true,"enabled":true}`
 		case "/v1/resource/1/target":
@@ -75,7 +75,7 @@ func TestClientDrivesTheVerifiedShapes(t *testing.T) {
 	if r.FullDomain != "litellm.pangolin.local" {
 		t.Fatalf("the resource must resolve the fqdn: %+v", r)
 	}
-	if err := c.SetTarget(ctx, r.ResourceID, s.SiteID, "10.78.0.13", 31400); err != nil {
+	if err := c.SetTarget(ctx, r.ResourceID, s.SiteID, "10.78.0.13", 31400, "http"); err != nil {
 		t.Fatal(err)
 	}
 	if err := c.DeleteResource(ctx, r.ResourceID); err != nil {

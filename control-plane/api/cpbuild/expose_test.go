@@ -167,6 +167,7 @@ type testExposer struct {
 	cfWrites  *int      // the fake CF's record-write counter
 	cfDeletes *int      // the fake CF's record-delete counter (the shape-migration test)
 	cfBodies  *[]string // the fake CF's write bodies (the A-record content)
+	sawTunnel *bool     // the exec hook sets it when the tunnel unit asserts
 }
 
 func newTestExposer(t *testing.T, channels []relayChannel, members []memberEvent) *testExposer {
@@ -253,9 +254,13 @@ func newTestExposer(t *testing.T, channels []relayChannel, members []memberEvent
 	if err != nil {
 		t.Fatal(err)
 	}
-	te := &testExposer{spec: spec, apps: apps, bodies: map[string]string{}, cfWrites: &cfWrites, cfDeletes: &cfDeletes, cfBodies: cfBodiesPtr}
+	var sawTunnel bool
+	te := &testExposer{spec: spec, apps: apps, bodies: map[string]string{}, cfWrites: &cfWrites, cfDeletes: &cfDeletes, cfBodies: cfBodiesPtr, sawTunnel: &sawTunnel}
 	spec.Apps = apps
 	spec.execHook = func(cmd string, _ uint64, _ ...string) (string, error) {
+		if strings.Contains(cmd, "pangolin-tunnel.service") {
+			*te.sawTunnel = true
+		}
 		te.cmds = append(te.cmds, cmd)
 		if strings.Contains(cmd, "fullchain.pem") {
 			return base64.StdEncoding.EncodeToString(fc), nil
@@ -650,7 +655,16 @@ func TestExposeRidesThePangolinPath(t *testing.T) {
 	family := "3fa85f64-5717-4562-b3fc-2c963f66afa6"
 	homelab := strings.Repeat("b", 64)
 	var calls []string
+	var te *testExposer // the handler runs after the fixture exists
 	pang := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// BEHAVIORAL ordering pin: the client's base is the CP's loopback —
+		// the forward unit is what makes it mean the VPS. A dial before the
+		// tunnel asserted = the deadlock the ordering prevents.
+		if te == nil || te.sawTunnel == nil || !*te.sawTunnel {
+			w.WriteHeader(500)
+			_, _ = w.Write([]byte(`{"success":false,"error":true,"message":"the tunnel must assert before any dial"}`))
+			return
+		}
 		calls = append(calls, r.Method+" "+r.URL.Path)
 		w.Header().Set("Content-Type", "application/json")
 		switch r.URL.Path {
@@ -662,6 +676,20 @@ func TestExposeRidesThePangolinPath(t *testing.T) {
 			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"resources":[]}}`))
 		case "/v1/org/freehold/resource":
 			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"resourceId":7,"name":"yuvomi","subdomain":"yuvomi","fullDomain":"yuvomi.librem.example.test","domainId":"domain1","ssl":true,"enabled":true}}`))
+		case "/v1/org/freehold/roles":
+			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"roles":[]}}`))
+		case "/v1/org/freehold/role":
+			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"roleId":5,"name":"family"}}`))
+		case "/v1/idp":
+			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"idps":[]}}`))
+		case "/v1/idp/oidc":
+			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"idpId":11,"redirectUrl":"https://pangolin.librem.example.test/auth/idp/11/oidc/callback"}}`))
+		case "/v1/idp/11/org/freehold":
+			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{}}`))
+		case "/v1/idp/11/oidc":
+			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{}}`))
+		case "/v1/resource-policy/7/access-control":
+			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{}}`))
 		case "/v1/resource/7":
 			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":null}`))
 		case "/v1/resource/7/targets":
@@ -675,7 +703,7 @@ func TestExposeRidesThePangolinPath(t *testing.T) {
 	}))
 	defer pang.Close()
 
-	te := newTestExposer(t, []relayChannel{{family, "family"}},
+	te = newTestExposer(t, []relayChannel{{family, "family"}},
 		[]memberEvent{{channelID: family, pubkey: homelab, kind: wire.PutUser, ts: 100}})
 	te.spec.Pangolin = &config.PangolinCoords{Org: "freehold", Site: "librem", Domain: "librem.example.test", DNSIP: "203.0.113.9"}
 	te.sealPangolinCreds(t, pang.URL, "yi5o.thesecret")
@@ -692,21 +720,51 @@ func TestExposeRidesThePangolinPath(t *testing.T) {
 	}
 	want := []string{
 		"GET /v1/org/freehold/sites",
+		// the world-level SSO stages: the family role, the CP's OIDC IdP, the
+		// org's auto-provision policy
+		"GET /v1/org/freehold/roles",
+		"PUT /v1/org/freehold/role",
+		"GET /v1/idp",
+		"PUT /v1/idp/oidc",
+		"POST /v1/idp/11/oidc", // re-assert the client pair (a re-adopt may differ)
+		"PUT /v1/idp/11/org/freehold",
 		"GET /v1/org/freehold/domains",
 		"GET /v1/org/freehold/resources",
 		"PUT /v1/org/freehold/resource",
 		"POST /v1/resource/7", // the sso gate — created resources are never open
+		"POST /v1/resource/7", // the upstream TLS SNI (the home edge's vhost)
+		"PUT /v1/resource-policy/7/access-control",
 		"GET /v1/resource/7/targets",
-		"PUT /v1/resource/7/target",
+		"PUT /v1/resource/7/target", // https to the home edge, not the raw app
+	}
+	// The ordering PROVEN behaviorally: the fake refused every pre-tunnel
+	// dial — a live expose here means the tunnel asserted first. The
+	// forward dials through the CP-minted key.
+	tunnelCmd := ""
+	for _, cmd := range te.cmds {
+		if strings.Contains(cmd, "pangolin-tunnel.service") {
+			tunnelCmd = cmd
+		}
+	}
+	if tunnelCmd == "" {
+		t.Fatalf("the CP tunnel stage must run on every pangolin ensure: %.400s", strings.Join(te.cmds, "\n"))
+	}
+	if !strings.Contains(tunnelCmd, "/srv/data/cp/pangolin-tunnel.key") {
+		t.Fatal("the tunnel's forward must dial through the CP-minted key")
 	}
 	for i, w := range want {
 		if len(calls) <= i || calls[i] != w {
 			t.Fatalf("pangolin call %d: got %v want %s", i, calls, w)
 		}
 	}
-	// The app's A record points at the VPS, not the proxy.
-	if !strings.Contains(strings.Join(*te.cfBodies, "\n"), "203.0.113.9") {
+	// The app's A record points at the VPS, not the proxy — and the edge's
+	// own hostname (pangolin.<world>) is asserted by the CP, before Newt dials.
+	all := strings.Join(*te.cfBodies, "\n")
+	if !strings.Contains(all, "203.0.113.9") {
 		t.Fatalf("the A record must ride the VPS: %v", *te.cfBodies)
+	}
+	if !strings.Contains(all, "pangolin.librem.example.test") {
+		t.Fatalf("the edge hostname record must be asserted CP-side: %v", *te.cfBodies)
 	}
 	// The local edge still converges (the LAN surface).
 	if len(te.cmds) == 0 || !strings.Contains(strings.Join(te.cmds, "\n"), "kubectl") {
@@ -731,8 +789,18 @@ func TestExposePangolinEmptyDNSKeepsTheProxyIP(t *testing.T) {
 			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"domains":[{"domainId":"domain1","baseDomain":"librem.example.test","verified":true}]}}`))
 		case "/v1/org/freehold/resources":
 			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"resources":[{"resourceId":9,"name":"yuvomi","subdomain":"yuvomi","fullDomain":"yuvomi.librem.example.test","domainId":"domain1"}]}}`))
+		case "/v1/org/freehold/roles":
+			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"roles":[{"roleId":5,"name":"family"}]}}`))
+		case "/v1/idp":
+			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"idps":[{"idpId":11,"name":"freehold","type":"oidc"}]}}`))
+		case "/v1/idp/11/org/freehold":
+			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{}}`))
+		case "/v1/idp/11/oidc":
+			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{}}`))
+		case "/v1/resource-policy/9/access-control":
+			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{}}`))
 		case "/v1/resource/9":
-			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":null}`)) // the sso re-assert
+			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":null}`)) // the sso re-assert / tls name
 		case "/v1/resource/9/targets":
 			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"targets":[]}}`))
 		case "/v1/resource/9/target":
@@ -811,7 +879,7 @@ func TestExposePangolinSealsTheNewtSecret(t *testing.T) {
 		case "/v1/org/freehold/sites":
 			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"sites":[]}}`))
 		case "/v1/org/freehold/site":
-			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"siteId":5,"name":"librem","type":"newt","newtId":"noo9","newtSecret":"one-time-sek","address":"100.90.0.0/16"}}`))
+			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"siteId":5,"name":"librem","type":"newt","newtId":"noo9","secret":"one-time-sek","address":"100.90.0.0/16"}}`))
 		case "/v1/org/freehold/domains":
 			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"domains":[{"domainId":"domain1","baseDomain":"librem.example.test","verified":true}]}}`))
 		case "/v1/org/freehold/resources":
@@ -1037,6 +1105,20 @@ func TestPangolinEnsureAssertsTheGatewayNewt(t *testing.T) {
 			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"resources":[]}}`))
 		case "/v1/org/freehold/resource":
 			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"resourceId":7,"name":"yuvomi","subdomain":"yuvomi","fullDomain":"yuvomi.librem.example.test","domainId":"domain1"}}`))
+		case "/v1/org/freehold/roles":
+			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"roles":[]}}`))
+		case "/v1/org/freehold/role":
+			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"roleId":5,"name":"family"}}`))
+		case "/v1/idp":
+			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"idps":[]}}`))
+		case "/v1/idp/oidc":
+			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"idpId":11,"redirectUrl":"https://pangolin.librem.example.test/auth/idp/11/oidc/callback"}}`))
+		case "/v1/idp/11/org/freehold":
+			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{}}`))
+		case "/v1/idp/11/oidc":
+			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{}}`))
+		case "/v1/resource-policy/7/access-control":
+			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{}}`))
 		case "/v1/resource/7":
 			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":null}`))
 		case "/v1/resource/7/targets":

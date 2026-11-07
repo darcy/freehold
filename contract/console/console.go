@@ -48,9 +48,9 @@ type Runner struct {
 	// relay-signed 39002 roster — what actually gates exec), "package" (the
 	// shipped fallback — the co-located runner's mode), "unavailable" (the
 	// read failed). Empty when no list was readable.
-	Grants      []string    `json:"grants"`
-	GrantsSource string       `json:"grants_source,omitempty"`
-	Readiness    interface{}  `json:"readiness,omitempty"`
+	Grants       []string    `json:"grants"`
+	GrantsSource string      `json:"grants_source,omitempty"`
+	Readiness    interface{} `json:"readiness,omitempty"`
 	// Colocated marks the CP's own co-located runner (the build/relay-admin
 	// hands on the CP guest) so clients can label it.
 	Colocated bool `json:"colocated,omitempty"`
@@ -536,9 +536,16 @@ type WorldBuildResult struct {
 // shared cpbuild engine through its co-located runner — the drive-through-CP
 // build a thin box uses. The build runs for minutes, so this switches to a
 // long client timeout.
-func (c *Client) WorldBuild() (*WorldBuildResult, error) {
+func (c *Client) WorldBuild(coords json.RawMessage) (*WorldBuildResult, error) {
 	c.hc = &http.Client{Timeout: 20 * time.Minute}
-	raw, err := c.request(http.MethodPost, "/api/world-build", nil)
+	var body interface{}
+	if len(coords) > 0 {
+		// The provisioning box's render is the source of truth: the CP
+		// re-seats its build executor on it before building (an explicit
+		// clear included). A login-only box ships nothing.
+		body = map[string]json.RawMessage{"coords": coords}
+	}
+	raw, err := c.request(http.MethodPost, "/api/world-build", body)
 	if err != nil {
 		return nil, err
 	}

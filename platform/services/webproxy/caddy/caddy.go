@@ -82,12 +82,18 @@ func RenderCaddyfile(relayHost, relayUpstream, pairUpstream, cpHost, cpUpstream,
 // rejects named matchers on forward_auth, so the dispatch shape is
 // `@gated not { … }` + paired handle blocks — test-proven.
 type AppVhost struct {
-	FQDN        string
-	Upstream    string
-	Slot        string
-	Gate        string
-	ExemptPaths []string
+	FQDN         string
+	Upstream     string
+	Slot         string
+	Gate         string
+	ExemptPaths  []string
 	ExemptBearer bool
+	// TunnelToken is the shared secret the edge stamps on the gate's
+	// forward_auth call; with it, the CP trusts the tunnel's Remote-User
+	// identity (the Pangolin SSO's member pubkey) when the original client is
+	// the gateway — the public path's per-request membership enforcement.
+	// Empty on a world with no public path (the cookie gate alone).
+	TunnelToken string
 }
 
 // RenderAppVhosts renders the apps' site blocks appended after the base
@@ -99,12 +105,19 @@ func RenderAppVhosts(apps []AppVhost) string {
 	sort.Slice(sorted, func(i, j int) bool { return sorted[i].FQDN < sorted[j].FQDN })
 	var b strings.Builder
 	for _, a := range sorted {
+		// The gate's forwarded headers: WHICH app + where to return a denied
+		// member; and, on the public path, the tunnel's identity assertion —
+		// the original client's address (the gateway for tunneled requests)
+		// and the shared token the CP verifies before trusting Remote-User.
+		gateHeaders := "      header_up X-Original-Host {host}\n      header_up X-Original-Uri {uri}\n"
+		plainGateHeaders := "    header_up X-Original-Host {host}\n    header_up X-Original-Uri {uri}\n"
+		if a.TunnelToken != "" {
+			gateHeaders += "      header_up X-Original-Client-IP {remote_host}\n      header_up X-Freehold-Tunnel-Token " + a.TunnelToken + "\n"
+			plainGateHeaders += "    header_up X-Original-Client-IP {remote_host}\n    header_up X-Freehold-Tunnel-Token " + a.TunnelToken + "\n"
+		}
 		b.WriteString("\n" + a.FQDN + " {\n")
 		b.WriteString("  tls /data/tls/" + a.Slot + "/fullchain.pem /data/tls/" + a.Slot + "/key.pem\n")
 		if a.Gate != "" {
-			// X-Original-Host/Uri: the gate reads WHICH app the request hit
-			// (and where to return the member after login) — explicit header_up
-			// beats betting on Caddy's default forwarded headers.
 			if len(a.ExemptPaths) > 0 || a.ExemptBearer {
 				b.WriteString("  @gated not {\n")
 				if len(a.ExemptPaths) > 0 {
@@ -116,15 +129,15 @@ func RenderAppVhosts(apps []AppVhost) string {
 				b.WriteString("  }\n")
 				b.WriteString("  handle @gated {\n")
 				b.WriteString("    forward_auth " + a.Gate + " {\n      uri /auth/verify\n")
-				b.WriteString("      header_up X-Original-Host {host}\n")
-				b.WriteString("      header_up X-Original-Uri {uri}\n    }\n")
+				b.WriteString(gateHeaders)
+				b.WriteString("    }\n")
 				b.WriteString("    reverse_proxy " + a.Upstream + "\n  }\n")
 				b.WriteString("  handle {\n")
 				b.WriteString("    reverse_proxy " + a.Upstream + "\n  }\n")
 			} else {
 				b.WriteString("  forward_auth " + a.Gate + " {\n    uri /auth/verify\n")
-				b.WriteString("    header_up X-Original-Host {host}\n")
-				b.WriteString("    header_up X-Original-Uri {uri}\n  }\n")
+				b.WriteString(plainGateHeaders)
+				b.WriteString("  }\n")
 				b.WriteString("  reverse_proxy " + a.Upstream + "\n")
 			}
 		} else {

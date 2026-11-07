@@ -64,6 +64,10 @@ type Config struct {
 	// set, exposed apps ride the Pangolin VPS's tunnel. The non-secret shape
 	// only — the instance address + root key seal to the console identity.
 	Pangolin *PangolinCoords `toml:"pangolin,omitempty"`
+	// PangolinHost records the CREATED Pangolin VPS (the bill uninstall
+	// destroys): the provider, the instance id, its address, and the
+	// integration origin. Empty = no pangolin host on record.
+	PangolinHost *PangolinHostSpec `toml:"pangolin_host,omitempty"`
 	// OperatorName is the operator's display name in Buzz (asked at install);
 	// published as the operator's kind:0 profile at build.
 	OperatorName string `toml:"operator_name,omitempty"`
@@ -108,6 +112,8 @@ func GatewayInternalIP(cidr string) string { return nthIP(cidr, 1) }
 // on the internal CIDR: relay .11, cp .12, k3s .13.
 func InternalIPFor(cidr, role string) string {
 	switch role {
+	case "gateway":
+		return nthIP(cidr, 1)
 	case "relay":
 		return nthIP(cidr, 11)
 	case "cp":
