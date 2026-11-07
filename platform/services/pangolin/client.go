@@ -376,6 +376,19 @@ func (c *Client) EnsureOIDCIDP(ctx context.Context, name, clientID, clientSecret
 	return id, redirect, true, cerr
 }
 
+// UpdateOIDCIDP re-asserts the IdP's client id/secret + endpoints. The CP
+// seals the client pair; if the console identity was re-minted (a re-adopt),
+// the sealed pair can differ from what the instance stored — the ensure
+// updates it so the token exchange keeps working.
+func (c *Client) UpdateOIDCIDP(ctx context.Context, idpID int, clientID, clientSecret, authURL, tokenURL string) error {
+	return c.do(ctx, http.MethodPost, fmt.Sprintf("/v1/idp/%d/oidc", idpID), map[string]interface{}{
+		"clientId": clientID, "clientSecret": clientSecret,
+		"authUrl": authURL, "tokenUrl": tokenURL,
+		"identifierPath": "sub", "namePath": "name",
+		"scopes": "openid profile email", "autoProvision": true,
+	}, nil)
+}
+
 // AssignIDPOrg links a global IdP to the org with its auto-provision role
 // mapping (a JMESPath expression; "'family'" maps every admitted key to the
 // family role). Idempotent (PUT).

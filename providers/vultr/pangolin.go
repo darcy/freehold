@@ -64,11 +64,18 @@ if [ -f /srv/pangolin/root-key.env ] && docker ps --format "{{.Names}}" 2>/dev/n
   if [ -f /srv/pangolin/admin.env ]; then
     . /srv/pangolin/admin.env
     LOGIN=$(curl -s -c /srv/pangolin/admin.cookies -X POST http://localhost:3000/api/v1/auth/login -H "Content-Type: application/json" -H "X-CSRF-Token: x-csrf-protection" -d "{\"email\":\"$ADMIN_EMAIL\",\"password\":\"$ADMIN_PW\"}")
-    echo "$LOGIN" | grep -q "\"success\":true" && KEY_ID=$(cut -d. -f1 /srv/pangolin/root-key.env) && curl -sf -b /srv/pangolin/admin.cookies -X POST http://localhost:3000/api/v1/api-key/$KEY_ID/actions -H "Content-Type: application/json" -H "X-CSRF-Token: x-csrf-protection" -d "{\"actionIds\":[\"createOrg\",\"createSite\",\"deleteSite\",\"createResource\",\"deleteResource\",\"createTarget\",\"deleteTarget\",\"getSite\",\"getResource\",\"listSites\",\"listResources\",\"listTargets\",\"getDomain\",\"listOrgDomains\",\"generateAccessToken\",\"updateResource\",\"createRole\",\"listRoles\",\"createIdp\",\"createIdpOrg\",\"updateIdpOrg\",\"setResourcePolicyUsers\",\"setResourcePolicyRoles\",\"createResourceRule\",\"listResourceRules\"]}" >/dev/null 2>&1 || true
+    echo "$LOGIN" | grep -q "\"success\":true" && KEY_ID=$(cut -d. -f1 /srv/pangolin/root-key.env) && curl -sf -b /srv/pangolin/admin.cookies -X POST http://localhost:3000/api/v1/api-key/$KEY_ID/actions -H "Content-Type: application/json" -H "X-CSRF-Token: x-csrf-protection" -d "{\"actionIds\":[\"createOrg\",\"createSite\",\"deleteSite\",\"createResource\",\"deleteResource\",\"createTarget\",\"deleteTarget\",\"getSite\",\"getResource\",\"listSites\",\"listResources\",\"listTargets\",\"getDomain\",\"listOrgDomains\",\"generateAccessToken\",\"updateResource\",\"createRole\",\"listRoles\",\"createIdp\",\"createIdpOrg\",\"updateIdpOrg\",\"updateIdp\",\"setResourcePolicyUsers\",\"setResourcePolicyRoles\",\"createResourceRule\",\"listResourceRules\"]}" >/dev/null 2>&1 || true
     rm -f /srv/pangolin/admin.cookies
   fi
   cd /srv/pangolin && docker compose up -d 2>/dev/null || docker-compose up -d 2>/dev/null || true
   if [ "$OLD_TRK" != "$NEW_TRK" ]; then docker restart traefik >/dev/null 2>&1 || true; fi
+  # The admin exists: close self-signup + org creation (the world users are
+  # auto-provisioned through the CP OIDC IdP; a public signup page is not a
+  # surface this appliance wants). Idempotent; the server secret is preserved.
+  OLD_CFG=$(md5sum /srv/pangolin/config/config.yml 2>/dev/null | cut -d" " -f1)
+  sed -i "s/disable_signup_without_invite: false/disable_signup_without_invite: true/; s/disable_user_create_org: false/disable_user_create_org: true/" /srv/pangolin/config/config.yml
+  NEW_CFG=$(md5sum /srv/pangolin/config/config.yml 2>/dev/null | cut -d" " -f1)
+  if [ "$OLD_CFG" != "$NEW_CFG" ]; then docker restart pangolin >/dev/null 2>&1 || true; fi
   echo "PANGOLIN_ROOT_KEY=$(cat /srv/pangolin/root-key.env)"
   echo pangolin-install-ok
   exit 0
@@ -119,12 +126,19 @@ KEY_JSON=$(curl -s -b /srv/pangolin/admin.cookies -X PUT http://localhost:3000/a
 KEY_ID=$(echo "$KEY_JSON" | tr ",{}" "\n" | grep apiKeyId | sed "s/.*://; s/\"//g")
 KEY_SECRET=$(echo "$KEY_JSON" | tr ",{}" "\n" | grep -w apiKey | sed "s/.*://; s/\"//g")
 if [ -z "$KEY_ID" ] || [ -z "$KEY_SECRET" ]; then echo "PANGOLIN_KEY_JSON=$KEY_JSON"; echo pangolin-key-mint-failed; exit 1; fi
-GRANT=$(curl -sf -b /srv/pangolin/admin.cookies -X POST http://localhost:3000/api/v1/api-key/$KEY_ID/actions -H "Content-Type: application/json" -H "X-CSRF-Token: x-csrf-protection" -d "{\"actionIds\":[\"createOrg\",\"createSite\",\"deleteSite\",\"createResource\",\"deleteResource\",\"createTarget\",\"deleteTarget\",\"getSite\",\"getResource\",\"listSites\",\"listResources\",\"listTargets\",\"getDomain\",\"listOrgDomains\",\"generateAccessToken\",\"updateResource\",\"createRole\",\"listRoles\",\"createIdp\",\"createIdpOrg\",\"updateIdpOrg\",\"setResourcePolicyUsers\",\"setResourcePolicyRoles\",\"createResourceRule\",\"listResourceRules\"]}") || { echo pangolin-actions-grant-failed; exit 1; }
+GRANT=$(curl -sf -b /srv/pangolin/admin.cookies -X POST http://localhost:3000/api/v1/api-key/$KEY_ID/actions -H "Content-Type: application/json" -H "X-CSRF-Token: x-csrf-protection" -d "{\"actionIds\":[\"createOrg\",\"createSite\",\"deleteSite\",\"createResource\",\"deleteResource\",\"createTarget\",\"deleteTarget\",\"getSite\",\"getResource\",\"listSites\",\"listResources\",\"listTargets\",\"getDomain\",\"listOrgDomains\",\"generateAccessToken\",\"updateResource\",\"createRole\",\"listRoles\",\"createIdp\",\"createIdpOrg\",\"updateIdpOrg\",\"updateIdp\",\"setResourcePolicyUsers\",\"setResourcePolicyRoles\",\"createResourceRule\",\"listResourceRules\"]}") || { echo pangolin-actions-grant-failed; exit 1; }
 echo "$GRANT" | grep -q "\"success\":true" || { echo "PANGOLIN_GRANT_JSON=$GRANT"; echo pangolin-actions-grant-failed; exit 1; }
 ORG_JSON=$(curl -s -X PUT http://localhost:3003/v1/org -H "Authorization: Bearer $KEY_ID.$KEY_SECRET" -H "Content-Type: application/json" -d "{\"orgId\":\"freehold\",\"name\":\"freehold\",\"subnet\":\"100.90.0.0/16\",\"utilitySubnet\":\"100.91.0.0/24\"}")
 if ! echo "$ORG_JSON" | grep -q orgId; then
   echo "$ORG_JSON" | grep -qi "exist" || { echo "PANGOLIN_ORG_JSON=$ORG_JSON"; echo pangolin-org-create-failed; exit 1; }
 fi
+  # The admin exists: close self-signup + org creation (the world users are
+  # auto-provisioned through the CP OIDC IdP; a public signup page is not a
+  # surface this appliance wants). Idempotent; the server secret is preserved.
+  OLD_CFG=$(md5sum /srv/pangolin/config/config.yml 2>/dev/null | cut -d" " -f1)
+  sed -i "s/disable_signup_without_invite: false/disable_signup_without_invite: true/; s/disable_user_create_org: false/disable_user_create_org: true/" /srv/pangolin/config/config.yml
+  NEW_CFG=$(md5sum /srv/pangolin/config/config.yml 2>/dev/null | cut -d" " -f1)
+  if [ "$OLD_CFG" != "$NEW_CFG" ]; then docker restart pangolin >/dev/null 2>&1 || true; fi
 echo "PANGOLIN_ROOT_KEY=$KEY_ID.$KEY_SECRET"
 rm -f /srv/pangolin/admin.cookies
 echo pangolin-install-ok

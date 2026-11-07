@@ -75,17 +75,18 @@ var uninstallCmd = &cobra.Command{
 			} else {
 				fmt.Println("  no world to tear down (a half-installed host, or the runner is not serving) — destroying the instance directly; the API needs no host access")
 			}
-			if perr := DestroyPangolinHost(cfg, yes, true); perr != nil {
+			pangolinDestroyed, perr := DestroyPangolinHost(cfg, yes, true)
+			if perr != nil {
 				return perr
 			}
 			running, derr := destroyHostViaProvider(cfg, yes, true)
 			if derr != nil {
 				return derr
 			}
-			if !running {
+			if !running && (cfg.PangolinHost == nil || pangolinDestroyed) {
 				wipeLocalProfile(configPath, config.Current())
 			} else {
-				fmt.Println("  profile kept: it holds the created host instance handle (the instance is still running)")
+				fmt.Println("  profile kept: it holds a still-running instance handle (the world host or the pangolin VPS)")
 			}
 			return nil
 		}
@@ -117,17 +118,18 @@ var uninstallCmd = &cobra.Command{
 			if err := runUninstallTransient(cfg, host, removeData, keepHostAccess); err != nil {
 				return err
 			}
-			if perr := DestroyPangolinHost(cfg, yes, destroyHost); perr != nil {
+			pangolinDestroyed, perr := DestroyPangolinHost(cfg, yes, destroyHost)
+			if perr != nil {
 				return perr
 			}
 			instanceRunning, derr := destroyHostViaProvider(cfg, yes, destroyHost)
 			if derr != nil {
 				return derr
 			}
-			if instanceRunning {
+			if instanceRunning || (cfg.PangolinHost != nil && !pangolinDestroyed) {
 				// The profile is the ONLY handle to a still-billing instance —
 				// wiping it makes the printed recovery command a dead end.
-				fmt.Println("  profile kept: it holds the created host instance handle (the instance is still running)")
+				fmt.Println("  profile kept: it holds a still-running instance handle (the world host or the pangolin VPS)")
 			} else {
 				wipeLocalProfile(configPath, config.Current())
 			}
@@ -136,15 +138,16 @@ var uninstallCmd = &cobra.Command{
 		if err := runUninstall(cfg, configPath, host, removeData, keepHostAccess); err != nil {
 			return err
 		}
-		if perr := DestroyPangolinHost(cfg, yes, destroyHost); perr != nil {
+		pangolinDestroyed, perr := DestroyPangolinHost(cfg, yes, destroyHost)
+		if perr != nil {
 			return perr
 		}
 		instanceRunning, derr := destroyHostViaProvider(cfg, yes, destroyHost)
 		if derr != nil {
 			return derr
 		}
-		if instanceRunning {
-			fmt.Println("  profile kept: it holds the created host instance handle (the instance is still running)")
+		if instanceRunning || (cfg.PangolinHost != nil && !pangolinDestroyed) {
+			fmt.Println("  profile kept: it holds a still-running instance handle (the world host or the pangolin VPS)")
 		} else {
 			wipeLocalProfile(configPath, config.Current())
 		}
@@ -204,25 +207,27 @@ func destroyHostViaProvider(cfg *config.Config, yes, destroy bool) (bool, error)
 // DestroyPangolinHost destroys the recorded Pangolin VPS — the same
 // --destroy-host gate and the same confirm as the world's host (it is a
 // bill: nothing on it is durable plane; the edge's config dies with it and
-// a re-provision re-mints).
-func DestroyPangolinHost(cfg *config.Config, yes, destroy bool) error {
+// a re-provision re-mints). destroyed reports whether the instance is GONE:
+// a declined confirm (or an un-destroyed record) returns false and the caller
+// MUST NOT clear or wipe the profile — that record is the bill's only handle.
+func DestroyPangolinHost(cfg *config.Config, yes, destroy bool) (destroyed bool, err error) {
 	if cfg.PangolinHost == nil || cfg.PangolinHost.ID == "" {
-		return nil // no pangolin VPS on record — nothing to destroy
+		return false, nil // no pangolin VPS on record — nothing to destroy
 	}
 	p := cfg.PangolinHost
 	prov, err := registry.ByName(p.Provider)
 	if err != nil {
-		return fmt.Errorf("pangolin host: %w", err)
+		return false, fmt.Errorf("pangolin host: %w", err)
 	}
 	if !destroy {
 		fmt.Printf("  NOTE: the pangolin VPS %s (%s) is still RUNNING and billing — destroy it with:\n    %s freehold uninstall --destroy-host\n",
 			p.ID, p.IP, secretEnvHint(prov))
-		return nil
+		return false, nil
 	}
 	if !yes {
 		if err := common.ConfirmDestructive("destroy the pangolin VPS instance (its config dies with it)"); err != nil {
 			fmt.Println("  pangolin VPS left running — destroy it later with --destroy-host")
-			return nil
+			return false, nil
 		}
 	}
 	answers := map[string]string{}
@@ -241,10 +246,10 @@ func DestroyPangolinHost(cfg *config.Config, yes, destroy bool) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 	if err := prov.Destroy(ctx, session, p.ID); err != nil {
-		return fmt.Errorf("pangolin host destroy: %w", err)
+		return false, fmt.Errorf("pangolin host destroy: %w", err)
 	}
 	fmt.Println("  ✓ pangolin VPS destroyed")
-	return nil
+	return true, nil
 }
 
 // secretEnvHint names the env vars the provider's secrets ride.

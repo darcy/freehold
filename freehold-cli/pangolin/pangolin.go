@@ -449,8 +449,18 @@ func runDestroy(cfg *config.Config, cfgPath string, yes bool) error {
 	if cfg.Pangolin != nil {
 		domain = cfg.Pangolin.Domain
 	}
-	if err := uninstall.DestroyPangolinHost(cfg, yes, true); err != nil {
+	destroyed, err := uninstall.DestroyPangolinHost(cfg, yes, true)
+	if err != nil {
 		return err
+	}
+	if !destroyed {
+		// A declined confirm (or a failed destroy) leaves the instance LIVE
+		// AND BILLING: the profile record is its ONLY handle — never clear it.
+		fmt.Printf(`
+  the pangolin VPS %s was NOT destroyed (declined, or the provider refused).
+  the profile keeps its handle; stop the bill later with `+"`freehold pangolin --destroy`"+`.
+`, p.ID)
+		return nil
 	}
 	cfg.PangolinHost = nil
 	cfg.Pangolin = nil

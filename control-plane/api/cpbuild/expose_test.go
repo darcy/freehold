@@ -686,6 +686,8 @@ func TestExposeRidesThePangolinPath(t *testing.T) {
 			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"idpId":11,"redirectUrl":"https://pangolin.librem.example.test/auth/idp/11/oidc/callback"}}`))
 		case "/v1/idp/11/org/freehold":
 			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{}}`))
+		case "/v1/idp/11/oidc":
+			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{}}`))
 		case "/v1/resource-policy/7/access-control":
 			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{}}`))
 		case "/v1/resource/7":
@@ -724,6 +726,7 @@ func TestExposeRidesThePangolinPath(t *testing.T) {
 		"PUT /v1/org/freehold/role",
 		"GET /v1/idp",
 		"PUT /v1/idp/oidc",
+		"POST /v1/idp/11/oidc", // re-assert the client pair (a re-adopt may differ)
 		"PUT /v1/idp/11/org/freehold",
 		"GET /v1/org/freehold/domains",
 		"GET /v1/org/freehold/resources",
@@ -791,6 +794,8 @@ func TestExposePangolinEmptyDNSKeepsTheProxyIP(t *testing.T) {
 		case "/v1/idp":
 			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"idps":[{"idpId":11,"name":"freehold","type":"oidc"}]}}`))
 		case "/v1/idp/11/org/freehold":
+			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{}}`))
+		case "/v1/idp/11/oidc":
 			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{}}`))
 		case "/v1/resource-policy/9/access-control":
 			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{}}`))
@@ -1109,6 +1114,8 @@ func TestPangolinEnsureAssertsTheGatewayNewt(t *testing.T) {
 		case "/v1/idp/oidc":
 			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{"idpId":11,"redirectUrl":"https://pangolin.librem.example.test/auth/idp/11/oidc/callback"}}`))
 		case "/v1/idp/11/org/freehold":
+			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{}}`))
+		case "/v1/idp/11/oidc":
 			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{}}`))
 		case "/v1/resource-policy/7/access-control":
 			_, _ = w.Write([]byte(`{"success":true,"error":false,"data":{}}`))

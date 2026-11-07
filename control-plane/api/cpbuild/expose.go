@@ -606,6 +606,14 @@ func (s *Spec) pangolinPublicPathEnsure(cl *pangolin.Client, siteID int) error {
 	if created && newRedirect != "" {
 		redirectURI = newRedirect
 	}
+	// Re-assert the client pair on EVERY build: the sealed record is the CP's
+	// source, and a re-adopted VPS (or a re-minted console identity) can hold a
+	// different pair than the instance stored — a mismatch fails every token
+	// exchange. Idempotent.
+	if err := cl.UpdateOIDCIDP(ctx, idpID, clientID, clientSecret,
+		"https://"+s.CpHost+"/api/oidc/authorize", "https://"+s.CpHost+"/api/oidc/token"); err != nil {
+		return fmt.Errorf("pangolin: re-assert the OIDC IdP: %w", err)
+	}
 	if redirectURI == "" {
 		// Deterministic callback (the dashboard path is fixed once the idp
 		// exists): what our authorize endpoint must accept.
