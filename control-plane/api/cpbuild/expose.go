@@ -658,6 +658,39 @@ func (s *Spec) pangolinPublicPathEnsure(cl *pangolin.Client, siteID int) error {
 	if err := cl.SetTargetIfDiffers(ctx, res.ResourceID, siteID, s.RelayIP, 3000, "http"); err != nil {
 		return fmt.Errorf("pangolin: relay target: %w", err)
 	}
+	// The CP's own public hostname rides the public path too. On a NATed world
+	// this is the ONLY way Pangolin's server-side OIDC token exchange (it
+	// calls our token endpoint back) and the member login reach the CP; on a
+	// publicly-reachable world it simply consolidates ingress. UNGATED — the
+	// console's own NIP-98 auth and the member login protect it.
+	if cpSub := relaySubdomain(s.CpHost, p.Domain); cpSub != "" {
+		if p.DNSIP != "" {
+			provider, env, derr := s.dnsCredFromStore("relay")
+			if derr != nil {
+				return fmt.Errorf("pangolin: cp dns %s: %w", s.CpHost, derr)
+			}
+			mgr, merr := dnsman.For(provider, env)
+			if merr != nil {
+				return fmt.Errorf("pangolin: cp dns %s: %w", s.CpHost, merr)
+			}
+			if uerr := mgr.UpsertA(s.CpHost, p.DNSIP); uerr != nil {
+				return fmt.Errorf("pangolin: cp dns %s: %w", s.CpHost, uerr)
+			}
+		}
+		cpRes, _, rerr := cl.EnsureResource(ctx, p.Org, siteID, cpSub, domainID, p.Domain)
+		if rerr != nil {
+			return fmt.Errorf("pangolin: cp resource: %w", rerr)
+		}
+		if err := cl.SetAccessControl(ctx, cpRes.ResourceID, false, nil, 0); err != nil {
+			return fmt.Errorf("pangolin: cp access control: %w", err)
+		}
+		if err := cl.SetTLSName(ctx, cpRes.ResourceID, s.CpHost); err != nil {
+			return fmt.Errorf("pangolin: cp tls name: %w", err)
+		}
+		if err := cl.SetTargetIfDiffers(ctx, cpRes.ResourceID, siteID, s.k3sIP(), 443, "https"); err != nil {
+			return fmt.Errorf("pangolin: cp target: %w", err)
+		}
+	}
 	return nil
 }
 
