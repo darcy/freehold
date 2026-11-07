@@ -200,12 +200,13 @@ services:
       - "127.0.0.1:3001:3001"
       - "127.0.0.1:3003:3003"
     # The server-side OIDC token exchange calls the CP public URL back. A
-    # VPS cannot reach its own public IP (no hairpin NAT), so resolve the CP
-    # host to the host gateway: the request enters Traefik, matches the CP
-    # router, and reaches the CP through the Newt tunnel - with the right
-    # Host (the router) and the issued cert (the client SNI).
+    # VPS cannot reach its own public IP (no hairpin NAT), and Docker drops
+    # host-gateway routing between bridge networks - so resolve the CP host
+    # to Traefik own container address on a fixed compose subnet: the
+    # request matches the CP router, carries the issued cert (SNI), and
+    # reaches the CP through the Newt tunnel.
     extra_hosts:
-      - "%s:host-gateway"
+      - "%s:172.31.250.10"
     volumes:
       - ./config:/app/config
     healthcheck:
@@ -217,6 +218,9 @@ services:
     image: fosrl/gerbil:1.6.0
     container_name: gerbil
     restart: unless-stopped
+    networks:
+      default:
+        ipv4_address: 172.31.250.10
     depends_on:
       pangolin:
         condition: service_healthy
@@ -247,6 +251,11 @@ services:
     volumes:
       - ./config/traefik:/etc/traefik:ro
       - ./config/letsencrypt:/letsencrypt
+networks:
+  default:
+    ipam:
+      config:
+        - subnet: 172.31.250.0/24
 `, cpHost)
 }
 
