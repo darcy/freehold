@@ -2109,6 +2109,9 @@ echo nameserver 8.8.8.8 >> /etc/resolv.conf
 # versions) — refresh before the install, like the EnsureGuestDocker retry.
 apt-get update -qq >/dev/null 2>&1 || true
 apt-get install -y -qq nftables dnsmasq >/dev/null 2>&1 || apt-get install -y -qq nftables dnsmasq >/dev/null 2>&1 || true
+# ufw default deny-routed drops the forwarded edge traffic even with the
+# nftables DNAT present — the freehold table is the firewall; keep ufw out.
+ufw disable >/dev/null 2>&1 || true
 mkdir -p /etc/dnsmasq.d
 echo net.ipv4.ip_forward=1 > /etc/sysctl.d/90-freehold-gateway.conf
 # A router with BOTH nics on one bridge (the untagged freehold-subnet) must

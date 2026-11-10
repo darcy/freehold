@@ -87,6 +87,9 @@ func HostGatewayScript(cidr, edgeIP, k3sIP, cpIP, relayIP, bridgeIf string) stri
 	return fmt.Sprintf(`set -e
 apt-get update -qq >/dev/null 2>&1 || true
 apt-get install -y -qq nftables dnsmasq >/dev/null 2>&1 || true
+# ufw default deny-routed drops the forwarded edge traffic even with the
+# nftables DNAT present — the freehold table is the firewall; keep ufw out.
+ufw disable >/dev/null 2>&1 || true
 mkdir -p /etc/dnsmasq.d
 cat > /etc/network/interfaces.d/freehold <<NET
 auto %s

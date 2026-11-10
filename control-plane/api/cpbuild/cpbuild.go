@@ -856,6 +856,9 @@ func (s *Spec) worldGateway() error {
 	// ruleset has none) — it rides `sh -c '...'` through the runner verbatim.
 	script := fmt.Sprintf(`set -e
 apt-get install -y -qq nftables dnsmasq >/dev/null 2>&1 || true
+# ufw default deny-routed drops the forwarded edge traffic even with the
+# nftables DNAT present — the freehold table is the firewall; keep ufw out.
+ufw disable >/dev/null 2>&1 || true
 sysctl net.ipv4.ip_forward=1 >/dev/null
 cat > /etc/nftables.conf <<NFT
 %sNFT
