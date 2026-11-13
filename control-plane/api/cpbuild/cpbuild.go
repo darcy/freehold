@@ -1847,6 +1847,17 @@ func BuildWorldApply(spec *Spec) agent.WorldApply {
 				}
 			}
 		}
+		// 8.25. The scheduled-jobs cut-over: create the world-level jobs
+		// channel, seat the operator + every agent, and remove the console
+		// identity from visible agent channels (fires land in the jobs channel
+		// now, so the console needs no seat where a human reads).
+		if spec.RelayHost != "" && len(spec.consoleSecret()) == 32 {
+			var serr error
+			report, serr = spec.stageScheduledJobsChannel(report)
+			if serr != nil {
+				return "", fmt.Errorf("world-build scheduled-jobs channel: %w", serr)
+			}
+		}
 		// 8.5. Self-heal re-check of 2.2 — a transient miss on the early stage
 		// (the relay API was still settling) degrades to the stock onboarding;
 		// the stage is read-first so this is a no-op on a healthy build.
@@ -2852,7 +2863,8 @@ func (s *Spec) revokeOrgWideMemberships(name string) error {
 	return nil
 }
 
-func BuildCreateAgentFn(spec *Spec) agent.CreateAgentFn {	return func(name, purpose string, channels []string, private bool, model string) (string, error) {
+func BuildCreateAgentFn(spec *Spec) agent.CreateAgentFn {
+	return func(name, purpose string, channels []string, private bool, model string) (string, error) {
 		model = litellmModelFor(spec.CpaName, name, model)
 		if name == "" {
 			return "", fmt.Errorf("create-agent needs a non-empty name")
@@ -2967,17 +2979,6 @@ func BuildCreateAgentFn(spec *Spec) agent.CreateAgentFn {	return func(name, purp
 						}
 					}
 				}
-				// The CONSOLE identity rides every channel too — it is the
-				// scheduled-jobs fire identity (its mentions wake the agent).
-				// Signed by the CPA (the owner); a world where the console and
-				// operator coincide skips the duplicate.
-				if consolePK := spec.consolePubkey(); consolePK != "" && consolePK != spec.OwnerPub {
-					if member, merr := relay.IsMemberAuth(spec.relayDial(), authURL, cpaSec, channelID, consolePK); merr != nil || !member {
-						if err := relay.PutUserChannelAuth(spec.relayDial(), authURL, cpaSec, channelID, consolePK); err != nil {
-							return "", fmt.Errorf("add console identity to #freehold: %w", err)
-						}
-					}
-				}
 				joined = append(joined, channelRef{channelID, channelName})
 				continue
 			}
@@ -2995,16 +2996,13 @@ func BuildCreateAgentFn(spec *Spec) agent.CreateAgentFn {	return func(name, purp
 					}
 				}
 			}
-			// The console identity (the scheduled-jobs fire identity) rides
-			// every agent channel — best-effort like the CPA add below: a
-			// pre-existing private channel its signer doesn't own refuses,
-			// and the fire path reports the refusal at create/fire time.
-			if consolePK := spec.consolePubkey(); consolePK != "" && consolePK != spec.OwnerPub {
-				if member, merr := relay.IsMemberAuth(spec.relayDial(), authURL, nSec, channelID, consolePK); merr != nil || !member {
-					_ = relay.PutUserChannelAuth(spec.relayDial(), authURL, nSec, channelID, consolePK)
-				}
-			}
 			joined = append(joined, channelRef{channelID, channelName})
+		}
+		// Every agent is a member of the world's scheduled-jobs channel: fires
+		// land there and wake it by mention, and the timeout notice pings the
+		// owner there. Console-owned (relay owner), idempotent.
+		if err := spec.ensureJobsChannelMember(pub); err != nil {
+			return "", fmt.Errorf("add %s to #%s: %w", name, agenttools.ScheduledJobsChannelName, err)
 		}
 		if name != spec.CpaName {
 			if cpaPub := spec.cpaPubkey(); cpaPub != "" {
@@ -3300,6 +3298,129 @@ func (s *Spec) consolePubkey() string {
 		return ""
 	}
 	return pk
+}
+
+// consoleSecret returns the console identity's Nostr secret (the relay owner
+// and the scheduled-jobs channel owner), or nil when absent/unreadable.
+func (s *Spec) consoleSecret() []byte {
+	sec, err := cpstate.ConsoleSecret(s.consoleStateRoot())
+	if err != nil {
+		return nil
+	}
+	return sec
+}
+
+// ensureJobsChannelMember ensures the world's scheduled-jobs channel exists
+// (open, console-owned) and adds pub to it. Idempotent: a membership write is
+// state-idempotent but not event-idempotent, so an existing seat is skipped.
+func (s *Spec) ensureJobsChannelMember(pub string) error {
+	sec := s.consoleSecret()
+	if len(sec) != 32 {
+		return fmt.Errorf("the console identity is unavailable to own the jobs channel")
+	}
+	authURL := s.RelayAuthURL
+	if authURL == "" {
+		authURL = s.RelayURL
+	}
+	if _, _, ok, ferr := relay.FindChannelAuth(s.relayDial(), authURL, sec, "#"+agenttools.ScheduledJobsChannelName); ferr != nil {
+		return fmt.Errorf("resolve #%s: %w", agenttools.ScheduledJobsChannelName, ferr)
+	} else if !ok {
+		if err := delegate.EnsureChannelAuth(s.relayDial(), authURL, sec,
+			agenttools.ScheduledJobsChannelID, "#"+agenttools.ScheduledJobsChannelName); err != nil {
+			return fmt.Errorf("ensure #%s: %w", agenttools.ScheduledJobsChannelName, err)
+		}
+	}
+	if member, merr := relay.IsMemberAuth(s.relayDial(), authURL, sec, agenttools.ScheduledJobsChannelID, pub); merr == nil && member {
+		return nil
+	}
+	return relay.PutUserChannelAuth(s.relayDial(), authURL, sec, agenttools.ScheduledJobsChannelID, pub)
+}
+
+// stageScheduledJobsChannel is the cut-over: create the world's scheduled-jobs
+// channel, seat the operator + every registry agent, and remove the console
+// identity from every visible agent channel. Fires now land in the jobs
+// channel (the scheduler), so the console no longer needs a seat anywhere a
+// human reads. The current console key is left in the prune allow-list so a
+// sweep never removes the fire identity before this leg has run.
+func (s *Spec) stageScheduledJobsChannel(report []string) ([]string, error) {
+	sec := s.consoleSecret()
+	if len(sec) != 32 {
+		return report, fmt.Errorf("scheduled-jobs channel: the console identity is unreadable")
+	}
+	consolePK, err := crypto.PubkeyFromSecret(sec)
+	if err != nil {
+		return report, fmt.Errorf("scheduled-jobs channel: %w", err)
+	}
+	authURL := s.RelayAuthURL
+	if authURL == "" {
+		authURL = s.RelayURL
+	}
+	reg, err := agenttools.OpenRegistry(filepath.Join(s.agentToolsRoot(), agenttools.RegistryFile))
+	if err != nil {
+		return report, fmt.Errorf("scheduled-jobs channel: open registry: %w", err)
+	}
+	rows, err := reg.Agents()
+	if err != nil {
+		return report, fmt.Errorf("scheduled-jobs channel: read registry: %w", err)
+	}
+	// Seat the operator + every live agent in the jobs channel.
+	if s.OwnerPub != "" {
+		if err := s.ensureJobsChannelMember(s.OwnerPub); err != nil {
+			return report, fmt.Errorf("scheduled-jobs channel: operator: %w", err)
+		}
+	}
+	for _, a := range rows {
+		if a.Pubkey == "" {
+			continue
+		}
+		if err := s.ensureJobsChannelMember(a.Pubkey); err != nil {
+			return report, fmt.Errorf("scheduled-jobs channel: %s: %w", a.Name, err)
+		}
+	}
+	// Stop the console's visible joins: remove its seat from every agent
+	// channel the registry knows about, plus the first-run channels. A world
+	// where the console and operator coincide keeps the operator's seat.
+	if consolePK == s.OwnerPub {
+		return append(report, "scheduled-jobs channel ensured (console == operator; visible seats kept)"), nil
+	}
+	names := map[string]bool{"#freehold": true, "#general": true}
+	for _, a := range rows {
+		for _, ch := range a.Channels {
+			if ch != "" {
+				names[ch] = true
+			}
+		}
+		if a.Channel != "" {
+			names[a.Channel] = true
+		}
+	}
+	removed := 0
+	for name := range names {
+		id, _, ok, ferr := relay.FindChannelAuth(s.relayDial(), authURL, sec, name)
+		if ferr != nil {
+			return report, fmt.Errorf("scheduled-jobs channel: resolve %s: %w", name, ferr)
+		}
+		if !ok || id == agenttools.ScheduledJobsChannelID {
+			continue
+		}
+		member, merr := relay.IsMemberAuth(s.relayDial(), authURL, sec, id, consolePK)
+		if merr != nil || !member {
+			continue
+		}
+		// #freehold/#general are owned by the CPA; sign their membership
+		// writes with the owner (the relay admits the channel owner directly).
+		signer := sec
+		if name == "#freehold" || name == "#general" {
+			if cpaSec := s.cpaSecret(); len(cpaSec) == 32 {
+				signer = cpaSec
+			}
+		}
+		if rerr := relay.RemoveUserChannelAuth(s.relayDial(), authURL, signer, id, consolePK); rerr != nil {
+			return report, fmt.Errorf("scheduled-jobs channel: remove console from %s: %w", name, rerr)
+		}
+		removed++
+	}
+	return append(report, fmt.Sprintf("scheduled-jobs channel ensured; console removed from %d visible channel(s)", removed)), nil
 }
 
 // cpaSecret returns the CPA's Nostr secret (32 bytes), or nil when its identity

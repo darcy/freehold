@@ -48,9 +48,14 @@ the ordering across all of them is `docs/ROADMAP.md`.
     (jobs.json is the agent-tools process's own store; the console folds it read-only),
     and a member session reaches exactly one route (`GET /api/jobs`). A member login
     needs the relay reachable — the membership check fails closed when it is not.
-*   Job fire access follows channel visibility: open channels always work; a **private**
-    channel needs its owner to add the console identity, and `create_job` refuses with
-    that remedy when the console identity cannot resolve the channel.
+*   Scheduled-job fires land in the world-level **`freehold-scheduled-jobs`** channel
+    (console-owned, open/joinable, agents + operator + job owners) rather than in visible
+    agent channels; the agent cross-posts its visible update into the job's human channel
+    as itself. The console identity no longer holds seats in visible agent channels, so a
+    rebuilt world's orphaned system keys are swept by the operator-authorized
+    `freehold prune-channels` verb (preview by default, `--apply` to remove; the jobs
+    channel is exempt). `create_job` seats the target agent in both the jobs channel and
+    the human channel; a channel it cannot resolve is refused with a pass-the-id remedy.
 
 **Verification and CI**
 *   No bot-review injection pre-vet; no single real-relay acceptance run.

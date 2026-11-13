@@ -89,10 +89,18 @@ type Server struct {
 	// the scheduler). nil = the job tools refuse (not bound).
 	Jobs *JobsStore
 	// ResolveChannel maps a channel name (or passes through an id) to the
-	// h-tag id the fire posts to, signed by the CONSOLE identity — the same
-	// credential that fires the job, so what resolves here is what can post
-	// later. nil = job creation needs a raw channel id.
+	// h-tag id, signed by the CONSOLE identity (the relay owner). nil = job
+	// creation needs a raw channel id.
 	ResolveChannel func(name string) (string, error)
+	// EnsureJobsMember ensures the scheduled-jobs channel exists and adds
+	// pubkey to it (console-signed). Called at job creation for the owner and
+	// the target agent — a member who cannot be pinged there is a silent miss.
+	// nil = membership is not wired (tests).
+	EnsureJobsMember func(pubkey string) error
+	// EnsureChannelMember adds pubkey to an existing channel id (console-signed,
+	// relay-owner authority) so the target agent can post its visible update
+	// there. nil = membership is not wired (tests).
+	EnsureChannelMember func(channelID, pubkey string) error
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -282,16 +290,17 @@ func ToolList() []map[string]interface{} {
 			}, []string{}),
 		},
 		{
-			"name": "create_job", "description": "Schedule a job: at its schedule, the control plane posts prompt as a mention to agent in channel, and agent's in-channel reply is the delivery (the job runs on the named agent — usually you; pass another agent's name to run it there). cron is a standard 5-field expression or an @every/@hourly descriptor; tz the IANA zone (default UTC) — resolve the asker's actual clock before writing either; or pass at (a unix timestamp) INSTEAD of cron/at for a one-shot reminder. owner is the npub of the person who asked (omit for your own job). label is a short human name for it. The prompt is REDACTED from every console viewer who is not the owner — including the operator. Confirm the schedule with the asker before creating.",
+			"name": "create_job", "description": "Schedule a job. At its schedule the control plane fires prompt as a mention to agent in the world's freehold-scheduled-jobs channel (only that agent wakes), and the agent's reply there is the delivery. channel is the HUMAN channel where the agent's visible update belongs — it cross-posts that update as itself, opening with attribution (the owner's name for a human ask; marked self-initiated for an agent's own job, whose update stays in the jobs channel unless the prompt names another channel). cron is a standard 5-field expression or an @every/@hourly descriptor; tz the IANA zone (default UTC) — resolve the asker's actual clock before writing either; or pass at (a unix timestamp) INSTEAD of cron/at for a one-shot reminder. owner is the asker's npub for a human ask; omit it for your own self-initiated job (owner defaults to your pubkey). thread_root (optional) is the human-channel event id the visible update threads under. label is a short human name for it. The owner + agent are added to the jobs channel. The prompt is REDACTED from every console viewer who is not the owner — including the operator. Confirm the schedule with the asker before creating.",
 			"inputSchema": i(map[string]interface{}{
-				"prompt":  map[string]interface{}{"type": "string"},
-				"cron":    map[string]interface{}{"type": "string"},
-				"at":      map[string]interface{}{"type": "integer"},
-				"tz":      map[string]interface{}{"type": "string"},
-				"channel": map[string]interface{}{"type": "string"},
-				"agent":   map[string]interface{}{"type": "string"},
-				"owner":   map[string]interface{}{"type": "string"},
-				"label":   map[string]interface{}{"type": "string"},
+				"prompt":      map[string]interface{}{"type": "string"},
+				"cron":        map[string]interface{}{"type": "string"},
+				"at":          map[string]interface{}{"type": "integer"},
+				"tz":          map[string]interface{}{"type": "string"},
+				"channel":     map[string]interface{}{"type": "string"},
+				"agent":       map[string]interface{}{"type": "string"},
+				"owner":       map[string]interface{}{"type": "string"},
+				"label":       map[string]interface{}{"type": "string"},
+				"thread_root": map[string]interface{}{"type": "string"},
 			}, []string{"prompt", "channel"}),
 		},
 		{
@@ -456,17 +465,19 @@ type updateAgentArgs struct {
 }
 
 // createJobArgs is create_job's body. Agent defaults to the caller, owner to
-// the caller (a self-scheduled job); the CPA passes the asker's npub as owner
-// and another agent's name when the job runs there.
+// the caller's pubkey (a self-initiated job); the CPA passes the asker's npub
+// as owner and another agent's name when the job runs there. Channel is the
+// HUMAN channel the visible update belongs in; fires land in the jobs channel.
 type createJobArgs struct {
-	Prompt  string `json:"prompt"`
-	Cron    string `json:"cron"`
-	At      uint64 `json:"at"`
-	TZ      string `json:"tz"`
-	Channel string `json:"channel"`
-	Agent   string `json:"agent"`
-	Owner   string `json:"owner"`
-	Label   string `json:"label"`
+	Prompt     string `json:"prompt"`
+	Cron       string `json:"cron"`
+	At         uint64 `json:"at"`
+	TZ         string `json:"tz"`
+	Channel    string `json:"channel"`
+	Agent      string `json:"agent"`
+	Owner      string `json:"owner"`
+	Label      string `json:"label"`
+	ThreadRoot string `json:"thread_root"`
 }
 
 // isChannelID reports whether s already looks like an h-tag channel id (a
@@ -511,7 +522,7 @@ func (s *Server) createJob(a createJobArgs, caller string) (*Job, error) {
 		}
 		resolved, err := s.ResolveChannel(channel)
 		if err != nil {
-			return nil, fmt.Errorf("channel %q: %w (a private channel the console identity cannot see cannot be fired into — use an open channel, or have the channel owner add the console identity)", a.Channel, err)
+			return nil, fmt.Errorf("channel %q: %w (pass the channel id if the name cannot be resolved — the target agent must be able to post its visible update there)", a.Channel, err)
 		}
 		channel = resolved
 	}
@@ -546,9 +557,32 @@ func (s *Server) createJob(a createJobArgs, caller string) (*Job, error) {
 		}
 	}
 	nt := nextRunFor(a.Cron, a.TZ, a.At)
+	// Every job has an owner: the asker's npub when one is passed (a human
+	// ask), else the creating agent's own pubkey (a self-initiated job). The
+	// owner receives the job's failure pings and joins the jobs channel.
 	owner := a.Owner
-	if owner != "" && !isHex64(owner) {
-		return nil, fmt.Errorf("owner must be the asker's 64-hex npub (or omitted for your own job)")
+	if owner == "" {
+		owner = caller
+	}
+	if !isHex64(owner) {
+		return nil, fmt.Errorf("owner must be a 64-hex npub (omit it for your own self-initiated job)")
+	}
+	// The owner + the target agent must hold the jobs channel (fires land
+	// there and the timeout notice pings the owner there). The target agent
+	// must also hold the human channel — it cross-posts its visible update
+	// as itself, so a channel it cannot write is refused at creation.
+	if s.EnsureJobsMember != nil {
+		if err := s.EnsureJobsMember(owner); err != nil {
+			return nil, fmt.Errorf("add owner to #%s: %w", ScheduledJobsChannelName, err)
+		}
+		if err := s.EnsureJobsMember(agentPK); err != nil {
+			return nil, fmt.Errorf("add %s to #%s: %w", agentName, ScheduledJobsChannelName, err)
+		}
+	}
+	if s.EnsureChannelMember != nil && channel != ScheduledJobsChannelID {
+		if err := s.EnsureChannelMember(channel, agentPK); err != nil {
+			return nil, fmt.Errorf("add %s to the visible-update channel: %w", agentName, err)
+		}
 	}
 	id, err := randomHex(6)
 	if err != nil {
@@ -556,7 +590,8 @@ func (s *Server) createJob(a createJobArgs, caller string) (*Job, error) {
 	}
 	job := &Job{
 		ID: id, Owner: owner, Agent: agentName, AgentPubkey: agentPK, Channel: channel,
-		Cron: a.Cron, At: a.At, TZ: a.TZ, Label: a.Label,
+		ThreadRoot: a.ThreadRoot,
+		Cron:       a.Cron, At: a.At, TZ: a.TZ, Label: a.Label,
 		Prompt: a.Prompt, NextRunAt: nt,
 	}
 	if err := s.Jobs.Create(job); err != nil {

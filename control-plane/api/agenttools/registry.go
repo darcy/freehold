@@ -12,7 +12,11 @@ import (
 	"freehold/contract/console"
 	"freehold/contract/relay"
 	"freehold/control-plane/api/cpstate"
-) // Registry is the freehold-agent-tools server's durable agent registry: the CP
+) // RegistryFile is the durable agent registry's filename, beside the server's
+// jobs/facts stores. The console folds it read-only for the prune preview.
+const RegistryFile = "registry.json"
+
+// Registry is the freehold-agent-tools server's durable agent registry: the CP
 // holds it under the server's own state dir, so a compute-only teardown keeps
 // every created agent's identity + row and a rebuild reconciles it. It satisfies
 // agent.ConsoleOps with the local registry file — direct and in-process, never a
@@ -239,4 +243,27 @@ func (r *Registry) Grant(runner, pubkey string) (json.RawMessage, error) {
 		return nil, fmt.Errorf("grant_agent %s→%s: publish roster change: %w", pubkey, runner, err)
 	}
 	return json.RawMessage(`{}`), nil
+}
+
+// LoadRegistryReadOnly reads the registry file WITHOUT the owning process's
+// lock — the console's read-only fold for the channel-prune preview. A missing
+// file is an empty list (a world predating the registry), not an error.
+func LoadRegistryReadOnly(path string) ([]console.AgentInfo, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var rows map[string]console.AgentInfo
+	if err := json.Unmarshal(raw, &rows); err != nil {
+		return nil, fmt.Errorf("malformed registry %s: %w", path, err)
+	}
+	out := make([]console.AgentInfo, 0, len(rows))
+	for _, a := range rows {
+		out = append(out, a)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out, nil
 }

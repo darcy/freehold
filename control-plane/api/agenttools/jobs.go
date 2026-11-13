@@ -8,6 +8,8 @@ import (
 	"sort"
 	"sync"
 	"time"
+
+	"freehold/contract/relay"
 )
 
 // JobsFile is the durable scheduled-jobs store, kept in the agent-tools state
@@ -15,6 +17,16 @@ import (
 // console folds it READ-ONLY for /api/jobs (LoadJobsReadOnly) — never a
 // cross-process write, the same discipline the registry follows.
 const JobsFile = "jobs.json"
+
+// ScheduledJobsChannelName is the world-level channel every scheduled-job fire
+// lands in — one filterable (t=fh-job) stream of fires, joinable by anyone who
+// wants the noise. It is owned by the console identity (the fire signer) and
+// holds every agent, the operator, and every job owner.
+const ScheduledJobsChannelName = "freehold-scheduled-jobs"
+
+// ScheduledJobsChannelID is the channel's fixed h-tag id (derived from the name
+// so every process — scheduler, build, server — agrees without a lookup).
+var ScheduledJobsChannelID = relay.ChannelIDFromName(ScheduledJobsChannelName)
 
 // Job run statuses. "fired" is OPEN (the mention went out, no reply seen yet);
 // everything else is terminal. "skipped" = the agent still had an open run;
@@ -44,9 +56,10 @@ type JobRun struct {
 // API for every non-owner viewer — the operator included.
 type Job struct {
 	ID string `json:"id"`
-	// Owner is the job's human npub (64-hex) — the person who asked for it.
-	// Empty = the agent's own job (a self-scheduled repo re-check): no human
-	// gets failure notes, and the agent itself reads it via list_jobs.
+	// Owner is the job's npub (64-hex) — the person who asked for it, or the
+	// creating agent's own pubkey for a self-initiated job. Every job has an
+	// owner: the timeout notice pings them, and they are added to the jobs
+	// channel at creation. Legacy ownerless rows fall back to the operator.
 	Owner string `json:"owner"`
 	// AgentPubkey routes the fire — the agent's Nostr pubkey, stable across
 	// renames (a rename keeps the pubkey and changes the name). Resolved from
@@ -56,9 +69,16 @@ type Job struct {
 	AgentPubkey string `json:"agent_pubkey,omitempty"`
 	// Agent is the agent's display NAME (registry row), refreshed per fire.
 	Agent string `json:"agent"`
-	// Channel is the relay channel the fire lands in (the h-tag id). The
-	// agent's in-channel reply is the delivery.
+	// Channel is the HUMAN channel (h-tag id) where the agent's visible update
+	// belongs — the channel the ask happened in, not the fire channel. Fires
+	// land in freehold-scheduled-jobs; the agent cross-posts its update here.
 	Channel string `json:"channel"`
+	// ThreadRoot is an optional human-channel event id the visible update
+	// threads under (empty = a standalone post).
+	ThreadRoot string `json:"thread_root,omitempty"`
+	// Anchor is the jobs-channel event id a job's fires thread under. Created
+	// lazily by the scheduler on the first fire.
+	Anchor string `json:"anchor,omitempty"`
 	// Cron is a standard 5-field schedule (or @every/@hourly descriptor)
 	// evaluated in TZ. Empty with At != 0 = a one-shot reminder.
 	Cron string `json:"cron,omitempty"`

@@ -193,6 +193,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.agentsList(w, r)
 	case path == "/api/jobs" && method == http.MethodGet:
 		s.jobsList(w, r)
+	case path == "/api/channels/prune" && method == http.MethodGet:
+		s.channelsPrune(w, r, false)
+	case path == "/api/channels/prune" && method == http.MethodPost:
+		s.channelsPrune(w, r, true)
 	case path == "/api/agents" && method == http.MethodPost:
 		s.agentsRegister(w, r)
 	case strings.HasPrefix(path, "/api/agents/") && method == http.MethodDelete:
@@ -2023,6 +2027,125 @@ func (s *Server) jobsList(w http.ResponseWriter, r *http.Request) {
 		out = append(out, row)
 	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{"jobs": out})
+}
+
+// pruneChannelRow is one visible agent channel's prune report.
+type pruneChannelRow struct {
+	ID      string   `json:"id"`
+	Name    string   `json:"name"`
+	Members []string `json:"members"`
+	Stale   []string `json:"stale"`
+	Removed []string `json:"removed,omitempty"`
+	Errors  []string `json:"errors,omitempty"`
+}
+
+// channelsPrune is the operator-authorized stale-key sweep. GET is a read-only
+// preview (the member-list pull that confirms a world is affected); POST
+// removes every member of a visible agent channel that is neither the current
+// console key (the fire identity), an operator/admin, nor a live registry
+// agent. The console is the relay owner, so its signature authorizes the
+// remove-user. The scheduled-jobs channel is never swept — the console owns it
+// and every seat there is intentional.
+func (s *Server) channelsPrune(w http.ResponseWriter, r *http.Request, apply bool) {
+	if _, err := s.requireAdmin(r); err != nil {
+		writeErr(w, statusFor(err), err.Error())
+		return
+	}
+	if err := checkOrigin(r, s.PublicOrigin, s.WorldDomain); err != nil {
+		writeErr(w, http.StatusForbidden, err.Error())
+		return
+	}
+	snap := s.Store.Snapshot()
+	dial, auth := s.relayDialAuth(snap)
+	if dial == "" || snap.RelayPubkey == nil || *snap.RelayPubkey == "" || len(s.ConsoleSecret) != 32 {
+		writeErr(w, http.StatusBadRequest, "relay not configured (need relay_url + relay_pubkey + the console identity)")
+		return
+	}
+	// The allow-list: the current console key (the scheduled-jobs fire
+	// identity), every operator/admin, and every live registry agent. Anything
+	// else in a visible channel is stale (an old born-on-box console key).
+	allowed := map[string]bool{}
+	if s.ConsolePubkey != "" {
+		allowed[s.ConsolePubkey] = true
+	}
+	for _, a := range snap.Admins {
+		allowed[a] = true
+	}
+	names := map[string]bool{"#freehold": true, "#general": true}
+	if s.AgentToolsDir != "" {
+		agents, err := agenttools.LoadRegistryReadOnly(filepath.Join(s.AgentToolsDir, agenttools.RegistryFile))
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		for _, a := range agents {
+			if a.Pubkey != "" {
+				allowed[a.Pubkey] = true
+			}
+			for _, ch := range a.Channels {
+				if ch != "" {
+					names[ch] = true
+				}
+			}
+			if a.Channel != "" {
+				names[a.Channel] = true
+			}
+		}
+	}
+	for _, rec := range snap.Agents {
+		if rec.Pubkey != "" {
+			allowed[rec.Pubkey] = true
+		}
+	}
+	rows := make([]pruneChannelRow, 0, len(names))
+	for name := range names {
+		id, disp, ok, err := relay.FindChannelAuth(dial, auth, s.ConsoleSecret, name)
+		if err != nil {
+			writeErr(w, http.StatusBadGateway, err.Error())
+			return
+		}
+		if !ok || id == agenttools.ScheduledJobsChannelID {
+			continue
+		}
+		members, err := agenttools.QueryGroupMembersAuth(dial, auth, *snap.RelayPubkey, id, s.ConsoleSecret)
+		if err != nil {
+			writeErr(w, http.StatusBadGateway, err.Error())
+			return
+		}
+		row := pruneChannelRow{ID: id, Name: disp, Members: members}
+		for _, pk := range members {
+			if !allowed[pk] {
+				row.Stale = append(row.Stale, pk)
+			}
+		}
+		if apply {
+			for _, pk := range row.Stale {
+				if err := relay.RemoveUserChannelAuth(dial, auth, s.ConsoleSecret, id, pk); err != nil {
+					row.Errors = append(row.Errors, pk+": "+err.Error())
+					continue
+				}
+				row.Removed = append(row.Removed, pk)
+			}
+		}
+		rows = append(rows, row)
+	}
+	sort.Slice(rows, func(i, j int) bool { return rows[i].Name < rows[j].Name })
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"apply":          apply,
+		"console_pubkey": s.ConsolePubkey,
+		"allowed":        sortedKeys(allowed),
+		"channels":       rows,
+	})
+}
+
+// sortedKeys is the deterministic rendering of the prune allow-list.
+func sortedKeys(m map[string]bool) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func (s *Server) agentsList(w http.ResponseWriter, r *http.Request) {

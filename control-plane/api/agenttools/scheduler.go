@@ -2,14 +2,17 @@ package agenttools
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/robfig/cron/v3"
 
 	"freehold/contract/console"
 	"freehold/contract/delegate"
+	"freehold/contract/relay"
 )
 
 // Scheduler constants (the hardening invariants — each guards a real failure
@@ -75,11 +78,12 @@ func nextAfter(cronExpr, tz string, after time.Time) (time.Time, time.Duration, 
 }
 
 // Scheduler is the agent-tools process's tick loop. It fires due jobs as
-// kind-9 mentions FROM THE CONSOLE IDENTITY into the job's channel (the pod
-// wakes through its ordinary @mention path; the in-channel reply is the
-// delivery), watches each fired run for the agent's reply, and closes runs
-// ok/timeout. The zero-value clock/relay hooks are the real ones; tests
-// inject fakes.
+// kind-9 mentions FROM THE CONSOLE IDENTITY into the world's scheduled-jobs
+// channel (the pod wakes through its ordinary @mention path; the reply there
+// is the delivery), watches each fired run for the agent's reply, and closes
+// runs ok/timeout. Each job's fires thread under a per-job anchor, tagged
+// t=fh-job. The zero-value clock/relay hooks are the real ones; tests inject
+// fakes.
 type Scheduler struct {
 	// Jobs is the authoritative store (this process owns it).
 	Jobs *JobsStore
@@ -90,13 +94,26 @@ type Scheduler struct {
 	DialURL string
 	AuthURL string
 	Secret  []byte
+	// JobsChannel is the world's scheduled-jobs channel id. Empty = legacy
+	// mode (fires into the job's own Channel) — tests/older worlds.
+	JobsChannel string
+	// OperatorPub is the timeout-notice fallback for a legacy ownerless job.
+	OperatorPub string
 
 	// Now is the clock (tests inject).
 	Now func() time.Time
-	// Post fires one kind-9 mention (tests inject; default = the relay).
-	Post func(channel, mention, content string) error
+	// Post fires one kind-9 message with extra tags (tests inject; default =
+	// the relay).
+	Post func(channel, mention string, extra [][]string, content string) error
+	// PostID is Post that returns the published event id (the thread anchor).
+	PostID func(channel, mention string, extra [][]string, content string) (string, error)
 	// Poll reads the channel's messages newer than since (tests inject).
 	Poll func(channel string, since int64) ([]delegate.PollResult, error)
+	// ProfileName resolves a human pubkey's relay display name (tests inject).
+	ProfileName func(pubkey string) string
+	// EnsureChannel ensures the jobs channel (and operator membership) exists;
+	// run once at startup (tests inject).
+	EnsureChannel func() error
 
 	// Tick is the cadence (default 30s).
 	Tick time.Duration
@@ -116,12 +133,98 @@ func (s *Scheduler) tickInterval() time.Duration {
 	return defaultTick
 }
 
-func (s *Scheduler) post(channel, mention, content string) error {
+func (s *Scheduler) post(channel, mention string, extra [][]string, content string) error {
 	if s.Post != nil {
-		return s.Post(channel, mention, content)
+		return s.Post(channel, mention, extra, content)
 	}
-	return delegate.PostTaggedMessageAuth(s.DialURL, s.authURL(), s.Secret, channel, mention,
-		[][]string{{"t", fireTag}}, content)
+	return delegate.PostTaggedMessageAuth(s.DialURL, s.authURL(), s.Secret, channel, mention, extra, content)
+}
+
+// postID posts and returns the event id (the per-job thread anchor).
+func (s *Scheduler) postID(channel, mention string, extra [][]string, content string) (string, error) {
+	if s.PostID != nil {
+		return s.PostID(channel, mention, extra, content)
+	}
+	if s.Post != nil {
+		return "", s.Post(channel, mention, extra, content)
+	}
+	return delegate.PostTaggedMessageAuthID(s.DialURL, s.authURL(), s.Secret, channel, mention, extra, content)
+}
+
+// profileName resolves a human pubkey's relay display name (kind:0).
+func (s *Scheduler) profileName(pubkey string) string {
+	if s.ProfileName != nil {
+		return s.ProfileName(pubkey)
+	}
+	evs, err := relay.QueryEventsAuth(s.DialURL, s.authURL(), s.Secret, []interface{}{map[string]interface{}{
+		"kinds":   []interface{}{0},
+		"authors": []interface{}{pubkey},
+		"limit":   1,
+	}})
+	if err != nil || len(evs) == 0 {
+		return ""
+	}
+	content, _ := evs[0]["content"].(string)
+	var p struct {
+		Name        string `json:"name"`
+		DisplayName string `json:"display_name"`
+	}
+	if json.Unmarshal([]byte(content), &p) != nil {
+		return ""
+	}
+	if strings.TrimSpace(p.DisplayName) != "" {
+		return strings.TrimSpace(p.DisplayName)
+	}
+	return strings.TrimSpace(p.Name)
+}
+
+// ownerLabel resolves the job owner's display label and whether the job is
+// self-initiated (owner is a registry agent).
+func (s *Scheduler) ownerLabel(ownerPK string, byPK map[string]string) (label string, self bool) {
+	if name, ok := byPK[ownerPK]; ok {
+		return "@" + name, true
+	}
+	if name := s.profileName(ownerPK); name != "" {
+		return name, false
+	}
+	return ShortHex(ownerPK), false
+}
+
+// fireChannel is where a job's fire lands: the world jobs channel, or the
+// job's own channel on a legacy/unwired scheduler.
+func (s *Scheduler) fireChannel(j Job) string {
+	if s.JobsChannel != "" {
+		return s.JobsChannel
+	}
+	return j.Channel
+}
+
+// fireContent is the fire mention's body: the run metadata the woken agent
+// needs to deliver + attribute its visible update, then the prompt.
+func fireContent(j Job, ownerLabel string, self bool) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "[scheduled job %q · %s]\n\n", jobLabel(j), j.ID)
+	if self {
+		fmt.Fprintf(&b, "Owner: %s (self-initiated)\n", ownerLabel)
+		fmt.Fprintf(&b, "Visible update: this channel (system signal) — open with \"self-initiated: %s\"; the delivery reply here is enough unless the prompt names another channel.\n", jobLabel(j))
+	} else {
+		attribution := jobLabel(j)
+		if j.Label == "" {
+			attribution = "scheduled update"
+		}
+		fmt.Fprintf(&b, "Owner: %s (%s)\n", ownerLabel, j.Owner)
+		if j.Channel == ScheduledJobsChannelID {
+			fmt.Fprintf(&b, "Visible update: this channel (the delivery reply here is the visible update), opening with \"%s's %s:\".\n", ownerLabel, attribution)
+		} else {
+			fmt.Fprintf(&b, "Visible update: post in channel %s as yourself, opening with \"%s's %s:\"", j.Channel, ownerLabel, attribution)
+			if j.ThreadRoot != "" {
+				fmt.Fprintf(&b, " (thread under event %s)", j.ThreadRoot)
+			}
+			fmt.Fprintf(&b, ". If you cannot complete it, post a short failure note there instead.\n")
+		}
+	}
+	fmt.Fprintf(&b, "Delivery: reply in this channel; your reply closes the run.\n\n%s", j.Prompt)
+	return b.String()
 }
 
 func (s *Scheduler) poll(channel string, since int64) ([]delegate.PollResult, error) {
@@ -144,6 +247,11 @@ func (s *Scheduler) Run(ctx context.Context) {
 	if s.Secret == nil || s.DialURL == "" || s.Jobs == nil {
 		log.Print("scheduled jobs: disabled (no relay or console credential)")
 		return
+	}
+	if s.EnsureChannel != nil {
+		if err := s.EnsureChannel(); err != nil {
+			log.Printf("scheduled jobs: jobs channel ensure failed (fires will report errors): %v", err)
+		}
 	}
 	log.Print("scheduled jobs: scheduler running")
 	t := time.NewTicker(s.tickInterval())
@@ -301,8 +409,42 @@ func (s *Scheduler) TickNow() {
 		}
 		inflight[route] = true
 
+		// The fire lands in the world jobs channel; the job's own Channel is
+		// where the agent cross-posts its visible update.
+		jobsChannel := s.fireChannel(j)
+		ownerName, self := s.ownerLabel(j.Owner, byPK)
+		extra := [][]string{{"t", fireTag}}
+
+		// Per-job anchor: each job's fires thread under one top-level message
+		// so the channel reads as one thread per job. Created lazily on the
+		// first fire; a failed anchor is logged and the fire goes top-level.
+		anchor := j.Anchor
+		if s.JobsChannel != "" && anchor == "" {
+			ownerDesc := ownerName
+			if self {
+				ownerDesc += " (self-initiated)"
+			}
+			anchorContent := fmt.Sprintf("[scheduled job %q · %s]\n\nOwner: %s. Fires thread here.",
+				jobLabel(j), j.ID, ownerDesc)
+			anchorID, aerr := s.postID(jobsChannel, "", [][]string{{"t", fireTag}}, anchorContent)
+			if aerr != nil {
+				log.Printf("scheduled jobs: anchor for %s failed (fire goes top-level): %v", j.ID, aerr)
+			} else if anchorID != "" {
+				if uerr := s.Jobs.Update(j.ID, func(jj *Job) bool { jj.Anchor = anchorID; return true }); uerr != nil {
+					log.Printf("scheduled jobs: persist anchor for %s failed: %v", j.ID, uerr)
+				}
+				anchor = anchorID
+			}
+		}
+		if anchor != "" {
+			extra = append(extra, []string{"e", anchor, "", "root"})
+		}
+
 		content := fmt.Sprintf("[scheduled job %q]\n\n%s", jobLabel(j), j.Prompt)
-		if err := s.post(j.Channel, pk, content); err != nil {
+		if s.JobsChannel != "" {
+			content = fireContent(j, ownerName, self)
+		}
+		if err := s.post(jobsChannel, pk, extra, content); err != nil {
 			_ = s.Jobs.recordRun(j.ID, JobRun{FiredAt: nowUnix, Status: RunError,
 				Detail: "fire failed: " + err.Error()})
 			if oneShotDone {
@@ -321,7 +463,7 @@ func (s *Scheduler) TickNow() {
 			}
 			continue
 		}
-		log.Printf("scheduled jobs: fired %s (%s) at agent %s in %s", j.ID, jobLabel(j), j.Agent, j.Channel)
+		log.Printf("scheduled jobs: fired %s (%s) at agent %s in %s", j.ID, jobLabel(j), j.Agent, jobsChannel)
 	}
 
 	s.resolveOpenRuns(now, byPK)
@@ -364,7 +506,7 @@ func (s *Scheduler) resolveOpenRuns(now time.Time, byPK map[string]string) {
 		}
 		if nowUnix-firedAt < int64(runTimeout.Seconds()) {
 			// Still inside the window — but an early reply closes it now.
-			msgs, err := s.poll(j.Channel, firedAt)
+			msgs, err := s.poll(s.fireChannel(j), firedAt)
 			if err != nil {
 				log.Printf("scheduled jobs: reply poll for %s failed: %v", j.ID, err)
 				continue // transient; the next tick re-checks
@@ -391,10 +533,18 @@ func (s *Scheduler) resolveOpenRuns(now time.Time, byPK map[string]string) {
 			}
 			return false
 		})
-		if j.Owner != "" {
+		// Never-woke notice: the scheduler detected the miss, so it is
+		// console-signed into the jobs channel and pings the owner there (they
+		// hold membership; the home channel is not where the console can
+		// write). Legacy ownerless rows fall back to the operator.
+		owner := j.Owner
+		if owner == "" {
+			owner = s.OperatorPub
+		}
+		if owner != "" {
 			note := fmt.Sprintf("⚠️ Scheduled job %q — %s did not respond within %s (run timed out). The job stays scheduled; ask an agent to delete_job or pause_job %s if you want it stopped.",
 				jobLabel(j), j.Agent, runTimeout, j.ID)
-			if err := s.post(j.Channel, j.Owner, note); err != nil {
+			if err := s.post(s.fireChannel(j), owner, [][]string{{"t", fireTag}}, note); err != nil {
 				log.Printf("scheduled jobs: failure note for %s undeliverable: %v", j.ID, err)
 			}
 		}

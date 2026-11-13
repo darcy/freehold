@@ -3,6 +3,7 @@ package agenttools
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -35,12 +36,15 @@ func mkSched(t *testing.T, store *JobsStore, agents map[string]string) (*Schedul
 	var fired [][]string
 	polls := &[]delegate.PollResult{}
 	s := &Scheduler{
-		Jobs:    store,
-		Agents:  reg,
-		Secret:  make([]byte, 32),
-		Now:     func() time.Time { return time.Unix(1_800_000_000, 0) },
-		Post:    func(channel, mention, content string) error { fired = append(fired, []string{channel, mention, content}); return nil },
-		Poll:    func(channel string, since int64) ([]delegate.PollResult, error) { return *polls, nil },
+		Jobs:   store,
+		Agents: reg,
+		Secret: make([]byte, 32),
+		Now:    func() time.Time { return time.Unix(1_800_000_000, 0) },
+		Post: func(channel, mention string, extra [][]string, content string) error {
+			fired = append(fired, []string{channel, mention, content})
+			return nil
+		},
+		Poll: func(channel string, since int64) ([]delegate.PollResult, error) { return *polls, nil },
 	}
 	return s, &fired, polls
 }
@@ -358,7 +362,7 @@ func TestTickOneShotFailedPostRequeuesAndPauses(t *testing.T) {
 	s, _, _ := mkSched(t, store, map[string]string{"cpa": "aabb"})
 	clock := now
 	s.Now = func() time.Time { return clock }
-	s.Post = func(channel, mention, content string) error {
+	s.Post = func(channel, mention string, extra [][]string, content string) error {
 		return errors.New("event publish returned HTTP 400: refused")
 	}
 	for i := 0; i < 4; i++ {
@@ -401,5 +405,161 @@ func TestTickMissingAgentPubkeyRoutedPauses(t *testing.T) {
 	j, _ := store.Get("j1")
 	if !j.Paused {
 		t.Error("pubkey-routed job with a missing registry row must pause")
+	}
+}
+
+func TestTickFiresIntoJobsChannelWithAttribution(t *testing.T) {
+	store := mkStore(t)
+	now := time.Unix(1_800_000_000, 0)
+	human := "abababababababababababababababababababababababababababababababab"
+	agentPK := "ccdd"
+	if err := store.Create(&Job{ID: "j1", Owner: human, Agent: "cpa", Channel: "human-ch",
+		Cron: "@daily", Label: "daily ask", Prompt: "brief me", NextRunAt: uint64(now.Unix())}); err != nil {
+		t.Fatal(err)
+	}
+	s, fired, _ := mkSched(t, store, map[string]string{"cpa": agentPK})
+	s.JobsChannel = "jobs-ch"
+	s.ProfileName = func(string) string { return "Darcy" }
+	s.Now = func() time.Time { return now }
+	s.TickNow()
+
+	var fire []string
+	for _, f := range *fired {
+		if f[1] == agentPK {
+			fire = f
+		}
+	}
+	if fire == nil {
+		t.Fatalf("no fire mention to the agent: %v", *fired)
+	}
+	if fire[0] != "jobs-ch" {
+		t.Errorf("fire channel = %q, want the jobs channel", fire[0])
+	}
+	for _, want := range []string{"Darcy", human, "human-ch", "daily ask", "brief me"} {
+		if !strings.Contains(fire[2], want) {
+			t.Errorf("fire content missing %q: %q", want, fire[2])
+		}
+	}
+}
+
+func TestTickThreadsFiresUnderAnchor(t *testing.T) {
+	store := mkStore(t)
+	now := time.Unix(1_800_000_000, 0)
+	owner := "abababababababababababababababababababababababababababababababab"
+	if err := store.Create(&Job{ID: "j1", Owner: owner, Agent: "cpa", Channel: "human",
+		Cron: "@daily", Prompt: "p", NextRunAt: uint64(now.Unix())}); err != nil {
+		t.Fatal(err)
+	}
+	s, fired, _ := mkSched(t, store, map[string]string{"cpa": "ccdd"})
+	s.JobsChannel = "jobs"
+	s.ProfileName = func(string) string { return "Op" }
+	s.PostID = func(channel, mention string, extra [][]string, content string) (string, error) {
+		return "anchor1", nil
+	}
+	var fireExtra [][]string
+	s.Post = func(channel, mention string, extra [][]string, content string) error {
+		fireExtra = extra
+		*fired = append(*fired, []string{channel, mention, content})
+		return nil
+	}
+	s.Now = func() time.Time { return now }
+	s.TickNow()
+
+	j, _ := store.Get("j1")
+	if j.Anchor != "anchor1" {
+		t.Errorf("job anchor = %q, want anchor1 (persisted for the next fire)", j.Anchor)
+	}
+	threaded := false
+	for _, tag := range fireExtra {
+		if len(tag) >= 2 && tag[0] == "e" && tag[1] == "anchor1" {
+			threaded = true
+		}
+	}
+	if !threaded {
+		t.Errorf("fire tags = %v, want an e-root tag on the anchor", fireExtra)
+	}
+}
+
+func TestTimeoutNoteLandsInJobsChannel(t *testing.T) {
+	store := mkStore(t)
+	now := time.Unix(1_800_000_000, 0)
+	human := "abababababababababababababababababababababababababababababababab"
+	if err := store.Create(&Job{ID: "j1", Owner: human, Agent: "cpa", Channel: "human",
+		Cron: "@daily", Prompt: "p", NextRunAt: uint64(now.Unix())}); err != nil {
+		t.Fatal(err)
+	}
+	s, fired, _ := mkSched(t, store, map[string]string{"cpa": "ccdd"})
+	s.JobsChannel = "jobs"
+	s.ProfileName = func(string) string { return "Op" }
+	s.Now = func() time.Time { return now }
+	s.TickNow()
+	*fired = nil
+	s.Now = func() time.Time { return now.Add(runTimeout + time.Minute) }
+	s.TickNow()
+
+	found := false
+	for _, f := range *fired {
+		if f[0] == "jobs" && f[1] == human && strings.Contains(f[2], "did not respond") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("timeout note = %v, want a console-signed note to the owner in the jobs channel", *fired)
+	}
+}
+
+func TestSelfInitiatedJobIsAttributed(t *testing.T) {
+	store := mkStore(t)
+	now := time.Unix(1_800_000_000, 0)
+	agentPK := "ccdd"
+	if err := store.Create(&Job{ID: "j1", Owner: agentPK, Agent: "cpa", Channel: "cpa-ch",
+		Cron: "@daily", Label: "watch", Prompt: "check it", NextRunAt: uint64(now.Unix())}); err != nil {
+		t.Fatal(err)
+	}
+	s, fired, _ := mkSched(t, store, map[string]string{"cpa": agentPK})
+	s.JobsChannel = "jobs"
+	s.Now = func() time.Time { return now }
+	s.TickNow()
+
+	var fire []string
+	for _, f := range *fired {
+		if f[1] == agentPK {
+			fire = f
+		}
+	}
+	if fire == nil {
+		t.Fatalf("no fire mention: %v", *fired)
+	}
+	for _, want := range []string{"self-initiated", "watch", "check it"} {
+		if !strings.Contains(fire[2], want) {
+			t.Errorf("fire content missing %q: %q", want, fire[2])
+		}
+	}
+}
+
+func TestTimeoutNoteFallsBackToOperator(t *testing.T) {
+	store := mkStore(t)
+	now := time.Unix(1_800_000_000, 0)
+	if err := store.Create(&Job{ID: "j1", Agent: "cpa", Channel: "human",
+		Cron: "@daily", Prompt: "p", NextRunAt: uint64(now.Unix())}); err != nil {
+		t.Fatal(err)
+	}
+	s, fired, _ := mkSched(t, store, map[string]string{"cpa": "ccdd"})
+	s.JobsChannel = "jobs"
+	s.OperatorPub = "opopopopopopopopopopopopopopopopopopopopopopopopopopopopopopopop"
+	s.Now = func() time.Time { return now }
+	s.TickNow()
+	*fired = nil
+	s.Now = func() time.Time { return now.Add(runTimeout + time.Minute) }
+	s.TickNow()
+
+	found := false
+	for _, f := range *fired {
+		if f[0] == "jobs" && f[1] == s.OperatorPub && strings.Contains(f[2], "did not respond") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("legacy ownerless timeout = %v, want the operator fallback ping", *fired)
 	}
 }

@@ -92,14 +92,30 @@ the schedule and channel, then calls `create_job` — and a `jobs.json` row afte
     console **folds the file read-only** for `/api/jobs` — the same split as the registry
     (agent-writable authoritative store; console read-only view). The console never writes
     jobs.
-*   **The fire path is the ordinary mention path.** A due job is a kind-9 mention posted by
-    the **console identity** into the job's channel, p-tagging the agent — the pod wakes
-    exactly as it does for any member, and its in-channel reply IS the delivery. The
-    console identity rides every pod's respond-to allowlist for this (see "Who may talk to
-    whom"). Open channels work unconditionally; a private channel needs its owner to add
-    the console identity — `create_job` resolves the channel as the console identity, so a
-    channel it cannot see is refused at creation with that remedy.
-*   **Ownership is the privacy boundary.** A job carries the asker's npub as its owner.
+*   **Fires land in one world-level channel: `freehold-scheduled-jobs`.** It is open
+    (joinable), owned by the **console identity** (the fire signer), and holds every agent,
+    the operator, and every job owner (added at creation — an owner who cannot be pinged
+    there is an owner whose misses are silent). A due job is a kind-9 mention posted by the
+    console into that channel, p-tagging the agent — only that agent wakes — and its reply
+    there IS the delivery. The console identity rides every pod's respond-to allowlist for
+    this (see "Who may talk to whom"). The console is **not** a member of the visible agent
+    channels; fires no longer land where humans read.
+*   **Every job has an owner.** A human ask carries the asker's npub; an agent-initiated
+    job carries the creating agent's pubkey (omitted `owner` defaults to the caller). The
+    owner receives the never-woke timeout ping. A job's `channel` is the **human channel**
+    where the agent cross-posts its visible update **as itself**, opening with attribution
+    (`"<Owner>'s <label>:"` for a human ask; marked self-initiated for an agent's own job,
+    whose visible update stays in the jobs channel unless the prompt names another). An
+    optional `thread_root` threads the visible update under a human-channel event. Wake
+    channel and post channel are mechanically independent: `create_job` seats the target
+    agent in both.
+*   **Noise:** each job's fires thread under a per-job anchor in the jobs channel, and every
+    fire carries the `fh-job` tag — one filterable stream, no TTL (the fires are the audit
+    of what ran). **Failure notices split by signer:** a woke-but-failed run posts an
+    agent-signed note in its visible-update channel; a never-woke run (the scheduler
+    detects the miss) posts a console-signed note into the jobs channel and pings the owner
+    (the operator only when a legacy ownerless row cannot resolve an owner).
+*   **Ownership is the privacy boundary.** A job carries its owner's npub.
     `/api/jobs` serves an owner's own rows with the prompt and label; every other row is
     metadata only (owner npub, agent npub, channel, schedule, last run, created date) —
     **the operator included**. A **member role** (any relay community member, verified
@@ -112,14 +128,25 @@ the schedule and channel, then calls `create_job` — and a `jobs.json` row afte
     *   *No silent drops*: a missed slot (past the catch-up window — half the period,
         clamped 2m–2h) is recorded as a `missed` run with a reason; a skipped one (the
         agent still has an open run — the busy-pod protection) is recorded as `skipped`.
-    *   *Liveness*: a fired run closes `ok` the moment the agent posts in the channel;
-        after a 10-minute silence it closes `timeout` and the owner gets an in-channel
-        failure note. A long-but-chatty run is never cut short.
+    *   *Liveness*: a fired run closes `ok` the moment the agent posts in the jobs
+        channel; after a 10-minute silence it closes `timeout` and the owner is pinged in
+        the jobs channel. A long-but-chatty run is never cut short.
     *   *A one-shot reminder that lands on a busy agent re-queues* (2 minutes) until the
         agent is free — a mini-queue, not a lost reminder.
 *   **Schedules** are standard 5-field cron (or `@every` descriptors) with an explicit
     IANA timezone per job — the resolving agent asks the asker's clock first. One-shots
     are a unix `at` timestamp.
+*   **Stale system keys are swept by an operator-authorized prune.** The console's
+    `GET /api/channels/prune` is the read-only member-list pull; `POST` removes every
+    member of a visible agent channel that is neither the world's current console key, an
+    operator/admin, nor a live registry agent. The `freehold prune-channels` CLI verb
+    previews by default and applies with `--apply`. The jobs channel is never swept — its
+    seats are intentional. A stranded console key is unrecoverable by design (born on the
+    box, random), so removal is hygiene, not risk; the current key stays in the allow-list
+    so a sweep can never remove the fire identity before the build's visible-join removal
+    has run. A world keeps one daily **heartbeat** job permanently — its cross-post target
+    is the jobs channel itself, so the wake path stays exercised; a world with zero jobs
+    cannot detect a wake regression.
 
 ## Runners and secrets — how agents touch the world
 
@@ -342,11 +369,15 @@ one-time human login over a headed browser) is future work, not this.
 *   Stale agents survive a department rename on rebuild.
 *   Job **prompts sit in plaintext** in the agent-tools' `jobs.json` (0600, durable plane)
     — the scheduler must read them to fire. The privacy boundary is the console API's
-    owner redaction, not encryption.
+    owner redaction, not encryption. A fire carries the prompt into the jobs channel, so
+    its members (every agent, the operator, and job owners) see it.
 *   Job fires and **failure notes are best-effort**: a relay outage during a
     fire records the run as `error` — a failed post provably never went out,
     so a one-shot re-queues (2 minutes) and pauses after 5 consecutive
     failures; a failure note the channel refuses is logged, not retried.
+*   The relay has **no unlisted channel visibility**: `freehold-scheduled-jobs` is
+    open/joinable and appears to its members (the operator included). Hiding it from a
+    sidebar would need a client or relay change.
 *   **Console jobs management is read-only**: pause/delete run through agents
     (`pause_job`/`delete_job`), since jobs.json is the agent-tools process's own store.
 *   Agents read the repo but can't write it.
