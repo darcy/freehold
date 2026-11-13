@@ -10,6 +10,7 @@ import (
 
 	"freehold/contract/crypto"
 	"freehold/contract/relay"
+	"freehold/control-plane/api/agent"
 	"freehold/control-plane/api/agenttools"
 )
 
@@ -67,6 +68,10 @@ func TestStageScheduledJobsChannel(t *testing.T) {
 	}
 	agentPK := strings.Repeat("ab", 32)
 	operatorPK := strings.Repeat("cd", 32)
+	cpaPK, err := agent.EnsureIdentity(filepath.Join(stateDir, "agents", "cpa"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	reg, err := agenttools.OpenRegistry(filepath.Join(stateDir, agenttools.RegistryFile))
 	if err != nil {
 		t.Fatal(err)
@@ -84,7 +89,7 @@ func TestStageScheduledJobsChannel(t *testing.T) {
 		pruneMemberEvent(9000, relayFreeholdChannel, consolePK),
 	)
 
-	spec := &Spec{StateDir: stateDir, RelayURL: f.srv.URL, OwnerPub: operatorPK}
+	spec := &Spec{StateDir: stateDir, RelayURL: f.srv.URL, OwnerPub: operatorPK, CpaName: "cpa"}
 	report, err := spec.stageScheduledJobsChannel(nil)
 	if err != nil {
 		t.Fatalf("stage: %v", err)
@@ -113,7 +118,10 @@ func TestStageScheduledJobsChannel(t *testing.T) {
 			}
 		case 9001:
 			if tagValueTest(tags, "h") == relayFreeholdChannel && tagValueTest(tags, "p") == consolePK {
-				removed = true
+				author, _ := ev["pubkey"].(string)
+				if author == cpaPK {
+					removed = true
+				}
 			}
 		}
 	}

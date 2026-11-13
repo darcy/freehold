@@ -1,6 +1,7 @@
 package console
 
 import (
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -9,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -16,9 +18,12 @@ import (
 
 	"freehold/contract/client"
 	"freehold/contract/config"
+	contractconsole "freehold/contract/console"
+	"freehold/contract/identity"
 	"freehold/contract/relay"
 	"freehold/contract/version"
 	"freehold/contract/wire"
+	"freehold/control-plane/api/agent"
 	"freehold/control-plane/api/agenttools"
 	"freehold/control-plane/api/cpbuild"
 	"freehold/control-plane/secret-management"
@@ -2071,13 +2076,15 @@ func (s *Server) channelsPrune(w http.ResponseWriter, r *http.Request, apply boo
 	for _, a := range snap.Admins {
 		allowed[a] = true
 	}
+	var agents []contractconsole.AgentInfo
 	names := map[string]bool{"#freehold": true, "#general": true}
 	if s.AgentToolsDir != "" {
-		agents, err := agenttools.LoadRegistryReadOnly(filepath.Join(s.AgentToolsDir, agenttools.RegistryFile))
-		if err != nil {
-			writeErr(w, http.StatusInternalServerError, err.Error())
+		loaded, lerr := agenttools.LoadRegistryReadOnly(filepath.Join(s.AgentToolsDir, agenttools.RegistryFile))
+		if lerr != nil {
+			writeErr(w, http.StatusInternalServerError, lerr.Error())
 			return
 		}
+		agents = loaded
 		for _, a := range agents {
 			if a.Pubkey != "" {
 				allowed[a.Pubkey] = true
@@ -2097,22 +2104,62 @@ func (s *Server) channelsPrune(w http.ResponseWriter, r *http.Request, apply boo
 			allowed[rec.Pubkey] = true
 		}
 	}
+	cpaName := agent.DefaultCPAName
+	if s.Builder != nil && s.Builder.CpaName != "" {
+		cpaName = s.Builder.CpaName
+	}
 	rows := make([]pruneChannelRow, 0, len(names))
 	for name := range names {
-		id, disp, ok, err := relay.FindChannelAuth(dial, auth, s.ConsoleSecret, name)
-		if err != nil {
-			writeErr(w, http.StatusBadGateway, err.Error())
-			return
+		// freehold-created channels carry their name-derived id; #freehold is
+		// the fixed first-run channel. Deriving the id avoids the relay's
+		// membership-gated discovery (the console is not a member of private
+		// agent channels after the cut-over).
+		id := relay.ChannelIDFromName(name)
+		if name == "#freehold" {
+			id = relay.FreeholdChannelID
 		}
-		if !ok || id == agenttools.ScheduledJobsChannelID {
+		if id == agenttools.ScheduledJobsChannelID {
 			continue
 		}
-		members, err := agenttools.QueryGroupMembersAuth(dial, auth, *snap.RelayPubkey, id, s.ConsoleSecret)
-		if err != nil {
-			writeErr(w, http.StatusBadGateway, err.Error())
+		// The channel's OWNER admits membership writes (a non-owner member can
+		// read but not remove): the CPA for the first-run channels, the
+		// creating agent for agent channels. Resolve it from the 9007 create
+		// event using a member's secret as the reader.
+		signer := s.ConsoleSecret
+		if name == "#freehold" || name == "#general" {
+			if sec := s.agentSecretByName(cpaName); len(sec) == 32 {
+				signer = sec
+			}
+		} else {
+			var reader []byte
+			for _, a := range agents {
+				if slices.Contains(a.Channels, name) || a.Channel == name {
+					if sec := s.agentSecretByName(a.Name); len(sec) == 32 {
+						reader = sec
+						break
+					}
+				}
+			}
+			if len(reader) == 32 {
+				signer = reader
+				if ownerPK, oerr := relay.ChannelOwnerAuth(dial, auth, id, reader); oerr == nil && ownerPK != "" {
+					for _, a := range agents {
+						if a.Pubkey == ownerPK {
+							if sec := s.agentSecretByName(a.Name); len(sec) == 32 {
+								signer = sec
+							}
+							break
+						}
+					}
+				}
+			}
+		}
+		members, merr := agenttools.QueryGroupMembersAuth(dial, auth, *snap.RelayPubkey, id, signer)
+		if merr != nil {
+			writeErr(w, http.StatusBadGateway, merr.Error())
 			return
 		}
-		row := pruneChannelRow{ID: id, Name: disp, Members: members}
+		row := pruneChannelRow{ID: id, Name: name, Members: members}
 		for _, pk := range members {
 			if !allowed[pk] {
 				row.Stale = append(row.Stale, pk)
@@ -2120,8 +2167,8 @@ func (s *Server) channelsPrune(w http.ResponseWriter, r *http.Request, apply boo
 		}
 		if apply {
 			for _, pk := range row.Stale {
-				if err := relay.RemoveUserChannelAuth(dial, auth, s.ConsoleSecret, id, pk); err != nil {
-					row.Errors = append(row.Errors, pk+": "+err.Error())
+				if rerr := relay.RemoveUserChannelAuth(dial, auth, signer, id, pk); rerr != nil {
+					row.Errors = append(row.Errors, pk+": "+rerr.Error())
 					continue
 				}
 				row.Removed = append(row.Removed, pk)
@@ -2136,6 +2183,24 @@ func (s *Server) channelsPrune(w http.ResponseWriter, r *http.Request, apply boo
 		"allowed":        sortedKeys(allowed),
 		"channels":       rows,
 	})
+}
+
+// agentSecretByName loads an agent's Nostr secret from its durable identity
+// dir under the agent-tools root — the signer a channel's owner admits for
+// membership writes.
+func (s *Server) agentSecretByName(name string) []byte {
+	if s.AgentToolsDir == "" || name == "" {
+		return nil
+	}
+	id, err := identity.Load(cpbuild.AgentIdentityPath(s.AgentToolsDir, name))
+	if err != nil {
+		return nil
+	}
+	sec, err := hex.DecodeString(id.NostrSecretHex)
+	if err != nil || len(sec) != 32 {
+		return nil
+	}
+	return sec
 }
 
 // sortedKeys is the deterministic rendering of the prune allow-list.

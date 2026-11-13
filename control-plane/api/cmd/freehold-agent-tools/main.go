@@ -656,14 +656,36 @@ func cmdServe(args []string) {
 	if authURL == "" {
 		authURL = *relayURL
 	}
-	// The jobs channel is console-owned (relay owner): ensure it exists and
-	// seat members as needed. Idempotent membership writes — the relay renders
-	// each put-user, so an existing seat is skipped.
-	ensureChannelMember := func(channelID, pub string) error {
-		if member, merr := relay.IsMemberAuth(*relayURL, authURL, consoleSecret, channelID, pub); merr == nil && member {
+	// Membership writes are admitted by the channel's OWNER: the console owns
+	// the jobs channel; #freehold/#general are CPA-owned. A non-owner member
+	// can read but not write, so pick the owner's identity.
+	loadAgentSecret := func(name string) []byte {
+		id, ierr := identity.Load(cpbuild.AgentIdentityPath(*stateDir, name))
+		if ierr != nil {
 			return nil
 		}
-		return relay.PutUserChannelAuth(*relayURL, authURL, consoleSecret, channelID, pub)
+		sec, derr := hex.DecodeString(id.NostrSecretHex)
+		if derr != nil || len(sec) != 32 {
+			return nil
+		}
+		return sec
+	}
+	cpaChannel := func(channelID string) bool {
+		return channelID == relayFreeholdChannel || channelID == relay.ChannelIDFromName("#general")
+	}
+	// Idempotent membership writes — the relay renders each put-user, so an
+	// existing seat is skipped.
+	ensureChannelMember := func(channelID, pub string) error {
+		signer := consoleSecret
+		if cpaChannel(channelID) {
+			if sec := loadAgentSecret(*cpaName); len(sec) == 32 {
+				signer = sec
+			}
+		}
+		if member, merr := relay.IsMemberAuth(*relayURL, authURL, signer, channelID, pub); merr == nil && member {
+			return nil
+		}
+		return relay.PutUserChannelAuth(*relayURL, authURL, signer, channelID, pub)
 	}
 	ensureJobsMember := func(pub string) error {
 		if _, _, ok, err := relay.FindChannelAuth(*relayURL, authURL, consoleSecret, "#"+agenttools.ScheduledJobsChannelName); err != nil {

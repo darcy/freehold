@@ -3377,6 +3377,24 @@ func (s *Spec) stageScheduledJobsChannel(report []string) ([]string, error) {
 			return report, fmt.Errorf("scheduled-jobs channel: %s: %w", a.Name, err)
 		}
 	}
+	// Pre-existing jobs' owners predate the create-time seat: seat them (and
+	// any legacy agent pubkey) so their never-woke notices are deliverable.
+	jobs, jerr := agenttools.LoadJobsReadOnly(filepath.Join(s.agentToolsRoot(), agenttools.JobsFile))
+	if jerr != nil {
+		return report, fmt.Errorf("scheduled-jobs channel: read jobs: %w", jerr)
+	}
+	for _, j := range jobs {
+		if j.Owner != "" {
+			if err := s.ensureJobsChannelMember(j.Owner); err != nil {
+				return report, fmt.Errorf("scheduled-jobs channel: job owner %s: %w", agenttools.ShortHex(j.Owner), err)
+			}
+		}
+		if j.AgentPubkey != "" {
+			if err := s.ensureJobsChannelMember(j.AgentPubkey); err != nil {
+				return report, fmt.Errorf("scheduled-jobs channel: job agent %s: %w", agenttools.ShortHex(j.AgentPubkey), err)
+			}
+		}
+	}
 	// Stop the console's visible joins: remove its seat from every agent
 	// channel the registry knows about, plus the first-run channels. A world
 	// where the console and operator coincide keeps the operator's seat.
@@ -3396,24 +3414,54 @@ func (s *Spec) stageScheduledJobsChannel(report []string) ([]string, error) {
 	}
 	removed := 0
 	for name := range names {
-		id, _, ok, ferr := relay.FindChannelAuth(s.relayDial(), authURL, sec, name)
-		if ferr != nil {
-			return report, fmt.Errorf("scheduled-jobs channel: resolve %s: %w", name, ferr)
+		// freehold-created channels carry their name-derived id; #freehold is
+		// the fixed first-run channel. Deriving the id avoids the relay's
+		// membership-gated discovery (the console is not a member of private
+		// agent channels after the cut-over).
+		id := relay.ChannelIDFromName(name)
+		if name == "#freehold" {
+			id = relay.FreeholdChannelID
 		}
-		if !ok || id == agenttools.ScheduledJobsChannelID {
+		if id == agenttools.ScheduledJobsChannelID {
 			continue
 		}
-		member, merr := relay.IsMemberAuth(s.relayDial(), authURL, sec, id, consolePK)
-		if merr != nil || !member {
-			continue
-		}
-		// #freehold/#general are owned by the CPA; sign their membership
-		// writes with the owner (the relay admits the channel owner directly).
+		// The channel's OWNER is the identity the relay admits for a
+		// membership write (a non-owner member can read but not remove):
+		// the CPA for the first-run channels, the creating agent for agent
+		// channels. Resolve it from the 9007 create event using a member's
+		// secret as the reader.
 		signer := sec
 		if name == "#freehold" || name == "#general" {
-			if cpaSec := s.cpaSecret(); len(cpaSec) == 32 {
-				signer = cpaSec
+			if cs := s.cpaSecret(); len(cs) == 32 {
+				signer = cs
 			}
+		} else {
+			var reader []byte
+			for _, a := range rows {
+				if slices.Contains(a.Channels, name) || a.Channel == name {
+					if as := s.agentSecret(a.Name); len(as) == 32 {
+						reader = as
+						break
+					}
+				}
+			}
+			if len(reader) == 32 {
+				signer = reader
+				if ownerPK, oerr := relay.ChannelOwnerAuth(s.relayDial(), authURL, id, reader); oerr == nil && ownerPK != "" {
+					for _, a := range rows {
+						if a.Pubkey == ownerPK {
+							if as := s.agentSecret(a.Name); len(as) == 32 {
+								signer = as
+							}
+							break
+						}
+					}
+				}
+			}
+		}
+		member, merr := relay.IsMemberAuth(s.relayDial(), authURL, signer, id, consolePK)
+		if merr != nil || !member {
+			continue
 		}
 		if rerr := relay.RemoveUserChannelAuth(s.relayDial(), authURL, signer, id, consolePK); rerr != nil {
 			return report, fmt.Errorf("scheduled-jobs channel: remove console from %s: %w", name, rerr)
@@ -3427,16 +3475,19 @@ func (s *Spec) stageScheduledJobsChannel(report []string) ([]string, error) {
 // is absent/unreadable. #freehold is private and owned by the CPA, so its
 // membership writes must be signed by this key, not the joining agent's.
 func (s *Spec) cpaSecret() []byte {
-	name := s.CpaName
-	if name == "" {
-		name = agent.DefaultCPAName
-	}
+	return s.agentSecret(s.cpaNameOrDefault())
+}
+
+// agentSecret returns an agent's Nostr secret from its durable identity dir,
+// or nil when absent/unreadable. Membership writes on a channel are admitted
+// by its owner, so the owner's identity is the signer.
+func (s *Spec) agentSecret(name string) []byte {
 	id, err := identity.Load(filepath.Join(s.agentIdentityDir(), "agents", sanitizeDir(name)))
 	if err != nil {
 		return nil
 	}
 	sec, err := hex.DecodeString(id.NostrSecretHex)
-	if err != nil {
+	if err != nil || len(sec) != 32 {
 		return nil
 	}
 	return sec

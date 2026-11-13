@@ -581,7 +581,10 @@ func (s *Server) createJob(a createJobArgs, caller string) (*Job, error) {
 	}
 	if s.EnsureChannelMember != nil && channel != ScheduledJobsChannelID {
 		if err := s.EnsureChannelMember(channel, agentPK); err != nil {
-			return nil, fmt.Errorf("add %s to the visible-update channel: %w", agentName, err)
+			// Best-effort: a channel owned by an identity the console cannot
+			// act for refuses the seat. The job still runs; the agent reports
+			// the cross-post failure in its delivery if it cannot write there.
+			log.Printf("scheduled jobs: could not seat %s in the visible-update channel: %v", agentName, err)
 		}
 	}
 	id, err := randomHex(6)
