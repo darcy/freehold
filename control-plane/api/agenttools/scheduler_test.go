@@ -563,3 +563,32 @@ func TestTimeoutNoteFallsBackToOperator(t *testing.T) {
 		t.Errorf("legacy ownerless timeout = %v, want the operator fallback ping", *fired)
 	}
 }
+
+func TestSchedulerEnsuresHeartbeat(t *testing.T) {
+	store := mkStore(t)
+	s, _, _ := mkSched(t, store, map[string]string{"cpa": "ccdd"})
+	s.JobsChannel = "jobs"
+	s.HeartbeatAgent = "cpa"
+	s.OperatorPub = "op"
+	s.ensureHeartbeat(map[string]string{"cpa": "ccdd"})
+
+	j, ok := store.Get("heartbeat")
+	if !ok {
+		t.Fatal("heartbeat job was not created")
+	}
+	if j.Agent != "cpa" || j.Channel != "jobs" || j.Cron != "@daily" || j.Owner != "op" {
+		t.Errorf("heartbeat = %+v, want CPA-owned daily job in the jobs channel", j)
+	}
+	// Idempotent, and re-created if deleted (the permanent canary).
+	s.ensureHeartbeat(map[string]string{"cpa": "ccdd"})
+	if rows := store.Snapshot(); len(rows) != 1 {
+		t.Fatalf("heartbeat ensure duplicated the job: %v", rows)
+	}
+	if err := store.Delete("heartbeat"); err != nil {
+		t.Fatal(err)
+	}
+	s.ensureHeartbeat(map[string]string{"cpa": "ccdd"})
+	if _, ok := store.Get("heartbeat"); !ok {
+		t.Error("a deleted heartbeat must be re-created")
+	}
+}

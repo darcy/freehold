@@ -671,17 +671,65 @@ func cmdServe(args []string) {
 		return sec
 	}
 	cpaChannel := func(channelID string) bool {
-		return channelID == relayFreeholdChannel || channelID == relay.ChannelIDFromName("#general")
+		return channelID == relay.FreeholdChannelID || channelID == relay.ChannelIDFromName("#general")
+	}
+	// channelSigner resolves the identity the relay admits for a membership
+	// write on channelID: the console owns the jobs channel; #freehold/#general
+	// are CPA-owned; an agent channel is owned by its creator (resolved from
+	// the 9007 create event via a member reader). Falls back to the console.
+	channelSigner := func(channelID string) []byte {
+		if channelID == agenttools.ScheduledJobsChannelID {
+			return consoleSecret
+		}
+		if cpaChannel(channelID) {
+			if sec := loadAgentSecret(*cpaName); len(sec) == 32 {
+				return sec
+			}
+		}
+		agents, aerr := reg.Agents()
+		if aerr != nil {
+			return consoleSecret
+		}
+		var reader []byte
+		for _, a := range agents {
+			for _, ch := range append(append([]string{}, a.Channels...), a.Channel) {
+				if ch == "" {
+					continue
+				}
+				id := relay.ChannelIDFromName(ch)
+				if ch == "#freehold" {
+					id = relay.FreeholdChannelID
+				}
+				if id == channelID {
+					if sec := loadAgentSecret(a.Name); len(sec) == 32 {
+						reader = sec
+					}
+					break
+				}
+			}
+			if len(reader) == 32 {
+				break
+			}
+		}
+		if len(reader) != 32 {
+			return consoleSecret
+		}
+		if ownerPK, oerr := relay.ChannelOwnerAuth(*relayURL, authURL, channelID, reader); oerr == nil && ownerPK != "" {
+			for _, a := range agents {
+				if a.Pubkey == ownerPK {
+					if sec := loadAgentSecret(a.Name); len(sec) == 32 {
+						return sec
+					}
+					break
+				}
+			}
+		}
+		return reader
 	}
 	// Idempotent membership writes — the relay renders each put-user, so an
 	// existing seat is skipped.
 	ensureChannelMember := func(channelID, pub string) error {
-		signer := consoleSecret
-		if cpaChannel(channelID) {
-			if sec := loadAgentSecret(*cpaName); len(sec) == 32 {
-				signer = sec
-			}
-		}
+		signer := channelSigner(channelID)
 		if member, merr := relay.IsMemberAuth(*relayURL, authURL, signer, channelID, pub); merr == nil && member {
 			return nil
 		}
@@ -699,13 +747,14 @@ func cmdServe(args []string) {
 		return ensureChannelMember(agenttools.ScheduledJobsChannelID, pub)
 	}
 	sched := &agenttools.Scheduler{
-		Jobs:        jobs,
-		Agents:      reg.Agents,
-		DialURL:     *relayURL,
-		AuthURL:     authURL,
-		Secret:      consoleSecret,
-		JobsChannel: agenttools.ScheduledJobsChannelID,
-		OperatorPub: operatorPeer,
+		Jobs:           jobs,
+		Agents:         reg.Agents,
+		DialURL:        *relayURL,
+		AuthURL:        authURL,
+		Secret:         consoleSecret,
+		JobsChannel:    agenttools.ScheduledJobsChannelID,
+		OperatorPub:    operatorPeer,
+		HeartbeatAgent: *cpaName,
 		EnsureChannel: func() error {
 			if _, _, ok, err := relay.FindChannelAuth(*relayURL, authURL, consoleSecret, "#"+agenttools.ScheduledJobsChannelName); err != nil {
 				return err

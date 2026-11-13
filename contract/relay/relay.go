@@ -765,6 +765,41 @@ func PublishProfileAuth(dialURL, authURL string, secret []byte, name, about stri
 	return PublishEventJSONAuth(dialURL, authURL, secret, string(evBytes))
 }
 
+// CommunityMembersAuth returns every pubkey on the relay's current NIP-43
+// membership list (kind 13534, relay-signed). Empty on an unreadable list.
+func CommunityMembersAuth(dialURL, authURL string, authSecret []byte, relayPubkey string) ([]string, error) {
+	if relayPubkey == "" {
+		return nil, nil
+	}
+	events, err := QueryEventsAuth(dialURL, authURL, authSecret, []interface{}{map[string]interface{}{
+		"kinds": []interface{}{wire.KINDNip43Membership}, "authors": []interface{}{relayPubkey}, "limit": 1,
+	}})
+	if err != nil {
+		return nil, err
+	}
+	for _, ev := range events {
+		author, _ := ev["pubkey"].(string)
+		if author != relayPubkey {
+			continue
+		}
+		createdAt := eventCreatedAt(ev)
+		tags, _ := parseTags(ev)
+		content, _ := ev["content"].(string)
+		sig, _ := ev["sig"].(string)
+		if _, err := wire.VerifyEvent(author, createdAt, wire.KINDNip43Membership, tags, content, sig); err != nil {
+			continue
+		}
+		out := []string{}
+		for _, t := range tags {
+			if len(t) >= 2 && t[0] == "member" {
+				out = append(out, t[1])
+			}
+		}
+		return out, nil
+	}
+	return nil, nil
+}
+
 // IsCommunityMemberAuth reports whether pubkey is a member of the relay's
 // community, read from the relay's NIP-43 membership list (kind 13534, signed
 // by the relay key — the same list `buzz-admin add-member` maintains; members

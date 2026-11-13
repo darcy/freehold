@@ -3464,7 +3464,11 @@ func (s *Spec) stageScheduledJobsChannel(report []string) ([]string, error) {
 			continue
 		}
 		if rerr := relay.RemoveUserChannelAuth(s.relayDial(), authURL, signer, id, consolePK); rerr != nil {
-			return report, fmt.Errorf("scheduled-jobs channel: remove console from %s: %w", name, rerr)
+			// Hygiene, not load-bearing: the jobs channel + seats are already
+			// ensured above. A refused removal (an unreadable owner identity)
+			// must never brick reconcile — report it and move on.
+			report = append(report, fmt.Sprintf("WARN: scheduled-jobs channel: console still seated in %s (remove refused: %v)", name, rerr))
+			continue
 		}
 		removed++
 	}

@@ -99,6 +99,9 @@ type Scheduler struct {
 	JobsChannel string
 	// OperatorPub is the timeout-notice fallback for a legacy ownerless job.
 	OperatorPub string
+	// HeartbeatAgent is the agent that runs the permanent daily wake-path
+	// canary (the CPA). Empty = no heartbeat (tests).
+	HeartbeatAgent string
 
 	// Now is the clock (tests inject).
 	Now func() time.Time
@@ -227,6 +230,35 @@ func fireContent(j Job, ownerLabel string, self bool) string {
 	return b.String()
 }
 
+// ensureHeartbeat keeps one daily heartbeat job alive — the wake-path canary.
+// Its fire lands in the jobs channel and its visible update is the delivery
+// reply there, so a world with zero other jobs still exercises mention-wake.
+func (s *Scheduler) ensureHeartbeat(byName map[string]string) {
+	if s.Jobs == nil || s.JobsChannel == "" || s.HeartbeatAgent == "" {
+		return
+	}
+	if _, ok := s.Jobs.Get("heartbeat"); ok {
+		return
+	}
+	pk := byName[s.HeartbeatAgent]
+	if pk == "" {
+		return
+	}
+	owner := s.OperatorPub
+	if owner == "" {
+		owner = pk
+	}
+	job := &Job{
+		ID: "heartbeat", Owner: owner, Agent: s.HeartbeatAgent, AgentPubkey: pk,
+		Channel: s.JobsChannel, Cron: "@daily", Label: "heartbeat",
+		Prompt:    "Heartbeat: reply with a one-line status so the scheduled-job wake path stays exercised.",
+		NextRunAt: nextRunFor("@daily", "", 0),
+	}
+	if err := s.Jobs.Create(job); err != nil {
+		log.Printf("scheduled jobs: heartbeat ensure failed: %v", err)
+	}
+}
+
 func (s *Scheduler) poll(channel string, since int64) ([]delegate.PollResult, error) {
 	if s.Poll != nil {
 		return s.Poll(channel, since)
@@ -253,6 +285,8 @@ func (s *Scheduler) Run(ctx context.Context) {
 			log.Printf("scheduled jobs: jobs channel ensure failed (fires will report errors): %v", err)
 		}
 	}
+	byName, _ := s.agentMaps()
+	s.ensureHeartbeat(byName)
 	log.Print("scheduled jobs: scheduler running")
 	t := time.NewTicker(s.tickInterval())
 	defer t.Stop()
@@ -293,6 +327,7 @@ func (s *Scheduler) TickNow() {
 	now := s.now()
 	nowUnix := uint64(now.Unix())
 	byName, byPK := s.agentMaps()
+	s.ensureHeartbeat(byName)
 
 	// The in-flight gate: an agent with an open run gets no second mention —
 	// a busy pod would just drop it (the bot-not-responding failure mode).

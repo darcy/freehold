@@ -2104,6 +2104,20 @@ func (s *Server) channelsPrune(w http.ResponseWriter, r *http.Request, apply boo
 			allowed[rec.Pubkey] = true
 		}
 	}
+	// Keep human relay members: only KNOWN AGENT identities (live or removed —
+	// their durable identity dirs stay on the CP) are treated as system keys.
+	// A human whose pubkey is not an agent identity is a legitimate member.
+	humans, herr := relay.CommunityMembersAuth(dial, auth, s.ConsoleSecret, *snap.RelayPubkey)
+	if herr != nil {
+		writeErr(w, http.StatusBadGateway, herr.Error())
+		return
+	}
+	known := s.knownAgentPubkeys()
+	for _, pk := range humans {
+		if !known[pk] {
+			allowed[pk] = true
+		}
+	}
 	cpaName := agent.DefaultCPAName
 	if s.Builder != nil && s.Builder.CpaName != "" {
 		cpaName = s.Builder.CpaName
@@ -2183,6 +2197,34 @@ func (s *Server) channelsPrune(w http.ResponseWriter, r *http.Request, apply boo
 		"allowed":        sortedKeys(allowed),
 		"channels":       rows,
 	})
+}
+
+// knownAgentPubkeys enumerates every agent identity on the CP — live registry
+// rows and removed agents whose durable identity dirs remain. Used to keep
+// human relay members out of the prune's stale-key set.
+func (s *Server) knownAgentPubkeys() map[string]bool {
+	out := map[string]bool{}
+	if s.AgentToolsDir == "" {
+		return out
+	}
+	entries, err := os.ReadDir(filepath.Join(s.AgentToolsDir, "agents"))
+	if err != nil {
+		return out
+	}
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		id, ierr := identity.Load(filepath.Join(s.AgentToolsDir, "agents", e.Name()))
+		if ierr != nil {
+			continue
+		}
+		pk, perr := id.NostrPubkeyHex()
+		if perr == nil && pk != "" {
+			out[pk] = true
+		}
+	}
+	return out
 }
 
 // agentSecretByName loads an agent's Nostr secret from its durable identity

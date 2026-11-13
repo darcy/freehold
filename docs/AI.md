@@ -144,9 +144,9 @@ the schedule and channel, then calls `create_job` — and a `jobs.json` row afte
     seats are intentional. A stranded console key is unrecoverable by design (born on the
     box, random), so removal is hygiene, not risk; the current key stays in the allow-list
     so a sweep can never remove the fire identity before the build's visible-join removal
-    has run. During the cut-over runbook the pilot world keeps one daily **heartbeat** job
-    permanently — its cross-post target is the jobs channel itself, so the wake path stays
-    exercised; a world with zero jobs cannot detect a wake regression.
+    has run. The scheduler ensures one daily **heartbeat** job exists (agent = the CPA, channel
+    = the jobs channel; re-created if deleted) — the permanent wake-path canary; a world with
+    zero other jobs cannot detect a wake regression.
 
 ## Runners and secrets — how agents touch the world
 
