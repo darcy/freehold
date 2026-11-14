@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"freehold/contract/crypto"
+	"freehold/contract/relay"
 	"freehold/contract/wire"
 	"freehold/control-plane/api/agent"
 	"freehold/control-plane/api/agenttools"
@@ -160,6 +161,9 @@ func freeholdToolDefs(hasRunner bool, targets []string) []map[string]interface{}
 // key signs the request (NIP-98) and the console's gate applies the same
 // channel check a member session passes — how an agent verifies an exposure
 // it made (the expose validation put it in the group, so its key admits).
+// task_comment is the reply path for a mention-watch kick: the agent's own
+// key signs a kind-1 with the task as its root e tag and publishes it to the
+// relay — exactly the shape the Buzz desktop renders as a task comment.
 func bridgeToolDefs() []map[string]interface{} {
 	return []map[string]interface{}{
 		{"name": "gate_fetch", "description": "Fetch a URL AS YOURSELF through the member gate: your key signs the request and the gate applies the same channel check your membership passes. This is how you VERIFY an exposure: status + body prove the app serves through the edge to someone in its group; 403 means the signing key is not in the app's group; 401 names a gate problem. body (optional) sends a request body (method defaults GET); insecure (optional) skips TLS verification for a private-CA world.",
@@ -169,6 +173,12 @@ func bridgeToolDefs() []map[string]interface{} {
 				"body":     map[string]interface{}{"type": "string"},
 				"insecure": map[string]interface{}{"type": "boolean"},
 			}, "required": []string{"url"}}},
+		{"name": "task_comment", "description": "Comment on a project task (a Buzz issue): your reply is published as the task's comment and shows on the task. issue_id is the task's event id (64-hex — the 'Task reference' of a mention-watch prompt, or the root e tag of the event you were mentioned in). content is your reply text (plain text). mention (optional) is a pubkey (64-hex) to notify — repeat for several; the author's pubkey rides the mention prompt. Your key signs the comment; this is the ONLY way your answer reaches a task you were kicked into.",
+			"inputSchema": map[string]interface{}{"type": "object", "properties": map[string]interface{}{
+				"issue_id": map[string]interface{}{"type": "string"},
+				"content":  map[string]interface{}{"type": "string"},
+				"mention":  map[string]interface{}{"type": "array", "items": map[string]interface{}{"type": "string"}},
+			}, "required": []string{"issue_id", "content"}}},
 	}
 }
 
@@ -412,6 +422,86 @@ func (b *mcpBridge) gateFetch(raw []byte) ([]byte, error) {
 	return out, nil
 }
 
+// relayHTTPHost converts buzz-acp's wss:// relay URL to its https:// REST
+// origin (the same canonical host the NIP-98 auth must name).
+func relayHTTPHost(relayURL string) string {
+	switch {
+	case strings.HasPrefix(relayURL, "wss://"):
+		return "https://" + strings.TrimPrefix(relayURL, "wss://")
+	case strings.HasPrefix(relayURL, "ws://"):
+		return "http://" + strings.TrimPrefix(relayURL, "ws://")
+	case strings.HasPrefix(relayURL, "http"):
+		return relayURL
+	}
+	return ""
+}
+
+// taskComment answers task_comment: the agent's own key signs a kind-1 note
+// with the task as its root e tag and publishes it to the relay — the shape
+// the Buzz desktop renders as a task comment (the reply half of a
+// mention-watch kick). The relay URL is buzz-acp's injected BUZZ_RELAY_URL
+// (wss://), dialed as its canonical https origin.
+func (b *mcpBridge) taskComment(raw []byte) ([]byte, error) {
+	var req struct {
+		ID     json.RawMessage `json:"id"`
+		Params json.RawMessage `json:"params"`
+	}
+	if err := json.Unmarshal(raw, &req); err != nil {
+		return nil, err
+	}
+	var call struct {
+		Arguments map[string]interface{} `json:"arguments"`
+	}
+	if err := json.Unmarshal(req.Params, &call); err != nil {
+		return nil, err
+	}
+	issueID, _ := call.Arguments["issue_id"].(string)
+	content, _ := call.Arguments["content"].(string)
+	if len(issueID) != 64 {
+		return nil, fmt.Errorf("task_comment needs issue_id (the task's 64-hex event id)")
+	}
+	if strings.TrimSpace(content) == "" {
+		return nil, fmt.Errorf("task_comment needs content")
+	}
+	tags := [][]string{{"e", strings.ToLower(issueID), "", "root"}}
+	if m, ok := call.Arguments["mention"].([]interface{}); ok {
+		for _, v := range m {
+			if s, ok := v.(string); ok && len(s) == 64 {
+				tags = append(tags, []string{"p", strings.ToLower(s)})
+			}
+		}
+	}
+	ts := time.Now().Unix()
+	pubkey, id, sig, err := wire.SignEvent(b.secret[:], wire.TextNote, ts, tags, content)
+	if err != nil {
+		return nil, err
+	}
+	evBytes, _ := json.Marshal(map[string]interface{}{
+		"id": id, "pubkey": pubkey, "created_at": ts, "kind": wire.TextNote,
+		"tags": tags, "content": content, "sig": sig,
+	})
+	relayURL := relayHTTPHost(os.Getenv("BUZZ_RELAY_URL"))
+	if relayURL == "" {
+		return nil, fmt.Errorf("task_comment: no BUZZ_RELAY_URL (buzz-acp must inject the agent's relay)")
+	}
+	if err := relay.PublishEventJSONAuth(relayURL, relayURL, b.secret[:], string(evBytes)); err != nil {
+		return nil, err
+	}
+	text := fmt.Sprintf("comment published on task %s (event %s)", issueID, id)
+	rpcID := req.ID
+	if len(rpcID) == 0 {
+		rpcID = json.RawMessage("null")
+	}
+	out, _ := json.Marshal(map[string]interface{}{
+		"jsonrpc": "2.0", "id": rpcID,
+		"result": map[string]interface{}{
+			"content": []map[string]interface{}{{"type": "text", "text": text}},
+			"isError": false,
+		},
+	})
+	return out, nil
+}
+
 // runnerCallRequest rewrites an exec tools/call for the runner: the target +
 // credential NAME are injected from the pod env (the agent can never redirect
 // the call or name other secrets), and the caller's JSON-RPC id is preserved
@@ -608,6 +698,15 @@ func runBridge(in io.Reader, out io.Writer, b *mcpBridge) error {
 				resp, err := b.gateFetch(raw)
 				if err != nil {
 					logBridge("gate_fetch", err.Error())
+					resp = rpcErrorWrapper(raw, err)
+				}
+				writeResp(w, resp)
+				continue
+			}
+			if call.Name == "task_comment" {
+				resp, err := b.taskComment(raw)
+				if err != nil {
+					logBridge("task_comment", err.Error())
 					resp = rpcErrorWrapper(raw, err)
 				}
 				writeResp(w, resp)
