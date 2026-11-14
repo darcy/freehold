@@ -140,9 +140,10 @@ the schedule and channel, then calls `create_job` — and a `jobs.json` row afte
     `GET /api/channels/prune` is the read-only member-list pull and the source of truth for
     what a sweep would do (its `allowed` list is explicit); `POST` removes the stale system
     keys from a visible agent channel — members that are neither the world's current
-    console key, an operator/admin, a human relay member (a non-agent NIP-43 member), nor a
-    known agent identity (live registry rows and removed agents whose durable identity dirs
-    remain). The `freehold prune-channels` CLI verb previews by default and applies with
+    console key, an operator/admin, a live registry agent (a registry or console-state row),
+    nor a human relay member (a NIP-43 member whose pubkey is not a known agent identity).
+    A removed agent's seats are swept: its registry row is gone, and its durable identity dir
+    only feeds the sweep's agent recognition. The `freehold prune-channels` CLI verb previews by default and applies with
     `--apply`. The jobs channel is never swept — its seats are intentional. A stranded
     console key is unrecoverable by design (born on the box, random), so removal is hygiene,
     not risk; the current key stays in the allow-list so a sweep can never remove the fire
