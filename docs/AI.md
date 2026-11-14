@@ -137,14 +137,16 @@ the schedule and channel, then calls `create_job` — and a `jobs.json` row afte
     IANA timezone per job — the resolving agent asks the asker's clock first. One-shots
     are a unix `at` timestamp.
 *   **Stale system keys are swept by an operator-authorized prune.** The console's
-    `GET /api/channels/prune` is the read-only member-list pull; `POST` removes every
-    member of a visible agent channel that is neither the world's current console key, an
-    operator/admin, nor a live registry agent. The `freehold prune-channels` CLI verb
-    previews by default and applies with `--apply`. The jobs channel is never swept — its
-    seats are intentional. A stranded console key is unrecoverable by design (born on the
-    box, random), so removal is hygiene, not risk; the current key stays in the allow-list
-    so a sweep can never remove the fire identity before the build's visible-join removal
-    has run. The scheduler ensures one daily **heartbeat** job exists (agent = the CPA, channel
+    `GET /api/channels/prune` is the read-only member-list pull and the source of truth for
+    what a sweep would do (its `allowed` list is explicit); `POST` removes the stale system
+    keys from a visible agent channel — members that are neither the world's current
+    console key, an operator/admin, a human relay member (a non-agent NIP-43 member), nor a
+    known agent identity (live registry rows and removed agents whose durable identity dirs
+    remain). The `freehold prune-channels` CLI verb previews by default and applies with
+    `--apply`. The jobs channel is never swept — its seats are intentional. A stranded
+    console key is unrecoverable by design (born on the box, random), so removal is hygiene,
+    not risk; the current key stays in the allow-list so a sweep can never remove the fire
+    identity before the build's visible-join removal has run. The scheduler ensures one daily **heartbeat** job exists (agent = the CPA, channel
     = the jobs channel; re-created if deleted) — the permanent wake-path canary; a world with
     zero other jobs cannot detect a wake regression.
 
