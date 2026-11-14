@@ -521,49 +521,49 @@ func cmdServe(args []string) {
 	}
 
 	spec := &cpbuild.Spec{
-		StateDir:       *stateDir,
-		RelayURL:       *relayURL,
-		RelayAuthURL:   *relayAuthURL,
-		RelayWS:        relayWSURL,
-		RelayPK:        *relayPK,
-		RelayHost:      *relayHost,
-		RelayIP:        strings.TrimSpace(config.StripCIDR(*relayIP)),
-		CpHost:         *cpHost,
-		CpIP:           strings.TrimSpace(config.StripCIDR(*cpIP)),
-		CpLxc:          uint32(cpLxc),
-		ProxyIP:        strings.TrimSpace(config.StripCIDR(*proxyIP)),
-		LitellmIP:      strings.TrimSpace(config.StripCIDR(*litellmIP)),
-		PlanePool:      *planePool,
-		PlaneKind:      *planeKind,
-		ThinPool:       *thinPool,
-		SizeGB:         uint64(sizeGB),
-		PoolSizeGB:     uint64(poolSizeGB),
-		RootfsGB:       uint32(*rootfsGB),
-		MemoryMB:       uint32(*memoryMB),
-		StorageName:    *storageName,
-		RelayGW:        *relayGW,
-		Bridge:         *bridge,
-		RelayLxc:       uint32(relayLxc),
-		RelayCompose:   *relayCompose,
-		K3sVmid:        uint32(k3sVmid),
-		GatewayCIDR:    strings.TrimSpace(*gatewayCIDR),
-		GatewayVlan:    int(gatewayVlan),
-		GatewayLxc:     uint32(gatewayLxc),
-		K3sIP:          strings.TrimSpace(config.StripCIDR(*k3sIP)),
-		RunnerAddr:     *runnerAddr,
-		RunnerPK:       *runnerPK,
-		RunnerTarget:   *runnerTarget,
-		CpaName:        *cpaName,
-		OwnerPub:       *ownerPub,
-		OperatorName:   operatorName,
+		StateDir:            *stateDir,
+		RelayURL:            *relayURL,
+		RelayAuthURL:        *relayAuthURL,
+		RelayWS:             relayWSURL,
+		RelayPK:             *relayPK,
+		RelayHost:           *relayHost,
+		RelayIP:             strings.TrimSpace(config.StripCIDR(*relayIP)),
+		CpHost:              *cpHost,
+		CpIP:                strings.TrimSpace(config.StripCIDR(*cpIP)),
+		CpLxc:               uint32(cpLxc),
+		ProxyIP:             strings.TrimSpace(config.StripCIDR(*proxyIP)),
+		LitellmIP:           strings.TrimSpace(config.StripCIDR(*litellmIP)),
+		PlanePool:           *planePool,
+		PlaneKind:           *planeKind,
+		ThinPool:            *thinPool,
+		SizeGB:              uint64(sizeGB),
+		PoolSizeGB:          uint64(poolSizeGB),
+		RootfsGB:            uint32(*rootfsGB),
+		MemoryMB:            uint32(*memoryMB),
+		StorageName:         *storageName,
+		RelayGW:             *relayGW,
+		Bridge:              *bridge,
+		RelayLxc:            uint32(relayLxc),
+		RelayCompose:        *relayCompose,
+		K3sVmid:             uint32(k3sVmid),
+		GatewayCIDR:         strings.TrimSpace(*gatewayCIDR),
+		GatewayVlan:         int(gatewayVlan),
+		GatewayLxc:          uint32(gatewayLxc),
+		K3sIP:               strings.TrimSpace(config.StripCIDR(*k3sIP)),
+		RunnerAddr:          *runnerAddr,
+		RunnerPK:            *runnerPK,
+		RunnerTarget:        *runnerTarget,
+		CpaName:             *cpaName,
+		OwnerPub:            *ownerPub,
+		OperatorName:        operatorName,
 		WorldDomainOverride: strings.TrimSpace(*worldDomain),
-		Pangolin:       pangolinCoords,
-		EdgeApps:       edgeApps,
-		LitellmBaseURL: litellmBaseURL,
-		Sec:            secBytes,
-		Audience:       audience,
-		SelfURL:        strings.TrimSuffix(*selfURL, "/"),
-		RepoURL:        strings.TrimSpace(*repoURL),
+		Pangolin:            pangolinCoords,
+		EdgeApps:            edgeApps,
+		LitellmBaseURL:      litellmBaseURL,
+		Sec:                 secBytes,
+		Audience:            audience,
+		SelfURL:             strings.TrimSuffix(*selfURL, "/"),
+		RepoURL:             strings.TrimSpace(*repoURL),
 	}
 	// Derive the litellm gateway IP/base from the proxy IP when the deploy-time
 	// spec predates litellm, so agent manifests get a real base URL.
@@ -656,12 +656,119 @@ func cmdServe(args []string) {
 	if authURL == "" {
 		authURL = *relayURL
 	}
+	// Membership writes are admitted by the channel's OWNER: the console owns
+	// the jobs channel; #freehold/#general are CPA-owned. A non-owner member
+	// can read but not write, so pick the owner's identity.
+	loadAgentSecret := func(name string) []byte {
+		id, ierr := identity.Load(cpbuild.AgentIdentityPath(*stateDir, name))
+		if ierr != nil {
+			return nil
+		}
+		sec, derr := hex.DecodeString(id.NostrSecretHex)
+		if derr != nil || len(sec) != 32 {
+			return nil
+		}
+		return sec
+	}
+	cpaChannel := func(channelID string) bool {
+		return channelID == relay.FreeholdChannelID || channelID == relay.ChannelIDFromName("#general")
+	}
+	// channelSigner resolves the identity the relay admits for a membership
+	// write on channelID: the console owns the jobs channel; #freehold/#general
+	// are CPA-owned; an agent channel is owned by its creator (resolved from
+	// the 9007 create event via a member reader). Falls back to the console.
+	channelSigner := func(channelID string) []byte {
+		if channelID == agenttools.ScheduledJobsChannelID {
+			return consoleSecret
+		}
+		if cpaChannel(channelID) {
+			if sec := loadAgentSecret(*cpaName); len(sec) == 32 {
+				return sec
+			}
+		}
+		agents, aerr := reg.Agents()
+		if aerr != nil {
+			return consoleSecret
+		}
+		var reader []byte
+		for _, a := range agents {
+			for _, ch := range append(append([]string{}, a.Channels...), a.Channel) {
+				if ch == "" {
+					continue
+				}
+				id := relay.ChannelIDFromName(ch)
+				if ch == "#freehold" {
+					id = relay.FreeholdChannelID
+				}
+				if id == channelID {
+					if sec := loadAgentSecret(a.Name); len(sec) == 32 {
+						reader = sec
+					}
+					break
+				}
+			}
+			if len(reader) == 32 {
+				break
+			}
+		}
+		if len(reader) != 32 {
+			return consoleSecret
+		}
+		if ownerPK, oerr := relay.ChannelOwnerAuth(*relayURL, authURL, channelID, reader); oerr == nil && ownerPK != "" {
+			for _, a := range agents {
+				if a.Pubkey == ownerPK {
+					if sec := loadAgentSecret(a.Name); len(sec) == 32 {
+						return sec
+					}
+					break
+				}
+			}
+		}
+		return reader
+	}
+	// Idempotent membership writes — the relay renders each put-user, so an
+	// existing seat is skipped.
+	ensureChannelMember := func(channelID, pub string) error {
+		signer := channelSigner(channelID)
+		if member, merr := relay.IsMemberAuth(*relayURL, authURL, signer, channelID, pub); merr == nil && member {
+			return nil
+		}
+		return relay.PutUserChannelAuth(*relayURL, authURL, signer, channelID, pub)
+	}
+	ensureJobsMember := func(pub string) error {
+		if _, _, ok, err := relay.FindChannelAuth(*relayURL, authURL, consoleSecret, "#"+agenttools.ScheduledJobsChannelName); err != nil {
+			return err
+		} else if !ok {
+			if err := delegate.EnsureChannelAuth(*relayURL, authURL, consoleSecret,
+				agenttools.ScheduledJobsChannelID, "#"+agenttools.ScheduledJobsChannelName); err != nil {
+				return err
+			}
+		}
+		return ensureChannelMember(agenttools.ScheduledJobsChannelID, pub)
+	}
 	sched := &agenttools.Scheduler{
-		Jobs:    jobs,
-		Agents:  reg.Agents,
-		DialURL: *relayURL,
-		AuthURL: authURL,
-		Secret:  consoleSecret,
+		Jobs:           jobs,
+		Agents:         reg.Agents,
+		DialURL:        *relayURL,
+		AuthURL:        authURL,
+		Secret:         consoleSecret,
+		JobsChannel:    agenttools.ScheduledJobsChannelID,
+		OperatorPub:    operatorPeer,
+		HeartbeatAgent: *cpaName,
+		EnsureChannel: func() error {
+			if _, _, ok, err := relay.FindChannelAuth(*relayURL, authURL, consoleSecret, "#"+agenttools.ScheduledJobsChannelName); err != nil {
+				return err
+			} else if !ok {
+				if err := delegate.EnsureChannelAuth(*relayURL, authURL, consoleSecret,
+					agenttools.ScheduledJobsChannelID, "#"+agenttools.ScheduledJobsChannelName); err != nil {
+					return err
+				}
+			}
+			if operatorPeer == "" {
+				return nil
+			}
+			return ensureChannelMember(agenttools.ScheduledJobsChannelID, operatorPeer)
+		},
 	}
 	go sched.Run(context.Background())
 
@@ -706,6 +813,12 @@ func cmdServe(args []string) {
 		ConsolePeer:  consolePeer,
 		OperatorPeer: operatorPeer,
 		Jobs:         jobs,
+		// Every job has an owner; both the owner and the target agent join the
+		// jobs channel at creation (the timeout notice pings the owner there).
+		EnsureJobsMember: ensureJobsMember,
+		// The target agent must be able to write its visible update in the
+		// human channel — the console (relay owner) seats it there.
+		EnsureChannelMember: ensureChannelMember,
 		// Channel resolution signs as the console identity — the credential
 		// the fire will use — so what resolves here is exactly what can post.
 		ResolveChannel: func(name string) (string, error) {

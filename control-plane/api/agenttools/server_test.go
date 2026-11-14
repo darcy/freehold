@@ -969,3 +969,94 @@ func TestOperatorPeerScope(t *testing.T) {
 		t.Fatal("an ungranted non-peer caller must be denied")
 	}
 }
+
+func TestCreateJobOwnerDefaultsAndSeats(t *testing.T) {
+	store := mkStore(t)
+	reg, err := OpenRegistry(t.TempDir() + "/registry.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	agentPK := strings.Repeat("aa", 32)
+	if _, err := reg.RegisterAgent("cpa", agentPK, "#freehold"); err != nil {
+		t.Fatal(err)
+	}
+	var jobsMembers []string
+	var channelMember struct{ channel, pub string }
+	s := &Server{
+		Jobs:  store,
+		Tools: &agent.Tools{Console: reg},
+		ResolveChannel: func(name string) (string, error) {
+			return "human-channel-id", nil
+		},
+		EnsureJobsMember: func(pub string) error {
+			jobsMembers = append(jobsMembers, pub)
+			return nil
+		},
+		EnsureChannelMember: func(channelID, pub string) error {
+			channelMember = struct{ channel, pub string }{channelID, pub}
+			return nil
+		},
+	}
+	job, err := s.createJob(createJobArgs{Prompt: "p", Cron: "@daily", Channel: "#general", Agent: "cpa"}, agentPK)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.Owner != agentPK {
+		t.Errorf("owner = %q, want the creating agent (self-initiated default)", job.Owner)
+	}
+	if len(jobsMembers) != 2 || jobsMembers[0] != agentPK || jobsMembers[1] != agentPK {
+		t.Errorf("jobs-channel seats = %v, want owner + agent", jobsMembers)
+	}
+	if channelMember.channel != "human-channel-id" || channelMember.pub != agentPK {
+		t.Errorf("human-channel seat = %+v, want the target agent in the resolved channel", channelMember)
+	}
+}
+
+func TestCreateJobHumanOwnerThreadRootAndSeats(t *testing.T) {
+	store := mkStore(t)
+	reg, err := OpenRegistry(t.TempDir() + "/registry.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	agentPK := strings.Repeat("bb", 32)
+	human := strings.Repeat("cc", 32)
+	if _, err := reg.RegisterAgent("cpa", agentPK, "#freehold"); err != nil {
+		t.Fatal(err)
+	}
+	var jobsMembers []string
+	var channelSeats []string
+	s := &Server{
+		Jobs:  store,
+		Tools: &agent.Tools{Console: reg},
+		ResolveChannel: func(name string) (string, error) {
+			return "human-channel-id", nil
+		},
+		EnsureJobsMember: func(pub string) error {
+			jobsMembers = append(jobsMembers, pub)
+			return nil
+		},
+		EnsureChannelMember: func(channelID, pub string) error {
+			channelSeats = append(channelSeats, channelID+"|"+pub)
+			return nil
+		},
+	}
+	job, err := s.createJob(createJobArgs{
+		Prompt: "p", Cron: "@daily", Channel: "#general", Agent: "cpa",
+		Owner: human, Label: "daily ask", ThreadRoot: "root-event",
+	}, agentPK)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.Owner != human {
+		t.Errorf("owner = %q, want the asker's npub", job.Owner)
+	}
+	if job.ThreadRoot != "root-event" {
+		t.Errorf("thread root = %q, want root-event", job.ThreadRoot)
+	}
+	if len(jobsMembers) != 2 || jobsMembers[0] != human || jobsMembers[1] != agentPK {
+		t.Errorf("jobs-channel seats = %v, want owner + agent", jobsMembers)
+	}
+	if len(channelSeats) != 1 || channelSeats[0] != "human-channel-id|"+agentPK {
+		t.Errorf("human-channel seats = %v, want the target agent", channelSeats)
+	}
+}

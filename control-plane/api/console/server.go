@@ -1,6 +1,7 @@
 package console
 
 import (
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -9,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -16,9 +18,12 @@ import (
 
 	"freehold/contract/client"
 	"freehold/contract/config"
+	contractconsole "freehold/contract/console"
+	"freehold/contract/identity"
 	"freehold/contract/relay"
 	"freehold/contract/version"
 	"freehold/contract/wire"
+	"freehold/control-plane/api/agent"
 	"freehold/control-plane/api/agenttools"
 	"freehold/control-plane/api/cpbuild"
 	"freehold/control-plane/secret-management"
@@ -193,6 +198,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		s.agentsList(w, r)
 	case path == "/api/jobs" && method == http.MethodGet:
 		s.jobsList(w, r)
+	case path == "/api/channels/prune" && method == http.MethodGet:
+		s.channelsPrune(w, r, false)
+	case path == "/api/channels/prune" && method == http.MethodPost:
+		s.channelsPrune(w, r, true)
 	case path == "/api/agents" && method == http.MethodPost:
 		s.agentsRegister(w, r)
 	case strings.HasPrefix(path, "/api/agents/") && method == http.MethodDelete:
@@ -2023,6 +2032,227 @@ func (s *Server) jobsList(w http.ResponseWriter, r *http.Request) {
 		out = append(out, row)
 	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{"jobs": out})
+}
+
+// pruneChannelRow is one visible agent channel's prune report.
+type pruneChannelRow struct {
+	ID      string   `json:"id"`
+	Name    string   `json:"name"`
+	Members []string `json:"members"`
+	Stale   []string `json:"stale"`
+	Removed []string `json:"removed,omitempty"`
+	Errors  []string `json:"errors,omitempty"`
+}
+
+// channelsPrune is the operator-authorized stale-key sweep. GET is a read-only
+// preview (the member-list pull that confirms a world is affected); POST
+// removes every member of a visible agent channel that is neither the current
+// console key (the fire identity), an operator/admin, nor a live registry
+// agent. The console is the relay owner, so its signature authorizes the
+// remove-user. The scheduled-jobs channel is never swept — the console owns it
+// and every seat there is intentional.
+func (s *Server) channelsPrune(w http.ResponseWriter, r *http.Request, apply bool) {
+	if _, err := s.requireAdmin(r); err != nil {
+		writeErr(w, statusFor(err), err.Error())
+		return
+	}
+	if err := checkOrigin(r, s.PublicOrigin, s.WorldDomain); err != nil {
+		writeErr(w, http.StatusForbidden, err.Error())
+		return
+	}
+	snap := s.Store.Snapshot()
+	dial, auth := s.relayDialAuth(snap)
+	if dial == "" || snap.RelayPubkey == nil || *snap.RelayPubkey == "" || len(s.ConsoleSecret) != 32 {
+		writeErr(w, http.StatusBadRequest, "relay not configured (need relay_url + relay_pubkey + the console identity)")
+		return
+	}
+	// The allow-list: the current console key (the scheduled-jobs fire
+	// identity), every operator/admin, and every live registry agent. Anything
+	// else in a visible channel is stale (an old born-on-box console key).
+	allowed := map[string]bool{}
+	if s.ConsolePubkey != "" {
+		allowed[s.ConsolePubkey] = true
+	}
+	for _, a := range snap.Admins {
+		allowed[a] = true
+	}
+	var agents []contractconsole.AgentInfo
+	names := map[string]bool{"#freehold": true, "#general": true}
+	if s.AgentToolsDir != "" {
+		loaded, lerr := agenttools.LoadRegistryReadOnly(filepath.Join(s.AgentToolsDir, agenttools.RegistryFile))
+		if lerr != nil {
+			writeErr(w, http.StatusInternalServerError, lerr.Error())
+			return
+		}
+		agents = loaded
+		for _, a := range agents {
+			if a.Pubkey != "" {
+				allowed[a.Pubkey] = true
+			}
+			for _, ch := range a.Channels {
+				if ch != "" {
+					names[ch] = true
+				}
+			}
+			if a.Channel != "" {
+				names[a.Channel] = true
+			}
+		}
+	}
+	for _, rec := range snap.Agents {
+		if rec.Pubkey != "" {
+			allowed[rec.Pubkey] = true
+		}
+	}
+	// Keep human relay members: only KNOWN AGENT identities (live or removed —
+	// their durable identity dirs stay on the CP) are treated as system keys.
+	// A human whose pubkey is not an agent identity is a legitimate member.
+	humans, herr := relay.CommunityMembersAuth(dial, auth, s.ConsoleSecret, *snap.RelayPubkey)
+	if herr != nil {
+		writeErr(w, http.StatusBadGateway, herr.Error())
+		return
+	}
+	known := s.knownAgentPubkeys()
+	for _, pk := range humans {
+		if !known[pk] {
+			allowed[pk] = true
+		}
+	}
+	cpaName := agent.DefaultCPAName
+	if s.Builder != nil && s.Builder.CpaName != "" {
+		cpaName = s.Builder.CpaName
+	}
+	rows := make([]pruneChannelRow, 0, len(names))
+	for name := range names {
+		// freehold-created channels carry their name-derived id; #freehold is
+		// the fixed first-run channel. Deriving the id avoids the relay's
+		// membership-gated discovery (the console is not a member of private
+		// agent channels after the cut-over).
+		id := relay.ChannelIDFromName(name)
+		if name == "#freehold" {
+			id = relay.FreeholdChannelID
+		}
+		if id == agenttools.ScheduledJobsChannelID {
+			continue
+		}
+		// The channel's OWNER admits membership writes (a non-owner member can
+		// read but not remove): the CPA for the first-run channels, the
+		// creating agent for agent channels. Resolve it from the 9007 create
+		// event using a member's secret as the reader.
+		signer := s.ConsoleSecret
+		if name == "#freehold" || name == "#general" {
+			if sec := s.agentSecretByName(cpaName); len(sec) == 32 {
+				signer = sec
+			}
+		} else {
+			var reader []byte
+			for _, a := range agents {
+				if slices.Contains(a.Channels, name) || a.Channel == name {
+					if sec := s.agentSecretByName(a.Name); len(sec) == 32 {
+						reader = sec
+						break
+					}
+				}
+			}
+			if len(reader) == 32 {
+				signer = reader
+				if ownerPK, oerr := relay.ChannelOwnerAuth(dial, auth, id, reader); oerr == nil && ownerPK != "" {
+					for _, a := range agents {
+						if a.Pubkey == ownerPK {
+							if sec := s.agentSecretByName(a.Name); len(sec) == 32 {
+								signer = sec
+							}
+							break
+						}
+					}
+				}
+			}
+		}
+		members, merr := agenttools.QueryGroupMembersAuth(dial, auth, *snap.RelayPubkey, id, signer)
+		if merr != nil {
+			writeErr(w, http.StatusBadGateway, merr.Error())
+			return
+		}
+		row := pruneChannelRow{ID: id, Name: name, Members: members}
+		for _, pk := range members {
+			if !allowed[pk] {
+				row.Stale = append(row.Stale, pk)
+			}
+		}
+		if apply {
+			for _, pk := range row.Stale {
+				if rerr := relay.RemoveUserChannelAuth(dial, auth, signer, id, pk); rerr != nil {
+					row.Errors = append(row.Errors, pk+": "+rerr.Error())
+					continue
+				}
+				row.Removed = append(row.Removed, pk)
+			}
+		}
+		rows = append(rows, row)
+	}
+	sort.Slice(rows, func(i, j int) bool { return rows[i].Name < rows[j].Name })
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"apply":          apply,
+		"console_pubkey": s.ConsolePubkey,
+		"allowed":        sortedKeys(allowed),
+		"channels":       rows,
+	})
+}
+
+// knownAgentPubkeys enumerates every agent identity on the CP — live registry
+// rows and removed agents whose durable identity dirs remain. Used to keep
+// human relay members out of the prune's stale-key set.
+func (s *Server) knownAgentPubkeys() map[string]bool {
+	out := map[string]bool{}
+	if s.AgentToolsDir == "" {
+		return out
+	}
+	entries, err := os.ReadDir(filepath.Join(s.AgentToolsDir, "agents"))
+	if err != nil {
+		return out
+	}
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		id, ierr := identity.Load(filepath.Join(s.AgentToolsDir, "agents", e.Name()))
+		if ierr != nil {
+			continue
+		}
+		pk, perr := id.NostrPubkeyHex()
+		if perr == nil && pk != "" {
+			out[pk] = true
+		}
+	}
+	return out
+}
+
+// agentSecretByName loads an agent's Nostr secret from its durable identity
+// dir under the agent-tools root — the signer a channel's owner admits for
+// membership writes.
+func (s *Server) agentSecretByName(name string) []byte {
+	if s.AgentToolsDir == "" || name == "" {
+		return nil
+	}
+	id, err := identity.Load(cpbuild.AgentIdentityPath(s.AgentToolsDir, name))
+	if err != nil {
+		return nil
+	}
+	sec, err := hex.DecodeString(id.NostrSecretHex)
+	if err != nil || len(sec) != 32 {
+		return nil
+	}
+	return sec
+}
+
+// sortedKeys is the deterministic rendering of the prune allow-list.
+func sortedKeys(m map[string]bool) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func (s *Server) agentsList(w http.ResponseWriter, r *http.Request) {

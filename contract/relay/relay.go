@@ -61,6 +61,43 @@ func ChannelIDFromName(name string) string {
 	return fmt.Sprintf("%s-%s-%s-%s-%s", hexs[0:8], hexs[8:12], hexs[12:16], hexs[16:20], hexs[20:32])
 }
 
+// FreeholdChannelID is the fixed id of the shared #freehold channel (every
+// agent's workroom). Unlike name-derived channels it is a constant, so every
+// process agrees without a relay lookup.
+const FreeholdChannelID = "00000000-0000-4000-8000-00000000f0ef"
+
+// ChannelOwnerAuth returns the author of the newest valid kind-9007 channel
+// create event for channelID — the channel's creator/owner. The read signs as
+// authSecret, which must be able to see the channel (a member or the relay
+// admin). Empty when no create event is visible.
+func ChannelOwnerAuth(dialURL, authURL, channelID string, authSecret []byte) (string, error) {
+	filters := []interface{}{map[string]interface{}{
+		"kinds": []interface{}{wire.ChannelCreate},
+		"#h":    []interface{}{channelID},
+		"limit": 100,
+	}}
+	events, err := QueryEventsAuth(dialURL, authURL, authSecret, filters)
+	if err != nil {
+		return "", err
+	}
+	newest := int64(-1)
+	owner := ""
+	for _, ev := range events {
+		author, _ := ev["pubkey"].(string)
+		createdAt := intOr(ev["created_at"])
+		tags, _ := parseTags(ev)
+		content, _ := ev["content"].(string)
+		sig, _ := ev["sig"].(string)
+		if _, err := wire.VerifyEvent(author, createdAt, wire.ChannelCreate, tags, content, sig); err != nil {
+			continue
+		}
+		if createdAt >= newest {
+			newest, owner = createdAt, author
+		}
+	}
+	return owner, nil
+}
+
 // GroupMeta is a NIP-29 channel's id + display name (kind 39000 group meta).
 type GroupMeta struct {
 	ID   string
@@ -726,6 +763,41 @@ func PublishProfileAuth(dialURL, authURL string, secret []byte, name, about stri
 	}
 	evBytes, _ := json.Marshal(ev)
 	return PublishEventJSONAuth(dialURL, authURL, secret, string(evBytes))
+}
+
+// CommunityMembersAuth returns every pubkey on the relay's current NIP-43
+// membership list (kind 13534, relay-signed). Empty on an unreadable list.
+func CommunityMembersAuth(dialURL, authURL string, authSecret []byte, relayPubkey string) ([]string, error) {
+	if relayPubkey == "" {
+		return nil, nil
+	}
+	events, err := QueryEventsAuth(dialURL, authURL, authSecret, []interface{}{map[string]interface{}{
+		"kinds": []interface{}{wire.KINDNip43Membership}, "authors": []interface{}{relayPubkey}, "limit": 1,
+	}})
+	if err != nil {
+		return nil, err
+	}
+	for _, ev := range events {
+		author, _ := ev["pubkey"].(string)
+		if author != relayPubkey {
+			continue
+		}
+		createdAt := eventCreatedAt(ev)
+		tags, _ := parseTags(ev)
+		content, _ := ev["content"].(string)
+		sig, _ := ev["sig"].(string)
+		if _, err := wire.VerifyEvent(author, createdAt, wire.KINDNip43Membership, tags, content, sig); err != nil {
+			continue
+		}
+		out := []string{}
+		for _, t := range tags {
+			if len(t) >= 2 && t[0] == "member" {
+				out = append(out, t[1])
+			}
+		}
+		return out, nil
+	}
+	return nil, nil
 }
 
 // IsCommunityMemberAuth reports whether pubkey is a member of the relay's

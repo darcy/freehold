@@ -110,6 +110,31 @@ func PostTaggedMessageAuth(dialURL, authURL string, secret []byte, channelID, me
 	return publishSignedAuth(dialURL, authURL, secret, StreamMsgKind, tags, content)
 }
 
+// PostTaggedMessageAuthID is PostTaggedMessageAuth that returns the published
+// event's id — the scheduled-jobs scheduler stores it as a job's thread anchor.
+// An empty mentionPubkey omits the p tag (an anchor is not a wake mention).
+func PostTaggedMessageAuthID(dialURL, authURL string, secret []byte, channelID, mentionPubkey string, extra [][]string, content string) (string, error) {
+	tags := [][]string{{"h", channelID}}
+	if mentionPubkey != "" {
+		tags = append(tags, []string{"p", mentionPubkey})
+	}
+	tags = append(tags, extra...)
+	ts := time.Now().Unix()
+	pubkey, id, sig, err := wire.SignEvent(secret, StreamMsgKind, ts, tags, content)
+	if err != nil {
+		return "", err
+	}
+	ev := map[string]interface{}{
+		"id": id, "pubkey": pubkey, "created_at": ts, "kind": StreamMsgKind,
+		"tags": tags, "content": content, "sig": sig,
+	}
+	evBytes, _ := json.Marshal(ev)
+	if err := relay.PublishEventJSONAuth(dialURL, authURL, secret, string(evBytes)); err != nil {
+		return "", err
+	}
+	return id, nil
+}
+
 // PostNoteAuth publishes a bare kind:1 note (NIP-01) — the Buzz Pulse surface
 // (its global feed reads kinds:[1]; channel messages are kind 9 and never show
 // there). Extra tags ride for provenance/idempotence markers.

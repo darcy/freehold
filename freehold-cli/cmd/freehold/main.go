@@ -42,6 +42,8 @@ CLI:
     freehold snapshot  snapshot the whole durable plane under one name
                        (snapshot [label], --list, --rm <name>,
                        "snapshot rollback" — guests stop, newer snapshots go)
+    freehold prune-channels  preview (or --apply) the stale system keys in visible
+                       agent channels (operator-authorized; jobs channel exempt)
     freehold export    the durable plane's data + profile config into one
                        gzip bundle (du estimate first, confirm; no rootfs)
     freehold backup    restic off-site to any backend (init/run/snapshots;

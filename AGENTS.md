@@ -281,7 +281,11 @@ shells (tmux/herdr panes included) via the `freehold` CLI / SSH / doors — the 
   the shared private `#freehold` channel — there are no per-department channels. **Every
   agent — custom agents included — is a member of `#freehold`** (`create_agent` joins it
   automatically): it is the workroom where all agent-to-agent plumbing lives (hand-offs,
-  delegation, verification), while the channel the user asked in gets plain-language status
+  delegation, verification). **Every agent is also a member of the world-level
+  `freehold-scheduled-jobs` channel** (console-owned, open/joinable): scheduled-job fires
+  land there and wake exactly the named agent, which replies there (the delivery) and
+  cross-posts its owner-attributed visible update into the job's human channel; the console
+  holds no seat in visible agent channels. The channel the user asked in gets plain-language status
   only ("on it" / "still working on it" / "it's running" or "there was a problem") — no ids,
   manifests, or infrastructure narration. The
   **first-run surface** the operator meets is freehold's, not the Buzz desktop app's: the build
@@ -354,7 +358,7 @@ owning docs: `docs/AI.md`, `docs/NETWORK.md`, `docs/DATA.md`, `docs/COMPUTE.md`,
   - `freehold-cli/` (`freehold/freehold-cli` — the local operator surface: the `freehold`
     CLI + TUI, one dir-per-verb (`install/`, `uninstall/`, `build/`, `teardown/`,
     `status/`, `update/`, `exec/`, `profiles/`, `door/`, `dns-cred/`, `add-relay-member/`,
-    `backup/`, `export/`, `snapshot/`)
+    `backup/`, `export/`, `snapshot/`, `prune-channels/`)
     plus `login/` + `tui/` and `internal/` (`common`, `certcred`, `stages`, `cpdeploy`,
     `artifact`); the `freehold`
     binary's main is `cmd/freehold`):

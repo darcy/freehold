@@ -26,7 +26,15 @@ func QueryRoster(relayURL, relayPubkey, ownPubkey string, secret []byte) ([]stri
 // QueryRosterAuth is QueryRoster with a separate NIP-98 auth URL (the
 // pre-Caddy LAN-dial case in agent-tools).
 func QueryRosterAuth(dialURL, authURL, relayPubkey, ownPubkey string, secret []byte) ([]string, error) {
-	cid := relay.RunnerChannelID(ownPubkey)
+	return QueryGroupMembersAuth(dialURL, authURL, relayPubkey, relay.RunnerChannelID(ownPubkey), secret)
+}
+
+// QueryGroupMembersAuth reads one NIP-29 channel's relay-signed 39002 member
+// list by its explicit channel id (a runner channel, an agent channel, the
+// scheduled-jobs channel — any group). Trust is the roster's own signature,
+// with relayPubkey as an optional author pin, exactly like QueryRosterAuth.
+func QueryGroupMembersAuth(dialURL, authURL, relayPubkey, channelID string, secret []byte) ([]string, error) {
+	cid := channelID
 	filters := []interface{}{map[string]interface{}{
 		"kinds": []interface{}{wire.GroupMembers},
 		"#d":    []interface{}{cid},
