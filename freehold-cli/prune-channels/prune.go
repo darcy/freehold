@@ -2,9 +2,10 @@
 // operator-authorized sweep of stale SYSTEM keys from visible agent channels.
 // The default is a read-only preview (the member-list pull that confirms a
 // world is affected); --apply removes members that are neither the current
-// console key, an operator/admin, a live registry agent, nor a human relay
-// member. A removed agent's seats are swept (its registry row is gone). The
-// preview's `allowed` list is the source of truth for exactly what a sweep keeps.
+// console key, an operator/admin, a live registry agent (a registry or
+// console-state row), nor a human relay member. A removed agent's seats are
+// swept when it has no live row. The preview's `allowed` list is the source of
+// truth for exactly what a sweep keeps.
 package prunechannels
 
 import (
@@ -24,7 +25,8 @@ var pruneCmd = &cobra.Command{
 	Short: "Preview or remove stale system keys from visible agent channels",
 	Long: "Preview (default) the member lists of the world's visible agent channels and the\n" +
 		"stale system keys --apply would remove. Human relay members and live registry agents\n" +
-		"are kept; a removed agent's seats are swept. The preview's `allowed` list is explicit.\n" +
+		"(registry or console-state rows) are kept; a removed agent's seats are swept when it\n" +
+		"has no live row. The preview's `allowed` list is explicit.\n" +
 		"With --apply, remove those stale keys through the console (operator-authorized).\n" +
 		"The scheduled-jobs channel is never swept.",
 	RunE: func(cmd *cobra.Command, args []string) error {
