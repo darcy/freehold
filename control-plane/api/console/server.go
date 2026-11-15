@@ -2046,11 +2046,13 @@ type pruneChannelRow struct {
 
 // channelsPrune is the operator-authorized stale-key sweep. GET is a read-only
 // preview (the member-list pull that confirms a world is affected); POST
-// removes every member of a visible agent channel that is neither the current
-// console key (the fire identity), an operator/admin, nor a live registry
-// agent. The console is the relay owner, so its signature authorizes the
-// remove-user. The scheduled-jobs channel is never swept — the console owns it
-// and every seat there is intentional.
+// removes the stale SYSTEM keys from a visible agent channel — members that are
+// neither the current console key (the fire identity), an operator/admin, a
+// live registry agent (a registry or console-state row), nor a human relay
+// member (a NIP-43 member whose pubkey is not a known agent identity). Each
+// remove is signed by the channel's owner (the CPA for the first-run channels,
+// the creating agent for agent channels). The scheduled-jobs channel is never
+// swept — the console owns it and every seat there is intentional.
 func (s *Server) channelsPrune(w http.ResponseWriter, r *http.Request, apply bool) {
 	if _, err := s.requireAdmin(r); err != nil {
 		writeErr(w, statusFor(err), err.Error())
@@ -2067,8 +2069,9 @@ func (s *Server) channelsPrune(w http.ResponseWriter, r *http.Request, apply boo
 		return
 	}
 	// The allow-list: the current console key (the scheduled-jobs fire
-	// identity), every operator/admin, and every live registry agent. Anything
-	// else in a visible channel is stale (an old born-on-box console key).
+	// identity), every operator/admin, every live registry agent, and every
+	// human relay member. Anything else in a visible channel is a stale system
+	// key (an old born-on-box console key, or a removed agent's seat).
 	allowed := map[string]bool{}
 	if s.ConsolePubkey != "" {
 		allowed[s.ConsolePubkey] = true
