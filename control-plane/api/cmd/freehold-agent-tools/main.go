@@ -731,10 +731,9 @@ func cmdServe(args []string) {
 					return err
 				}
 			}
-			if operatorPeer == "" {
-				return nil
-			}
-			return ensureChannelMember(agenttools.ScheduledJobsChannelID, operatorPeer)
+			// The operator is not seated by default; the channel is open and
+			// the operator joins manually (or as a job owner at creation).
+			return nil
 		},
 	}
 	go sched.Run(context.Background())

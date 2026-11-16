@@ -53,6 +53,11 @@ import (
 
 const relayFreeholdChannel = "00000000-0000-4000-8000-00000000f0ef"
 
+// consoleProfileName is the console identity's kind:0 display name — the
+// scheduled-jobs fire identity renders as a named system member, not a
+// faceless npub.
+const consoleProfileName = "freehold-console"
+
 // The shipped migration scripts are bounded because the world_build path runs the
 // queue while holding the registry's write lock: one wedged script would otherwise
 // block every roster read and write in the serve for as long as it hung. Each script
@@ -1619,6 +1624,9 @@ func BuildWorldApply(spec *Spec) agent.WorldApply {
 				return "", fmt.Errorf("world-build console relay membership: %w", err)
 			}
 		}
+		// 2.45. The console identity's profile: the scheduled-jobs fire identity
+		// renders as "freehold-console", not a faceless npub.
+		report = spec.stageConsoleProfile(report)
 		// 2.5. Deploy the operator toolset (freehold-agent-tools) once the relay
 		// it seeds its roster against is up — the console's world_build brings
 		// up agent-tools itself (no box-one / deploy-cp dependency).
@@ -2516,6 +2524,45 @@ func (s *Spec) stageOperatorProfile(report []string) []string {
 	return append(report, "operator profile published ("+name+") — the Buzz desktop app skips its first-run onboarding")
 }
 
+// stageConsoleProfile publishes the console identity's kind:0 profile
+// ("freehold-console") so the scheduled-jobs fire identity renders as a named
+// system member. Read-first: an existing profile with the right name is left
+// alone; a different one is replaced (the console identity is system-owned).
+// WARN-only: a missed publish degrades to a faceless npub, never a failed build.
+func (s *Spec) stageConsoleProfile(report []string) []string {
+	if s.RelayURL == "" && s.RelayHost == "" {
+		return report
+	}
+	sec := s.consoleSecret()
+	if len(sec) != 32 {
+		return append(report, "WARN: console profile: the console identity is unreadable")
+	}
+	pk, err := crypto.PubkeyFromSecret(sec)
+	if err != nil {
+		return append(report, "WARN: console profile: "+err.Error())
+	}
+	authURL := s.RelayAuthURL
+	if authURL == "" {
+		authURL = s.RelayURL
+	}
+	evs, err := relay.QueryEventsAuth(s.relayDial(), authURL, sec, []interface{}{map[string]interface{}{
+		"kinds":   []interface{}{0},
+		"authors": []interface{}{pk},
+		"limit":   1,
+	}})
+	if err != nil {
+		return append(report, "WARN: console profile: relay read failed: "+err.Error())
+	}
+	if len(evs) > 0 && operatorProfileName(evs[0]) == consoleProfileName {
+		return append(report, "console profile already present (freehold-console)")
+	}
+	if err := relay.PublishProfileAuth(s.relayDial(), authURL, sec, consoleProfileName,
+		"freehold console (scheduled-jobs fire identity)"); err != nil {
+		return append(report, "WARN: console profile publish failed: "+err.Error())
+	}
+	return append(report, "console profile published (freehold-console)")
+}
+
 // operatorProfileName pulls the display name out of a kind:0 profile event —
 // the name the operator chose on the Buzz side, the one mentions render
 // against. Empty when the event is missing or malformed.
@@ -3363,12 +3410,9 @@ func (s *Spec) stageScheduledJobsChannel(report []string) ([]string, error) {
 	if err != nil {
 		return report, fmt.Errorf("scheduled-jobs channel: read registry: %w", err)
 	}
-	// Seat the operator + every live agent in the jobs channel.
-	if s.OwnerPub != "" {
-		if err := s.ensureJobsChannelMember(s.OwnerPub); err != nil {
-			return report, fmt.Errorf("scheduled-jobs channel: operator: %w", err)
-		}
-	}
+	// Seat every live agent in the jobs channel. The operator is NOT seated by
+	// default — the channel is open/joinable, and the operator joins manually
+	// (or as a job owner at creation).
 	for _, a := range rows {
 		if a.Pubkey == "" {
 			continue

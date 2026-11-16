@@ -244,12 +244,8 @@ func (s *Scheduler) ensureHeartbeat(byName map[string]string) {
 	if pk == "" {
 		return
 	}
-	owner := s.OperatorPub
-	if owner == "" {
-		owner = pk
-	}
 	job := &Job{
-		ID: "heartbeat", Owner: owner, Agent: s.HeartbeatAgent, AgentPubkey: pk,
+		ID: "heartbeat", Owner: pk, Agent: s.HeartbeatAgent, AgentPubkey: pk,
 		Channel: s.JobsChannel, Cron: "@daily", Label: "heartbeat",
 		Prompt:    "Heartbeat: reply with a one-line status so the scheduled-job wake path stays exercised.",
 		NextRunAt: nextRunFor("@daily", "", 0),

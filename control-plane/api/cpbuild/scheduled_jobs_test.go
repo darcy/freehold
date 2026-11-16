@@ -100,7 +100,7 @@ func TestStageScheduledJobsChannel(t *testing.T) {
 
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	var created, seated, removed bool
+	var created, seatedAgent, seatedOperator, removed bool
 	for _, ev := range f.events {
 		kind, _ := ev["kind"].(float64)
 		tags := tagsOfTest(ev)
@@ -112,8 +112,11 @@ func TestStageScheduledJobsChannel(t *testing.T) {
 		case 9000:
 			if tagValueTest(tags, "h") == agenttools.ScheduledJobsChannelID {
 				pk := tagValueTest(tags, "p")
-				if pk == operatorPK || pk == agentPK {
-					seated = true
+				if pk == agentPK {
+					seatedAgent = true
+				}
+				if pk == operatorPK {
+					seatedOperator = true
 				}
 			}
 		case 9001:
@@ -128,8 +131,11 @@ func TestStageScheduledJobsChannel(t *testing.T) {
 	if !created {
 		t.Error("jobs channel was not created (no kind-9007 with its h id)")
 	}
-	if !seated {
-		t.Error("operator/agent were not seated in the jobs channel")
+	if !seatedAgent {
+		t.Error("the agent was not seated in the jobs channel")
+	}
+	if seatedOperator {
+		t.Error("the operator must not be auto-seated in the jobs channel")
 	}
 	if !removed {
 		t.Error("console was not removed from #freehold")
@@ -158,4 +164,72 @@ func tagValueTest(tags [][]string, key string) string {
 		}
 	}
 	return ""
+}
+
+func TestStageConsoleProfile(t *testing.T) {
+	root := t.TempDir()
+	stateDir := filepath.Join(root, "agent-tools")
+	if err := os.MkdirAll(stateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	consoleSec := make([]byte, 32)
+	consoleSec[0] = 0x43
+	consolePK, err := crypto.PubkeyFromSecret(consoleSec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	consoleDir := filepath.Join(root, "control-plane", "console")
+	if err := os.MkdirAll(consoleDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	idJSON := fmt.Sprintf(`{"nostr_secret_hex":%q}`, hex.EncodeToString(consoleSec))
+	if err := os.WriteFile(filepath.Join(consoleDir, "identity.json"), []byte(idJSON), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	f := newFakeRelay(t)
+	spec := &Spec{StateDir: stateDir, RelayURL: f.srv.URL, RelayAuthURL: f.srv.URL}
+	report := spec.stageConsoleProfile(nil)
+	if len(report) != 1 || !strings.Contains(report[0], "console profile published") {
+		t.Errorf("report = %v, want the console-profile publish", report)
+	}
+
+	f.mu.Lock()
+	published := 0
+	for _, ev := range f.events {
+		kind, _ := ev["kind"].(float64)
+		if int(kind) != 0 {
+			continue
+		}
+		published++
+		author, _ := ev["pubkey"].(string)
+		if author != consolePK {
+			t.Errorf("profile author = %s, want the console pubkey", author)
+		}
+		content, _ := ev["content"].(string)
+		if !strings.Contains(content, consoleProfileName) {
+			t.Errorf("profile content = %q, want the console name", content)
+		}
+	}
+	f.mu.Unlock()
+	if published != 1 {
+		t.Fatalf("published %d kind:0 profiles, want 1", published)
+	}
+
+	// Read-first: a second run sees the profile and does not republish.
+	report = spec.stageConsoleProfile(nil)
+	if len(report) != 1 || !strings.Contains(report[0], "already present") {
+		t.Errorf("second report = %v, want already-present", report)
+	}
+	f.mu.Lock()
+	again := 0
+	for _, ev := range f.events {
+		if kind, _ := ev["kind"].(float64); int(kind) == 0 {
+			again++
+		}
+	}
+	f.mu.Unlock()
+	if again != 1 {
+		t.Errorf("second run republished the profile (%d kind:0 events)", again)
+	}
 }

@@ -93,13 +93,15 @@ the schedule and channel, then calls `create_job` — and a `jobs.json` row afte
     (agent-writable authoritative store; console read-only view). The console never writes
     jobs.
 *   **Fires land in one world-level channel: `freehold-scheduled-jobs`.** It is open
-    (joinable), owned by the **console identity** (the fire signer), and holds every agent,
-    the operator, and every job owner (added at creation — an owner who cannot be pinged
-    there is an owner whose misses are silent). A due job is a kind-9 mention posted by the
-    console into that channel, p-tagging the agent — only that agent wakes — and its reply
-    there IS the delivery. The console identity rides every pod's respond-to allowlist for
-    this (see "Who may talk to whom"). The console is **not** a member of the visible agent
-    channels; fires no longer land where humans read.
+    (joinable), owned by the **console identity** (the fire signer, which publishes the
+    `freehold-console` kind:0 profile so it renders as a named system member), and holds
+    every agent and every job owner (added at creation — an owner who cannot be pinged there
+    is an owner whose misses are silent). The operator is **not auto-seated**; the channel is
+    open, so the operator can join, and they are seated when they own a job. A due job is a
+    kind-9 mention posted by the console into that channel, p-tagging the agent — only that
+    agent wakes — and its reply there IS the delivery. The console identity rides every pod's
+    respond-to allowlist for this (see "Who may talk to whom"). The console is **not** a
+    member of the visible agent channels; fires no longer land where humans read.
 *   **Every job has an owner.** A human ask carries the asker's npub; an agent-initiated
     job carries the creating agent's pubkey (omitted `owner` defaults to the caller). The
     owner receives the never-woke timeout ping. A job's `channel` is the **human channel**
@@ -376,14 +378,14 @@ one-time human login over a headed browser) is future work, not this.
 *   Job **prompts sit in plaintext** in the agent-tools' `jobs.json` (0600, durable plane)
     — the scheduler must read them to fire. The privacy boundary is the console API's
     owner redaction, not encryption. A fire carries the prompt into the jobs channel, so
-    its members (every agent, the operator, and job owners) see it.
+    its members (every agent and job owner; the operator joins themselves) see it.
 *   Job fires and **failure notes are best-effort**: a relay outage during a
     fire records the run as `error` — a failed post provably never went out,
     so a one-shot re-queues (2 minutes) and pauses after 5 consecutive
     failures; a failure note the channel refuses is logged, not retried.
 *   The relay has **no unlisted channel visibility**: `freehold-scheduled-jobs` is
-    open/joinable and appears to its members (the operator included). Hiding it from a
-    sidebar would need a client or relay change.
+    open/joinable and appears to its members (every agent and job owner; the operator once
+    they join). Hiding it from a sidebar would need a client or relay change.
 *   **Console jobs management is read-only**: pause/delete run through agents
     (`pause_job`/`delete_job`), since jobs.json is the agent-tools process's own store.
 *   Agents read the repo but can't write it.
