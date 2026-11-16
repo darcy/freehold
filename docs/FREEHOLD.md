@@ -54,8 +54,10 @@ the ordering across all of them is `docs/ROADMAP.md`.
     as itself. The console identity no longer holds seats in visible agent channels, so a
     rebuilt world's orphaned system keys are swept by the operator-authorized
     `freehold prune-channels` verb (preview by default, `--apply` to remove; the jobs
-    channel is exempt). `create_job` seats the target agent in both the jobs channel and
-    the human channel; a channel it cannot resolve is refused with a pass-the-id remedy.
+    channel is exempt). `create_job` seats the target agent in the jobs channel and
+    best-effort seats it in the human channel; an unresolvable name is refused with a
+    pass-the-id remedy, while a refused human-channel seat does not fail the job — the
+    agent reports a cross-post failure in its delivery.
 
 **Verification and CI**
 *   No bot-review injection pre-vet; no single real-relay acceptance run.
