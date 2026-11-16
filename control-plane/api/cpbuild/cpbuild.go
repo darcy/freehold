@@ -26,6 +26,8 @@ import (
 	"time"
 
 	"freehold/agents"
+	"freehold/contract/agentsurface"
+	"freehold/contract/avatar"
 	"freehold/contract/client"
 	"freehold/contract/config"
 	"freehold/contract/crypto"
@@ -2416,6 +2418,91 @@ func (s *Spec) mintAuthTag(agentPk, who string) (string, error) {
 	return tag.JSON(), nil
 }
 
+// ensureAgentProfile publishes a managed agent's kind-0 profile only when the
+// current head differs from freehold's projection. The profile carries the
+// owner's kind=0 attestation (Buzz's "Managed by" provenance), a real name,
+// the registry purpose as about, and a hosted HTTPS avatar. Reconcile runs on
+// every build, so a compare-first write is what keeps a converged world quiet
+// while still repairing a missing/stale profile.
+//
+// The CPA is created first in reconcileAgentsInto, so its profile is the
+// canary: a relay refusal here fails the build before the fleet publishes.
+func (s *Spec) ensureAgentProfile(name, purpose, pub string, nSec []byte) error {
+	ownerSec, err := s.ownerKey()
+	if err != nil {
+		return fmt.Errorf("agent profile: no owner key to attest the kind-0 profile: %w", err)
+	}
+	cpHost := strings.TrimSpace(s.CpHost)
+	if cpHost == "" {
+		return fmt.Errorf("agent profile: no CP host to derive the hosted avatar URL")
+	}
+	picture := avatar.URL(cpHost, pub)
+	profile := agentsurface.Profile{
+		Name:        name,
+		DisplayName: name,
+		About:       purpose,
+		Picture:     picture,
+		NIP05:       profileNIP05(name, cpHost),
+		IsAgent:     true,
+	}
+	if _, err := agentsurface.NormalizeProfile(profile); err != nil {
+		return fmt.Errorf("agent profile: %w", err)
+	}
+	authURL := s.RelayAuthURL
+	if authURL == "" {
+		authURL = s.RelayURL
+	}
+	content, tags, headAt, err := relay.QueryAgentProfileAuth(s.relayDial(), authURL, nSec, pub)
+	if err != nil {
+		return fmt.Errorf("read current profile: %w", err)
+	}
+	if content != "" && relay.AgentProfileMatches(content, tags, profile, pub, s.OwnerPub) {
+		return nil
+	}
+	ts := time.Now().Unix()
+	if headAt >= ts {
+		ts = headAt + 1
+	}
+	if err := relay.PublishAgentProfileAuthAt(s.relayDial(), authURL, nSec, ownerSec, pub, profile, ts); err != nil {
+		return fmt.Errorf("publish: %w", err)
+	}
+	// Read the accepted head back: a relay that stores a different shape (or
+	// silently drops the auth tag) must fail the build, not leave a profile
+	// that renders as initials with no "Managed by" row.
+	content, tags, _, err = relay.QueryAgentProfileAuth(s.relayDial(), authURL, nSec, pub)
+	if err != nil {
+		return fmt.Errorf("verify published profile: %w", err)
+	}
+	if !relay.AgentProfileMatches(content, tags, profile, pub, s.OwnerPub) {
+		return fmt.Errorf("relay accepted the profile but the head does not carry the expected body + kind=0 attestation")
+	}
+	return nil
+}
+
+// profileNIP05 is the self-declared handle freehold publishes for an agent:
+// a slug derived from the name at the CP's host. It is a display handle, not a
+// verified NIP-05 mapping; the profile's auth tag is the provenance.
+func profileNIP05(name, host string) string {
+	slug := strings.ToLower(strings.TrimSpace(name))
+	var b strings.Builder
+	for _, r := range slug {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '-', r == '_':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('-')
+		}
+	}
+	slug = strings.Trim(b.String(), "-_")
+	if slug == "" {
+		slug = "agent"
+	}
+	if len(slug) > 64 {
+		slug = strings.Trim(slug[:64], "-_")
+	}
+	return slug + "@" + strings.TrimSpace(host)
+}
+
 // appendMemoryPlane appends the report line that makes the agent memory plane's
 // health visible at bring-up. It names the attesting identity rather than a bare
 // ok because the failure it covers is a silent one: a world whose agents answer
@@ -2852,7 +2939,8 @@ func (s *Spec) revokeOrgWideMemberships(name string) error {
 	return nil
 }
 
-func BuildCreateAgentFn(spec *Spec) agent.CreateAgentFn {	return func(name, purpose string, channels []string, private bool, model string) (string, error) {
+func BuildCreateAgentFn(spec *Spec) agent.CreateAgentFn {
+	return func(name, purpose string, channels []string, private bool, model string) (string, error) {
 		model = litellmModelFor(spec.CpaName, name, model)
 		if name == "" {
 			return "", fmt.Errorf("create-agent needs a non-empty name")
@@ -2925,7 +3013,7 @@ func BuildCreateAgentFn(spec *Spec) agent.CreateAgentFn {	return func(name, purp
 		if authURL == "" {
 			authURL = spec.RelayURL
 		}
-		if err := relay.PublishProfileAuth(spec.relayDial(), authURL, nSec, name, "freehold agent"); err != nil {
+		if err := spec.ensureAgentProfile(name, purpose, pub, nSec); err != nil {
 			return "", fmt.Errorf("publish %s profile: %w", name, err)
 		}
 		// Each named channel is resolved (created, owned by this agent, when

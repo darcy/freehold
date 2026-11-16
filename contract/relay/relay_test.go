@@ -1,17 +1,18 @@
 package relay
 
 import (
-	"encoding/json"
-
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"freehold/contract/crypto"
+	"strings"
 	"testing"
 	"time"
 
+	"freehold/contract/agentsurface"
+	"freehold/contract/crypto"
 	"freehold/contract/wire"
 )
 
@@ -95,7 +96,7 @@ func TestChannelIDFromName(t *testing.T) {
 
 // relayFreeholdChannelForTest mirrors cpbuild's fixed freehold channel id (the
 // derived ids must never collide with it).
-func relayFreeholdChannelForTest() string { return "00000000-0000-4000-8000-00000000f0ef" }// --- merge_runner_metas (newest wins per channel; rogue author ignored) ---
+func relayFreeholdChannelForTest() string { return "00000000-0000-4000-8000-00000000f0ef" } // --- merge_runner_metas (newest wins per channel; rogue author ignored) ---
 
 func metaEvent(t *testing.T, who []byte, p *RunnerProfile, ts int64) map[string]interface{} {
 	content, _ := jsonMarshal(p)
@@ -346,5 +347,68 @@ func TestQueryGroupsAuthPaginatesPastThePageLimit(t *testing.T) {
 	}
 	if second["before_id"] == "" {
 		t.Fatal("page-2 must carry before_id (the relay requires until+before_id together)")
+	}
+}
+
+// TestAgentProfilePublishAndMatch pins the managed-agent profile shape: the
+// event is authored by the agent, carries exactly one kind=0 NIP-OA auth tag,
+// and the compare helper only skips a republish when the body and a VERIFIED
+// attestation already match.
+func TestAgentProfilePublishAndMatch(t *testing.T) {
+	agentSec := mustSecret(t, 2)
+	ownerSec := mustSecret(t, 1)
+	agentPk := pubkeyOf(t, agentSec)
+	ownerPk := pubkeyOf(t, ownerSec)
+	var published []map[string]interface{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/events"):
+			var ev map[string]interface{}
+			if err := json.Unmarshal(body, &ev); err != nil {
+				t.Errorf("published event not JSON: %v", err)
+			}
+			published = append(published, ev)
+			w.WriteHeader(http.StatusOK)
+		case strings.HasSuffix(r.URL.Path, "/query"):
+			_ = json.NewEncoder(w).Encode([]map[string]interface{}{})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+
+	p := agentsurface.Profile{
+		Name: "freehold", DisplayName: "freehold",
+		About: "the control plane agent", Picture: "https://cp.example/avatars/" + agentPk + ".png",
+		NIP05: "freehold@cp.example", IsAgent: true,
+	}
+	if err := PublishAgentProfileAuth(srv.URL, srv.URL, agentSec, ownerSec, agentPk, p); err != nil {
+		t.Fatalf("publish: %v", err)
+	}
+	if len(published) != 1 {
+		t.Fatalf("published %d events, want 1", len(published))
+	}
+	ev := published[0]
+	if int(ev["kind"].(float64)) != 0 || ev["pubkey"] != agentPk {
+		t.Fatalf("wrong envelope: %+v", ev)
+	}
+	tags := ev["tags"].([]interface{})
+	if len(tags) != 1 {
+		t.Fatalf("want exactly one tag, got %v", tags)
+	}
+	auth := tags[0].([]interface{})
+	if auth[0] != "auth" || auth[1] != ownerPk || auth[2] != "kind=0" {
+		t.Fatalf("wrong auth tag: %v", auth)
+	}
+	content := ev["content"].(string)
+	if !AgentProfileMatches(content, [][]string{{"auth", ownerPk, "kind=0", auth[3].(string)}}, p, agentPk, ownerPk) {
+		t.Fatal("published profile must match its own projection")
+	}
+	if AgentProfileMatches(content, [][]string{{"auth", ownerPk, "kind=0", strings.Repeat("a", 128)}}, p, agentPk, ownerPk) {
+		t.Fatal("a forged auth signature must force a republish")
+	}
+	if AgentProfileMatches(content, [][]string{{"auth", ownerPk, "kind=30174", auth[3].(string)}}, p, agentPk, ownerPk) {
+		t.Fatal("a non-kind-0 attestation must force a republish")
 	}
 }

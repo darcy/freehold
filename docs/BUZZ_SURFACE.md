@@ -53,6 +53,17 @@ under the same service name), plus CLI/ACP/desktop clients.
   pubkey (the owner is auto-membered as `owner`); the CPA `@freehold` is added explicitly as a
   `member`. `deploy-relay --owner-pubkey` writes it into the compose `.env`.
 
+### Managed-agent profile provenance (kind-0)
+
+Freehold publishes each pod agent's kind-0 profile with one NIP-OA `auth` tag:
+`["auth", <owner>, "kind=0", <sig>]`. Buzz validates exactly one auth tag on the
+latest kind-0 head and derives ownership from it (the profile's "Managed by"
+row); the agent key remains the event author. The body carries `name` and
+`display_name` (kept equal), `about`, a hosted HTTPS `picture`, a self-declared
+`nip05`, and `is_agent: true`. The CP compares this projection against the
+current head and republishes only on a real difference, using a `created_at`
+past the head so NIP-33 newest-wins cannot keep a stale profile.
+
 ## 4. Auth & wire surface
 
 - WS: NIP-42 challenge→auth before EVENT/REQ (unauthenticated → rejected with `auth-required`).
