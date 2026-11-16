@@ -378,14 +378,14 @@ one-time human login over a headed browser) is future work, not this.
 *   Job **prompts sit in plaintext** in the agent-tools' `jobs.json` (0600, durable plane)
     — the scheduler must read them to fire. The privacy boundary is the console API's
     owner redaction, not encryption. A fire carries the prompt into the jobs channel, so
-    its members (every agent, the operator, and job owners) see it.
+    its members (every agent and job owner; the operator joins themselves) see it.
 *   Job fires and **failure notes are best-effort**: a relay outage during a
     fire records the run as `error` — a failed post provably never went out,
     so a one-shot re-queues (2 minutes) and pauses after 5 consecutive
     failures; a failure note the channel refuses is logged, not retried.
 *   The relay has **no unlisted channel visibility**: `freehold-scheduled-jobs` is
-    open/joinable and appears to its members (the operator included). Hiding it from a
-    sidebar would need a client or relay change.
+    open/joinable and appears to its members (every agent and job owner; the operator once
+    they join). Hiding it from a sidebar would need a client or relay change.
 *   **Console jobs management is read-only**: pause/delete run through agents
     (`pause_job`/`delete_job`), since jobs.json is the agent-tools process's own store.
 *   Agents read the repo but can't write it.
