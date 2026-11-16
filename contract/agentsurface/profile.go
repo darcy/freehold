@@ -11,12 +11,13 @@ import (
 	"net/url"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 )
 
 const (
-	maxNameBytes   = 100
-	maxAboutBytes  = 280
-	maxNIP05Bytes  = 255
+	maxNameBytes    = 100
+	maxAboutBytes   = 280
+	maxNIP05Bytes   = 255
 	maxPictureBytes = 2048
 )
 
@@ -73,6 +74,21 @@ func NormalizeProfile(p Profile) (Profile, error) {
 		}
 	}
 	return p, nil
+}
+
+// ClampAbout bounds a display-only about string to the profile limit. It is
+// used for values freehold does not author (the registry purpose): a long
+// purpose must degrade the display, never fail the whole build.
+func ClampAbout(s string) string {
+	s = strings.TrimSpace(s)
+	if len(s) <= maxAboutBytes {
+		return s
+	}
+	b := []byte(s[:maxAboutBytes])
+	for len(b) > 0 && !utf8.Valid(b) {
+		b = b[:len(b)-1]
+	}
+	return strings.TrimSpace(string(b))
 }
 
 // ValidatePicture enforces the hosted-avatar rule: an absolute HTTPS URL with

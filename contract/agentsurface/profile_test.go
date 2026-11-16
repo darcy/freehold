@@ -77,3 +77,20 @@ func TestProfileMatchesContent(t *testing.T) {
 		t.Fatal("malformed content must not match")
 	}
 }
+
+func TestClampAbout(t *testing.T) {
+	if got := ClampAbout("  short  "); got != "short" {
+		t.Fatalf("short about = %q, want trimmed", got)
+	}
+	long := strings.Repeat("é", maxAboutBytes) // two bytes per rune
+	got := ClampAbout(long)
+	if len(got) > maxAboutBytes {
+		t.Fatalf("clamped about is %d bytes, over the %d limit", len(got), maxAboutBytes)
+	}
+	if !strings.HasPrefix(got, "é") || strings.ContainsRune(got, '\uFFFD') {
+		t.Fatalf("clamp cut a rune: %q", got)
+	}
+	if _, err := NormalizeProfile(Profile{Name: "a", DisplayName: "a", About: got}); err != nil {
+		t.Fatalf("clamped about must be a valid profile body: %v", err)
+	}
+}

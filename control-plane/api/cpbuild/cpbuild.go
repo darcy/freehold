@@ -2451,7 +2451,7 @@ func (s *Spec) ensureAgentProfile(name, purpose, pub string, nSec []byte) error 
 	profile := agentsurface.Profile{
 		Name:        name,
 		DisplayName: name,
-		About:       purpose,
+		About:       agentsurface.ClampAbout(purpose),
 		Picture:     picture,
 		NIP05:       profileNIP05(name, cpHost),
 		IsAgent:     true,

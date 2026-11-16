@@ -125,3 +125,35 @@ func TestEnsureAgentProfileFailsOnRelayRefusal(t *testing.T) {
 		t.Fatal("a relay refusal must fail the profile publish loudly")
 	}
 }
+
+func TestEnsureAgentProfileClampsLongPurpose(t *testing.T) {
+	ownerSec := make([]byte, 32)
+	ownerSec[31] = 1
+	ownerPk, _ := crypto.PubkeyFromSecret(ownerSec)
+	agentSec := make([]byte, 32)
+	agentSec[31] = 2
+	agentPk, _ := crypto.PubkeyFromSecret(agentSec)
+	f := newFakeFirstRunRelay(t, nil)
+	s := &Spec{
+		RelayURL:     f.srv.URL,
+		RelayAuthURL: f.srv.URL,
+		CpHost:       "cp.example",
+		OwnerPub:     ownerPk,
+		OwnerSecret:  ownerSec,
+	}
+	if err := s.ensureAgentProfile("freehold", strings.Repeat("x", 1000), agentPk, agentSec); err != nil {
+		t.Fatalf("a long display-only purpose must degrade, not fail the build: %v", err)
+	}
+	if got := f.published(); len(got) != 1 {
+		t.Fatalf("published %d events, want 1", len(got))
+	}
+	var ev struct {
+		Content string `json:"content"`
+	}
+	if err := json.Unmarshal([]byte(f.published()[0]), &ev); err != nil {
+		t.Fatal(err)
+	}
+	if len(ev.Content) == 0 || strings.Contains(ev.Content, strings.Repeat("x", 281)) {
+		t.Fatalf("long purpose was not clamped: %s", ev.Content)
+	}
+}
