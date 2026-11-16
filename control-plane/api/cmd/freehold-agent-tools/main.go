@@ -656,9 +656,7 @@ func cmdServe(args []string) {
 	if authURL == "" {
 		authURL = *relayURL
 	}
-	// Membership writes are admitted by the channel's OWNER: the console owns
-	// the jobs channel; #freehold/#general are CPA-owned. A non-owner member
-	// can read but not write, so pick the owner's identity.
+	// The jobs channel is console-owned; seat members there (the console signs).
 	loadAgentSecret := func(name string) []byte {
 		id, ierr := identity.Load(cpbuild.AgentIdentityPath(*stateDir, name))
 		if ierr != nil {
@@ -670,70 +668,39 @@ func cmdServe(args []string) {
 		}
 		return sec
 	}
-	cpaChannel := func(channelID string) bool {
-		return channelID == relay.FreeholdChannelID || channelID == relay.ChannelIDFromName("#general")
-	}
-	// channelSigner resolves the identity the relay admits for a membership
-	// write on channelID: the console owns the jobs channel; #freehold/#general
-	// are CPA-owned; an agent channel is owned by its creator (resolved from
-	// the 9007 create event via a member reader). Falls back to the console.
-	channelSigner := func(channelID string) []byte {
-		if channelID == agenttools.ScheduledJobsChannelID {
-			return consoleSecret
-		}
-		if cpaChannel(channelID) {
-			if sec := loadAgentSecret(*cpaName); len(sec) == 32 {
-				return sec
-			}
-		}
+	// isChannelMember reads the target agent's OWN membership on a human
+	// channel — a read, never an owner-signed write (the CP's key custody must
+	// not seat an agent into a channel its owner did not admit it to). An
+	// unreadable identity or a relay read error is a non-member.
+	isChannelMember := func(channelID, pub string) (bool, error) {
 		agents, aerr := reg.Agents()
 		if aerr != nil {
-			return consoleSecret
+			return false, aerr
 		}
-		var reader []byte
+		name := ""
 		for _, a := range agents {
-			for _, ch := range append(append([]string{}, a.Channels...), a.Channel) {
-				if ch == "" {
-					continue
-				}
-				id := relay.ChannelIDFromName(ch)
-				if ch == "#freehold" {
-					id = relay.FreeholdChannelID
-				}
-				if id == channelID {
-					if sec := loadAgentSecret(a.Name); len(sec) == 32 {
-						reader = sec
-					}
-					break
-				}
-			}
-			if len(reader) == 32 {
+			if a.Pubkey == pub {
+				name = a.Name
 				break
 			}
 		}
-		if len(reader) != 32 {
-			return consoleSecret
+		if name == "" {
+			return false, nil
 		}
-		if ownerPK, oerr := relay.ChannelOwnerAuth(*relayURL, authURL, channelID, reader); oerr == nil && ownerPK != "" {
-			for _, a := range agents {
-				if a.Pubkey == ownerPK {
-					if sec := loadAgentSecret(a.Name); len(sec) == 32 {
-						return sec
-					}
-					break
-				}
-			}
+		sec := loadAgentSecret(name)
+		if len(sec) != 32 {
+			return false, fmt.Errorf("no identity for %s", name)
 		}
-		return reader
+		return relay.IsMemberAuth(*relayURL, authURL, sec, channelID, pub)
 	}
 	// Idempotent membership writes — the relay renders each put-user, so an
-	// existing seat is skipped.
+	// existing seat is skipped. The jobs channel is console-owned, so the
+	// console signs.
 	ensureChannelMember := func(channelID, pub string) error {
-		signer := channelSigner(channelID)
-		if member, merr := relay.IsMemberAuth(*relayURL, authURL, signer, channelID, pub); merr == nil && member {
+		if member, merr := relay.IsMemberAuth(*relayURL, authURL, consoleSecret, channelID, pub); merr == nil && member {
 			return nil
 		}
-		return relay.PutUserChannelAuth(*relayURL, authURL, signer, channelID, pub)
+		return relay.PutUserChannelAuth(*relayURL, authURL, consoleSecret, channelID, pub)
 	}
 	ensureJobsMember := func(pub string) error {
 		if _, _, ok, err := relay.FindChannelAuth(*relayURL, authURL, consoleSecret, "#"+agenttools.ScheduledJobsChannelName); err != nil {
@@ -816,9 +783,9 @@ func cmdServe(args []string) {
 		// Every job has an owner; both the owner and the target agent join the
 		// jobs channel at creation (the timeout notice pings the owner there).
 		EnsureJobsMember: ensureJobsMember,
-		// The target agent must be able to write its visible update in the
-		// human channel — the console (relay owner) seats it there.
-		EnsureChannelMember: ensureChannelMember,
+		// The target agent must already be on the human channel's live roster;
+		// this is a read, never an owner-signed seat.
+		IsChannelMember: isChannelMember,
 		// Channel resolution signs as the console identity — the credential
 		// the fire will use — so what resolves here is exactly what can post.
 		ResolveChannel: func(name string) (string, error) {

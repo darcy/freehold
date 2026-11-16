@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"freehold/contract/console"
-	"freehold/contract/relay"
 	"freehold/control-plane/api/agent"
 )
 
@@ -98,10 +97,10 @@ type Server struct {
 	// the target agent — a member who cannot be pinged there is a silent miss.
 	// nil = membership is not wired (tests).
 	EnsureJobsMember func(pubkey string) error
-	// EnsureChannelMember adds pubkey to an existing channel id (console-signed,
-	// relay-owner authority) so the target agent can post its visible update
-	// there. nil = membership is not wired (tests).
-	EnsureChannelMember func(channelID, pubkey string) error
+	// IsChannelMember reports whether pubkey is on the live roster of the
+	// human channel (the target agent's own identity reads its membership —
+	// no owner-signed write). nil = membership is not wired (tests).
+	IsChannelMember func(channelID, pubkey string) (bool, error)
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -532,10 +531,9 @@ func (s *Server) createJob(a createJobArgs, caller string) (*Job, error) {
 	// carries the name for display, refreshed per fire).
 	agents := mustAgents(s.Tools)
 	agentName, agentPK := "", caller
-	var agentRow console.AgentInfo
 	for _, ai := range agents {
 		if ai.Pubkey == caller {
-			agentName, agentRow = ai.Name, ai
+			agentName = ai.Name
 			break
 		}
 	}
@@ -543,7 +541,7 @@ func (s *Server) createJob(a createJobArgs, caller string) (*Job, error) {
 		agentName, agentPK = "", ""
 		for _, ai := range agents {
 			if ai.Name == a.Agent {
-				agentName, agentPK, agentRow = ai.Name, ai.Pubkey, ai
+				agentName, agentPK = ai.Name, ai.Pubkey
 				break
 			}
 		}
@@ -582,21 +580,16 @@ func (s *Server) createJob(a createJobArgs, caller string) (*Job, error) {
 			return nil, fmt.Errorf("add %s to #%s: %w", agentName, ScheduledJobsChannelName, err)
 		}
 	}
-	if s.EnsureChannelMember != nil && channel != ScheduledJobsChannelID {
-		// The seat may only RE-ASSERT a membership the channel owner's own
-		// create/update flow established: the target agent's registry row must
-		// list the channel. Otherwise an agent could pass an arbitrary private
-		// channel id and have the CP's owner-key custody seat it there — the
-		// containment the relay's owner-only membership rule provides.
-		if channelRegistered(agentRow, channel) {
-			if err := s.EnsureChannelMember(channel, agentPK); err != nil {
-				// Best-effort: a channel owned by an identity the console
-				// cannot act for refuses the seat. The job still runs; the
-				// agent reports the cross-post failure in its delivery.
-				log.Printf("scheduled jobs: could not seat %s in the visible-update channel: %v", agentName, err)
-			}
-		} else {
-			log.Printf("scheduled jobs: %s is not registered in the visible-update channel — skipping the seat (the cross-post may fail; the agent reports it)", agentName)
+	if s.IsChannelMember != nil && channel != ScheduledJobsChannelID {
+		// The target agent must ALREADY be on the human channel's live roster
+		// (the owner's create/update flow established the membership). This is
+		// a read, not a write: the CP's key custody must never seat an agent
+		// into a channel its owner did not admit it to. A non-member job still
+		// runs; the agent reports the cross-post failure in its delivery.
+		if member, merr := s.IsChannelMember(channel, agentPK); merr != nil {
+			log.Printf("scheduled jobs: membership check for %s in the visible-update channel failed: %v", agentName, merr)
+		} else if !member {
+			log.Printf("scheduled jobs: %s is not a member of the visible-update channel — the cross-post may fail; the agent reports it", agentName)
 		}
 	}
 	id, err := randomHex(6)
@@ -613,33 +606,6 @@ func (s *Server) createJob(a createJobArgs, caller string) (*Job, error) {
 		return nil, err
 	}
 	return job, nil
-}
-
-// channelRegistered reports whether an agent's registry row lists channelID —
-// the seat may only re-assert a membership the owner's create/update flow
-// established, never add an agent to a channel it was not registered into.
-func channelRegistered(a console.AgentInfo, channelID string) bool {
-	if channelID == "" {
-		return false
-	}
-	for _, ch := range append(append([]string{}, a.Channels...), a.Channel) {
-		if ch == "" {
-			continue
-		}
-		if channelIDForName(ch) == channelID {
-			return true
-		}
-	}
-	return false
-}
-
-// channelIDForName is the h-tag id for a registry channel name (#freehold is
-// the fixed first-run channel; the rest are name-derived).
-func channelIDForName(name string) string {
-	if strings.EqualFold(strings.TrimPrefix(strings.TrimSpace(name), "#"), "freehold") {
-		return relay.FreeholdChannelID
-	}
-	return relay.ChannelIDFromName(name)
 }
 
 // mustAgents lists the registry (empty on error — validation then fails with

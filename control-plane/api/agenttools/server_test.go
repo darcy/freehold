@@ -983,7 +983,7 @@ func TestCreateJobOwnerDefaultsAndSeats(t *testing.T) {
 		t.Fatal(err)
 	}
 	var jobsMembers []string
-	var channelMember struct{ channel, pub string }
+	var membershipChecks []string
 	s := &Server{
 		Jobs:  store,
 		Tools: &agent.Tools{Console: reg},
@@ -994,9 +994,9 @@ func TestCreateJobOwnerDefaultsAndSeats(t *testing.T) {
 			jobsMembers = append(jobsMembers, pub)
 			return nil
 		},
-		EnsureChannelMember: func(channelID, pub string) error {
-			channelMember = struct{ channel, pub string }{channelID, pub}
-			return nil
+		IsChannelMember: func(channelID, pub string) (bool, error) {
+			membershipChecks = append(membershipChecks, channelID+"|"+pub)
+			return true, nil
 		},
 	}
 	job, err := s.createJob(createJobArgs{Prompt: "p", Cron: "@daily", Channel: "#general", Agent: "cpa"}, agentPK)
@@ -1009,8 +1009,8 @@ func TestCreateJobOwnerDefaultsAndSeats(t *testing.T) {
 	if len(jobsMembers) != 2 || jobsMembers[0] != agentPK || jobsMembers[1] != agentPK {
 		t.Errorf("jobs-channel seats = %v, want owner + agent", jobsMembers)
 	}
-	if channelMember.channel != generalID || channelMember.pub != agentPK {
-		t.Errorf("human-channel seat = %+v, want the target agent in the resolved channel", channelMember)
+	if len(membershipChecks) != 1 || membershipChecks[0] != generalID+"|"+agentPK {
+		t.Errorf("human-channel membership checks = %v, want the target agent in the resolved channel", membershipChecks)
 	}
 }
 
@@ -1027,7 +1027,7 @@ func TestCreateJobHumanOwnerThreadRootAndSeats(t *testing.T) {
 		t.Fatal(err)
 	}
 	var jobsMembers []string
-	var channelSeats []string
+	var membershipChecks []string
 	s := &Server{
 		Jobs:  store,
 		Tools: &agent.Tools{Console: reg},
@@ -1038,9 +1038,9 @@ func TestCreateJobHumanOwnerThreadRootAndSeats(t *testing.T) {
 			jobsMembers = append(jobsMembers, pub)
 			return nil
 		},
-		EnsureChannelMember: func(channelID, pub string) error {
-			channelSeats = append(channelSeats, channelID+"|"+pub)
-			return nil
+		IsChannelMember: func(channelID, pub string) (bool, error) {
+			membershipChecks = append(membershipChecks, channelID+"|"+pub)
+			return true, nil
 		},
 	}
 	job, err := s.createJob(createJobArgs{
@@ -1059,16 +1059,16 @@ func TestCreateJobHumanOwnerThreadRootAndSeats(t *testing.T) {
 	if len(jobsMembers) != 2 || jobsMembers[0] != human || jobsMembers[1] != agentPK {
 		t.Errorf("jobs-channel seats = %v, want owner + agent", jobsMembers)
 	}
-	if len(channelSeats) != 1 || channelSeats[0] != generalID+"|"+agentPK {
-		t.Errorf("human-channel seats = %v, want the target agent", channelSeats)
+	if len(membershipChecks) != 1 || membershipChecks[0] != generalID+"|"+agentPK {
+		t.Errorf("human-channel membership checks = %v, want the target agent", membershipChecks)
 	}
 }
 
-// TestCreateJobDoesNotSeatAnUnregisteredChannel: an agent may not steer an
-// owner-signed membership write into a channel its registry row does not list
-// (the relay's owner-only rule is the containment; the CP's key custody must
-// not bypass it).
-func TestCreateJobDoesNotSeatAnUnregisteredChannel(t *testing.T) {
+// TestCreateJobUnregisteredChannelIsNotSeated: an agent may not steer an
+// owner-signed membership write into a channel its owner did not admit it to.
+// The job is created; the live-roster read reports non-membership and no write
+// happens (the agent reports a cross-post failure).
+func TestCreateJobUnregisteredChannelIsNotSeated(t *testing.T) {
 	store := mkStore(t)
 	reg, err := OpenRegistry(t.TempDir() + "/registry.json")
 	if err != nil {
@@ -1078,25 +1078,30 @@ func TestCreateJobDoesNotSeatAnUnregisteredChannel(t *testing.T) {
 	if _, err := reg.RegisterAgent("cpa", agentPK, "#freehold"); err != nil {
 		t.Fatal(err)
 	}
-	var channelSeats []string
+	privateID := strings.Repeat("ee", 18)
+	var checks []string
 	s := &Server{
 		Jobs:  store,
 		Tools: &agent.Tools{Console: reg},
 		ResolveChannel: func(name string) (string, error) {
-			return strings.Repeat("ee", 18), nil // an arbitrary private channel id
+			return privateID, nil // an arbitrary private channel id
 		},
 		EnsureJobsMember: func(pub string) error { return nil },
-		EnsureChannelMember: func(channelID, pub string) error {
-			channelSeats = append(channelSeats, channelID+"|"+pub)
-			return nil
+		IsChannelMember: func(channelID, pub string) (bool, error) {
+			checks = append(checks, channelID+"|"+pub)
+			return false, nil
 		},
 	}
-	if _, err := s.createJob(createJobArgs{
+	job, err := s.createJob(createJobArgs{
 		Prompt: "p", Cron: "@daily", Channel: "#private", Agent: "cpa",
-	}, agentPK); err != nil {
+	}, agentPK)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if len(channelSeats) != 0 {
-		t.Errorf("unregistered channel was seated: %v", channelSeats)
+	if job.ID == "" {
+		t.Error("the job must still be created")
+	}
+	if len(checks) != 1 || checks[0] != privateID+"|"+agentPK {
+		t.Errorf("membership checks = %v, want the private channel/agent", checks)
 	}
 }
