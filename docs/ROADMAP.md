@@ -34,8 +34,9 @@ A world converges on one `freehold build`.
 *   **Harden the base** — the live-grant roster break (the relay's put-user → re-sign
     chain) (`docs/FREEHOLD.md`).
 *   **Scheduled jobs everywhere** — every agent offers and manages jobs (`create_job` et al.),
-    the CP fires them as console-identity mentions, and the console web + TUI show the
-    owner-redacted run state (`docs/AI.md`).
+    the CP fires them into `freehold-scheduled-jobs` (the agent replies there and cross-posts
+    its owner-attributed visible update into the human channel), and the console web + TUI
+    show the owner-redacted run state (`docs/AI.md`).
 *   **Scoped per-agent LiteLLM keys** and a resource baseline (`docs/AI.md`); **runner-client
     in every guest** (`docs/COMPUTE.md`).
 

@@ -3,6 +3,7 @@ package agenttools
 import (
 	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -269,5 +270,29 @@ func TestWithRegistryLockedReReadsAfterFailure(t *testing.T) {
 	}
 	if len(got) != 2 {
 		t.Fatalf("memory was not re-read after a failed run: %+v", got)
+	}
+}
+
+func TestLoadRegistryReadOnly(t *testing.T) {
+	if rows, err := LoadRegistryReadOnly(t.TempDir() + "/nope.json"); err != nil || rows != nil {
+		t.Errorf("missing file = (%v, %v), want (nil, nil)", rows, err)
+	}
+	path := t.TempDir() + "/registry.json"
+	r, err := OpenRegistry(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.RegisterAgent("b", strings.Repeat("b", 64), "#freehold"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := r.RegisterAgent("a", strings.Repeat("a", 64), "#general"); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := LoadRegistryReadOnly(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 2 || rows[0].Name != "a" || rows[1].Name != "b" {
+		t.Fatalf("read-only rows = %v, want a,b sorted", rows)
 	}
 }
