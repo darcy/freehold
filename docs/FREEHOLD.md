@@ -49,8 +49,9 @@ the ordering across all of them is `docs/ROADMAP.md`.
     and a member session reaches exactly one route (`GET /api/jobs`). A member login
     needs the relay reachable — the membership check fails closed when it is not.
 *   Scheduled-job fires land in the world-level **`freehold-scheduled-jobs`** channel
-    (console-owned, open/joinable, agents + operator + job owners) rather than in visible
-    agent channels; the agent cross-posts its visible update into the job's human channel
+    (console-owned, open/joinable, agents + job owners; the operator is not auto-seated and
+    can join, and is seated when they own a job) rather than in visible agent channels; the
+    agent cross-posts its visible update into the job's human channel
     as itself. The console identity no longer holds seats in visible agent channels, so a
     rebuilt world's orphaned system keys are swept by the operator-authorized
     `freehold prune-channels` verb (preview by default, `--apply` to remove; the jobs

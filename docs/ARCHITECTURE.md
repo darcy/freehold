@@ -508,11 +508,13 @@ Operator ──chats via──► Buzz relay (Buzz-operated; host: self-hosted L
     narration.
 
 *   **Scheduled-job fires live in one world-level channel.** `freehold-scheduled-jobs`
-    is open/joinable, owned by the console identity (the fire signer), and holds every
-    agent, the operator, and every job owner. A fire wakes exactly the named agent; the
-    agent replies there (the delivery) and cross-posts its visible update into the job's
-    human channel as itself. The console holds no seat in visible agent channels, so
-    fire noise never lands where humans read (`docs/AI.md`, "Scheduled jobs").
+    is open/joinable, owned by the console identity (the fire signer, which publishes the
+    `freehold-console` profile), and holds every agent and every job owner. The operator is
+    not auto-seated — the channel is open, so the operator can join, and they are seated
+    when they own a job. A fire wakes exactly the named agent; the agent replies there (the
+    delivery) and cross-posts its visible update into the job's human channel as itself. The
+    console holds no seat in visible agent channels, so fire noise never lands where humans
+    read (`docs/AI.md`, "Scheduled jobs").
 
 *   **The first-run surface the operator meets is freehold's, not the Buzz
     desktop app's.** The build publishes the operator's kind:0 profile (the

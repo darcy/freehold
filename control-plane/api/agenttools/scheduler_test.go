@@ -576,8 +576,8 @@ func TestSchedulerEnsuresHeartbeat(t *testing.T) {
 	if !ok {
 		t.Fatal("heartbeat job was not created")
 	}
-	if j.Agent != "cpa" || j.Channel != "jobs" || j.Cron != "@daily" || j.Owner != "op" {
-		t.Errorf("heartbeat = %+v, want CPA-owned daily job in the jobs channel", j)
+	if j.Agent != "cpa" || j.Channel != "jobs" || j.Cron != "@daily" || j.Owner != "ccdd" {
+		t.Errorf("heartbeat = %+v, want the CPA-owned daily job in the jobs channel", j)
 	}
 	// Idempotent, and re-created if deleted (the permanent canary).
 	s.ensureHeartbeat(map[string]string{"cpa": "ccdd"})

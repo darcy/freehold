@@ -285,7 +285,9 @@ shells (tmux/herdr panes included) via the `freehold` CLI / SSH / doors — the 
   `freehold-scheduled-jobs` channel** (console-owned, open/joinable): scheduled-job fires
   land there and wake exactly the named agent, which replies there (the delivery) and
   cross-posts its owner-attributed visible update into the job's human channel; the console
-  holds no seat in visible agent channels. The channel the user asked in gets plain-language status
+  identity publishes the `freehold-console` profile, holds no seat in visible agent
+  channels, and the operator is not auto-seated (they can join, and are seated when they
+  own a job). The channel the user asked in gets plain-language status
   only ("on it" / "still working on it" / "it's running" or "there was a problem") — no ids,
   manifests, or infrastructure narration. The
   **first-run surface** the operator meets is freehold's, not the Buzz desktop app's: the build

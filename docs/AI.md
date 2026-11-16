@@ -93,13 +93,15 @@ the schedule and channel, then calls `create_job` — and a `jobs.json` row afte
     (agent-writable authoritative store; console read-only view). The console never writes
     jobs.
 *   **Fires land in one world-level channel: `freehold-scheduled-jobs`.** It is open
-    (joinable), owned by the **console identity** (the fire signer), and holds every agent,
-    the operator, and every job owner (added at creation — an owner who cannot be pinged
-    there is an owner whose misses are silent). A due job is a kind-9 mention posted by the
-    console into that channel, p-tagging the agent — only that agent wakes — and its reply
-    there IS the delivery. The console identity rides every pod's respond-to allowlist for
-    this (see "Who may talk to whom"). The console is **not** a member of the visible agent
-    channels; fires no longer land where humans read.
+    (joinable), owned by the **console identity** (the fire signer, which publishes the
+    `freehold-console` kind:0 profile so it renders as a named system member), and holds
+    every agent and every job owner (added at creation — an owner who cannot be pinged there
+    is an owner whose misses are silent). The operator is **not auto-seated**; the channel is
+    open, so the operator can join, and they are seated when they own a job. A due job is a
+    kind-9 mention posted by the console into that channel, p-tagging the agent — only that
+    agent wakes — and its reply there IS the delivery. The console identity rides every pod's
+    respond-to allowlist for this (see "Who may talk to whom"). The console is **not** a
+    member of the visible agent channels; fires no longer land where humans read.
 *   **Every job has an owner.** A human ask carries the asker's npub; an agent-initiated
     job carries the creating agent's pubkey (omitted `owner` defaults to the caller). The
     owner receives the never-woke timeout ping. A job's `channel` is the **human channel**
