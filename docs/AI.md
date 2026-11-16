@@ -108,8 +108,9 @@ the schedule and channel, then calls `create_job` — and a `jobs.json` row afte
     whose visible update stays in the jobs channel unless the prompt names another). An
     optional `thread_root` threads the visible update under a human-channel event. Wake
     channel and post channel are mechanically independent: `create_job` seats the target
-    agent in the jobs channel (load-bearing) and attempts the human channel (best-effort —
-    a channel owner the console cannot act for leaves the agent to report a cross-post
+    agent in the jobs channel (load-bearing) and attempts the human channel (best-effort,
+    and only to re-assert a membership the owner's create/update flow established — the
+    agent's registry row must list that channel; otherwise the agent reports a cross-post
     failure).
 *   **Noise:** each job's fires thread under a per-job anchor in the jobs channel, and every
     fire carries the `fh-job` tag — one filterable stream, no TTL (the fires are the audit

@@ -14,6 +14,7 @@ import (
 
 	"freehold/contract/console"
 	"freehold/contract/crypto"
+	"freehold/contract/relay"
 	"freehold/control-plane/api/agent"
 	"freehold/platform/migrations"
 )
@@ -977,7 +978,8 @@ func TestCreateJobOwnerDefaultsAndSeats(t *testing.T) {
 		t.Fatal(err)
 	}
 	agentPK := strings.Repeat("aa", 32)
-	if _, err := reg.RegisterAgent("cpa", agentPK, "#freehold"); err != nil {
+	generalID := relay.ChannelIDFromName("#general")
+	if _, err := reg.RegisterAgent("cpa", agentPK, "#general"); err != nil {
 		t.Fatal(err)
 	}
 	var jobsMembers []string
@@ -986,7 +988,7 @@ func TestCreateJobOwnerDefaultsAndSeats(t *testing.T) {
 		Jobs:  store,
 		Tools: &agent.Tools{Console: reg},
 		ResolveChannel: func(name string) (string, error) {
-			return "human-channel-id", nil
+			return generalID, nil
 		},
 		EnsureJobsMember: func(pub string) error {
 			jobsMembers = append(jobsMembers, pub)
@@ -1007,7 +1009,7 @@ func TestCreateJobOwnerDefaultsAndSeats(t *testing.T) {
 	if len(jobsMembers) != 2 || jobsMembers[0] != agentPK || jobsMembers[1] != agentPK {
 		t.Errorf("jobs-channel seats = %v, want owner + agent", jobsMembers)
 	}
-	if channelMember.channel != "human-channel-id" || channelMember.pub != agentPK {
+	if channelMember.channel != generalID || channelMember.pub != agentPK {
 		t.Errorf("human-channel seat = %+v, want the target agent in the resolved channel", channelMember)
 	}
 }
@@ -1020,7 +1022,8 @@ func TestCreateJobHumanOwnerThreadRootAndSeats(t *testing.T) {
 	}
 	agentPK := strings.Repeat("bb", 32)
 	human := strings.Repeat("cc", 32)
-	if _, err := reg.RegisterAgent("cpa", agentPK, "#freehold"); err != nil {
+	generalID := relay.ChannelIDFromName("#general")
+	if _, err := reg.RegisterAgent("cpa", agentPK, "#general"); err != nil {
 		t.Fatal(err)
 	}
 	var jobsMembers []string
@@ -1029,7 +1032,7 @@ func TestCreateJobHumanOwnerThreadRootAndSeats(t *testing.T) {
 		Jobs:  store,
 		Tools: &agent.Tools{Console: reg},
 		ResolveChannel: func(name string) (string, error) {
-			return "human-channel-id", nil
+			return generalID, nil
 		},
 		EnsureJobsMember: func(pub string) error {
 			jobsMembers = append(jobsMembers, pub)
@@ -1056,7 +1059,44 @@ func TestCreateJobHumanOwnerThreadRootAndSeats(t *testing.T) {
 	if len(jobsMembers) != 2 || jobsMembers[0] != human || jobsMembers[1] != agentPK {
 		t.Errorf("jobs-channel seats = %v, want owner + agent", jobsMembers)
 	}
-	if len(channelSeats) != 1 || channelSeats[0] != "human-channel-id|"+agentPK {
+	if len(channelSeats) != 1 || channelSeats[0] != generalID+"|"+agentPK {
 		t.Errorf("human-channel seats = %v, want the target agent", channelSeats)
+	}
+}
+
+// TestCreateJobDoesNotSeatAnUnregisteredChannel: an agent may not steer an
+// owner-signed membership write into a channel its registry row does not list
+// (the relay's owner-only rule is the containment; the CP's key custody must
+// not bypass it).
+func TestCreateJobDoesNotSeatAnUnregisteredChannel(t *testing.T) {
+	store := mkStore(t)
+	reg, err := OpenRegistry(t.TempDir() + "/registry.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	agentPK := strings.Repeat("dd", 32)
+	if _, err := reg.RegisterAgent("cpa", agentPK, "#freehold"); err != nil {
+		t.Fatal(err)
+	}
+	var channelSeats []string
+	s := &Server{
+		Jobs:  store,
+		Tools: &agent.Tools{Console: reg},
+		ResolveChannel: func(name string) (string, error) {
+			return strings.Repeat("ee", 18), nil // an arbitrary private channel id
+		},
+		EnsureJobsMember: func(pub string) error { return nil },
+		EnsureChannelMember: func(channelID, pub string) error {
+			channelSeats = append(channelSeats, channelID+"|"+pub)
+			return nil
+		},
+	}
+	if _, err := s.createJob(createJobArgs{
+		Prompt: "p", Cron: "@daily", Channel: "#private", Agent: "cpa",
+	}, agentPK); err != nil {
+		t.Fatal(err)
+	}
+	if len(channelSeats) != 0 {
+		t.Errorf("unregistered channel was seated: %v", channelSeats)
 	}
 }

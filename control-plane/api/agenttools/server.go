@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"freehold/contract/console"
+	"freehold/contract/relay"
 	"freehold/control-plane/api/agent"
 )
 
@@ -529,18 +530,20 @@ func (s *Server) createJob(a createJobArgs, caller string) (*Job, error) {
 	// The running agent defaults to the caller; an explicit name must exist
 	// (the row routes by the agent's PUBKEY — stable across renames — and
 	// carries the name for display, refreshed per fire).
+	agents := mustAgents(s.Tools)
 	agentName, agentPK := "", caller
-	for _, ai := range mustAgents(s.Tools) {
+	var agentRow console.AgentInfo
+	for _, ai := range agents {
 		if ai.Pubkey == caller {
-			agentName = ai.Name
+			agentName, agentRow = ai.Name, ai
 			break
 		}
 	}
 	if a.Agent != "" {
 		agentName, agentPK = "", ""
-		for _, ai := range mustAgents(s.Tools) {
+		for _, ai := range agents {
 			if ai.Name == a.Agent {
-				agentName, agentPK = ai.Name, ai.Pubkey
+				agentName, agentPK, agentRow = ai.Name, ai.Pubkey, ai
 				break
 			}
 		}
@@ -580,11 +583,20 @@ func (s *Server) createJob(a createJobArgs, caller string) (*Job, error) {
 		}
 	}
 	if s.EnsureChannelMember != nil && channel != ScheduledJobsChannelID {
-		if err := s.EnsureChannelMember(channel, agentPK); err != nil {
-			// Best-effort: a channel owned by an identity the console cannot
-			// act for refuses the seat. The job still runs; the agent reports
-			// the cross-post failure in its delivery if it cannot write there.
-			log.Printf("scheduled jobs: could not seat %s in the visible-update channel: %v", agentName, err)
+		// The seat may only RE-ASSERT a membership the channel owner's own
+		// create/update flow established: the target agent's registry row must
+		// list the channel. Otherwise an agent could pass an arbitrary private
+		// channel id and have the CP's owner-key custody seat it there — the
+		// containment the relay's owner-only membership rule provides.
+		if channelRegistered(agentRow, channel) {
+			if err := s.EnsureChannelMember(channel, agentPK); err != nil {
+				// Best-effort: a channel owned by an identity the console
+				// cannot act for refuses the seat. The job still runs; the
+				// agent reports the cross-post failure in its delivery.
+				log.Printf("scheduled jobs: could not seat %s in the visible-update channel: %v", agentName, err)
+			}
+		} else {
+			log.Printf("scheduled jobs: %s is not registered in the visible-update channel — skipping the seat (the cross-post may fail; the agent reports it)", agentName)
 		}
 	}
 	id, err := randomHex(6)
@@ -601,6 +613,33 @@ func (s *Server) createJob(a createJobArgs, caller string) (*Job, error) {
 		return nil, err
 	}
 	return job, nil
+}
+
+// channelRegistered reports whether an agent's registry row lists channelID —
+// the seat may only re-assert a membership the owner's create/update flow
+// established, never add an agent to a channel it was not registered into.
+func channelRegistered(a console.AgentInfo, channelID string) bool {
+	if channelID == "" {
+		return false
+	}
+	for _, ch := range append(append([]string{}, a.Channels...), a.Channel) {
+		if ch == "" {
+			continue
+		}
+		if channelIDForName(ch) == channelID {
+			return true
+		}
+	}
+	return false
+}
+
+// channelIDForName is the h-tag id for a registry channel name (#freehold is
+// the fixed first-run channel; the rest are name-derived).
+func channelIDForName(name string) string {
+	if strings.EqualFold(strings.TrimPrefix(strings.TrimSpace(name), "#"), "freehold") {
+		return relay.FreeholdChannelID
+	}
+	return relay.ChannelIDFromName(name)
 }
 
 // mustAgents lists the registry (empty on error — validation then fails with
