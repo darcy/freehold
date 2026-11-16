@@ -48,9 +48,9 @@ type Runner struct {
 	// relay-signed 39002 roster — what actually gates exec), "package" (the
 	// shipped fallback — the co-located runner's mode), "unavailable" (the
 	// read failed). Empty when no list was readable.
-	Grants      []string    `json:"grants"`
-	GrantsSource string       `json:"grants_source,omitempty"`
-	Readiness    interface{}  `json:"readiness,omitempty"`
+	Grants       []string    `json:"grants"`
+	GrantsSource string      `json:"grants_source,omitempty"`
+	Readiness    interface{} `json:"readiness,omitempty"`
 	// Colocated marks the CP's own co-located runner (the build/relay-admin
 	// hands on the CP guest) so clients can label it.
 	Colocated bool `json:"colocated,omitempty"`
@@ -466,6 +466,19 @@ func (c *Client) ScheduledJobs() ([]JobInfo, error) {
 		return nil, err
 	}
 	return wrapper.Jobs, nil
+}
+
+// ChannelsPrunePreview is the read-only stale-key member-list pull for visible
+// agent channels (the operator's confirmation before a sweep).
+func (c *Client) ChannelsPrunePreview() (json.RawMessage, error) {
+	return c.request(http.MethodGet, "/api/channels/prune", nil)
+}
+
+// ChannelsPruneApply removes every member of a visible agent channel that is
+// neither the current console key, an operator/admin, nor a live registry
+// agent. Operator-only.
+func (c *Client) ChannelsPruneApply() (json.RawMessage, error) {
+	return c.request(http.MethodPost, "/api/channels/prune", nil)
 }
 
 // UnregisterAgent drops an agent's registry row.
