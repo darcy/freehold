@@ -25,6 +25,11 @@ the ordering across all of them is `docs/ROADMAP.md`.
 *   The department check-in hook ("back this up?", "reachable outside?") has no trigger —
     the provision path it hangs on is unbuilt.
 
+**Agent surfaces**
+*   The marketplace publishes a starter showcase only (`freehold` + `product`,
+    short prompts). Full cards for the four departments would publish the
+    appliance's repo prompts and remain an explicit operator decision.
+
 **Migrations and update**
 *   No reverse migrations or downgrade verb.
 *   Unshipped migration scripts look like a converged world (only the report line shows it).
