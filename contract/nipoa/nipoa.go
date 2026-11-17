@@ -51,6 +51,12 @@ const AgentEngramKind = 30174
 // pins it to AgentEngramKind so the two can never disagree.
 const EngramConditions = "kind=30174"
 
+// ProfileConditions bounds the owner's attestation to the agent's kind-0
+// profile — the "Managed by" provenance row Buzz clients render from a
+// profile's single auth tag. It is signed verbatim and must never be rebuilt
+// ad hoc; a test pins it to kind 0.
+const ProfileConditions = "kind=0"
+
 // maxStamp is the protocol's stated upper bound for a created_at clause value;
 // maxKind bounds a kind= clause.
 const (
@@ -114,6 +120,13 @@ func Mint(agentPk string, ownerSecret []byte, conditions string) (Tag, error) {
 // MintEngram mints the one attestation the agent memory plane needs.
 func MintEngram(agentPk string, ownerSecret []byte) (Tag, error) {
 	return Mint(agentPk, ownerSecret, EngramConditions)
+}
+
+// MintProfile mints the owner attestation an agent's kind-0 profile carries.
+// Buzz derives agent ownership ("Managed by") from exactly this tag, so the
+// conditions are bounded to kind 0.
+func MintProfile(agentPk string, ownerSecret []byte) (Tag, error) {
+	return Mint(agentPk, ownerSecret, ProfileConditions)
 }
 
 // Verify checks a tag against agentPk: shape, the self-attestation rule, each

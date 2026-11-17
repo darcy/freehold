@@ -122,6 +122,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		w.Write(body)
 		return
 	}
+	// Agent avatars are public, content-addressed images: a kind-0 picture URL
+	// must resolve without a session so every client can render the face.
+	if strings.HasPrefix(path, "/avatars/") && method == http.MethodGet {
+		s.agentAvatar(w, r)
+		return
+	}
 
 	switch {
 	case path == "/api/auth/challenge" && method == http.MethodGet:

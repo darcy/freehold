@@ -58,6 +58,19 @@ AI owns the gateway directly; the runtime is what all agents share.
     conversation-flow rule: plumbing in #freehold, plain-language status in user
     channels) + the agent's own prompt + its skills, composed in
     `agents/prompt.go`. Custom agents get the same orientation + their template.
+*   **Profiles and faces.** Every pod agent's kind-0 profile is published by the
+    CP reconcile: `display_name` and `name` stay in sync, `about` is the registry
+    purpose, `picture` is a hosted HTTPS avatar, `nip05` is a self-declared handle,
+    and `is_agent` is true. The event is authored by the agent and carries exactly
+    one NIP-OA `auth` tag bounded to `kind=0`, signed by the owner — Buzz renders
+    that as the "Managed by" provenance row. Reconcile compares the would-be body
+    and the verified attestation against the current kind-0 head and publishes only
+    on a real difference; a same-second republish is timestamped past the head so
+    NIP-33 newest-wins cannot keep the stale profile. The CPA is created first, so
+    its publish is the canary: a relay refusal fails the build before the fleet
+    publishes. Avatars are deterministic identicons served publicly at
+    `https://<cp-host>/avatars/<agent-pubkey>.png`; no per-agent image upload is
+    needed.
 *   **Who may talk to whom** is the inbound author gate fixed at deploy: the CPA answers
     anyone in the relay; departments answer the operator and core agents (a custom
     agent's mention never wakes one); custom agents
