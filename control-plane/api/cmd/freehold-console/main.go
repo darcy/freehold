@@ -56,6 +56,8 @@ func main() {
 		err = cmdAddSecret(os.Args[2:])
 	case "litellm-key":
 		err = cmdLitellmKey(os.Args[2:])
+	case "mcp-sa":
+		err = cmdMCPSA(os.Args[2:])
 	case "revoke":
 		err = cmdRevoke(os.Args[2:])
 	case "identity":
@@ -67,7 +69,7 @@ func main() {
 	case "settings":
 		err = cmdSettings(os.Args[2:])
 	default:
-		fmt.Fprintf(os.Stderr, "unknown subcommand %q (serve|provision|grant|grants-mode|adopt|add-secret|revoke|identity|services|dns|settings|litellm-key)\n", os.Args[1])
+		fmt.Fprintf(os.Stderr, "unknown subcommand %q (serve|provision|grant|grants-mode|adopt|add-secret|revoke|identity|services|dns|settings|litellm-key|mcp-sa)\n", os.Args[1])
 		os.Exit(2)
 	}
 	if err != nil {
@@ -982,6 +984,66 @@ func cmdLitellmKey(args []string) error {
 		return fmt.Errorf("re-seal CP litellm store: %w", err)
 	}
 	fmt.Println("CP litellm store: provider key replaced + re-sealed")
+	return nil
+}
+
+// cmdMCPSA fills an MCP capability's Google service-account key into the CP
+// litellm store (`mcp-<slug>-sa`) — the mcp-sheets service's manifest render
+// reads it there. The value rides --secret-env (never argv); paste the
+// service-account JSON as-is (it is stored sealed).
+func cmdMCPSA(args []string) error {
+	fs := flag.NewFlagSet("mcp-sa", flag.ExitOnError)
+	secretEnv := fs.String("secret-env", "", "read the service-account JSON from this env var")
+	slug := fs.String("capability", "", "the MCP capability's slug")
+	stateDir := fs.String("state-dir", "", "CP state dir")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *stateDir == "" || *slug == "" {
+		return fmt.Errorf("mcp-sa --capability <slug> --state-dir [--secret-env VAR]")
+	}
+	if *secretEnv == "" {
+		return fmt.Errorf("mcp-sa needs --secret-env — paste the key via the env, never argv")
+	}
+	v, ok := os.LookupEnv(*secretEnv)
+	if !ok || strings.TrimSpace(v) == "" {
+		return fmt.Errorf("--secret-env %s is not set", *secretEnv)
+	}
+	path := filepath.Join(*stateDir, "world-secrets", "litellm.json")
+	if _, err := os.Stat(path); err != nil {
+		return fmt.Errorf("no CP litellm store at %s", path)
+	}
+	idRaw, err := os.ReadFile(filepath.Join(*stateDir, "console", "identity.json"))
+	if err != nil {
+		return fmt.Errorf("console identity: %w", err)
+	}
+	var id struct {
+		EncSecretHex string `json:"enc_secret_hex"`
+	}
+	if err := json.Unmarshal(idRaw, &id); err != nil {
+		return fmt.Errorf("console identity parse: %w", err)
+	}
+	secret, err := hex.DecodeString(id.EncSecretHex)
+	if err != nil || len(secret) != 32 {
+		return fmt.Errorf("console identity enc_secret is not a 32-byte seed")
+	}
+	open := func(sec, aad, blob []byte) ([]byte, error) { return crypto.Open(sec, aad, blob) }
+	_, env, err := cert.LoadCreds(path, open, secret)
+	if err != nil {
+		return fmt.Errorf("open CP litellm store: %w", err)
+	}
+	if env == nil {
+		env = map[string]string{}
+	}
+	env["mcp-"+*slug+"-sa"] = strings.TrimSpace(v)
+	pub, err := crypto.X25519PublicKey(secret)
+	if err != nil {
+		return err
+	}
+	if err := cert.SaveCreds(path, "litellm", env, crypto.Seal, pub, "litellm"); err != nil {
+		return fmt.Errorf("re-seal CP litellm store: %w", err)
+	}
+	fmt.Printf("CP litellm store: MCP capability %s's service-account key sealed (the next build applies it to the service's Secret)\n", *slug)
 	return nil
 }
 

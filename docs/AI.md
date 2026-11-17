@@ -20,7 +20,9 @@ AI owns the gateway directly; the runtime is what all agents share.
 ## How it works
 
 *   **The gateway.** LiteLLM and its Postgres run as Deployments in the `litellm` namespace,
-    configured by env only. The provider key is operator-supplied and sealed in the CP's
+    configured by env + the pinned gateway config in `litellm.tf` (the MCP default-deny
+    posture — `require_key_mcp_access_defined` — lives in that file, never env). The
+    provider key is operator-supplied and sealed in the CP's
     litellm store — never in argv or Terraform state; the build registers the aliases from
     that store over the gateway's admin API directly, and only the AI department's
     `litellm-api-admin` runner carries the key (for retargeting), injecting it per exec. At
