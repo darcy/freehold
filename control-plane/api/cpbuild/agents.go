@@ -356,7 +356,7 @@ func (s *Spec) reconcileAgentsInto(reg *agenttools.Registry) error {
 			return err
 		}
 	}
-	return nil
+	return s.publishShowcaseCards(reg)
 }
 
 // reassertAgentRow re-applies one registry row's pod through the create flow

@@ -155,6 +155,11 @@ func ProfileMatchesContent(content string, want Profile) bool {
 		got.IsAgent == want.IsAgent
 }
 
+// VisibleText reports whether a string is safe to publish as display text:
+// no control or Unicode format characters (bidi overrides, zero-width spaces,
+// BOMs), with newlines/tabs allowed in prose fields.
+func VisibleText(s string) bool { return visibleText(s) }
+
 // visibleText rejects control and Unicode format characters (the invisible
 // characters Buzz's sanitizers refuse: bidi overrides, zero-width spaces,
 // BOMs). Newlines/tabs are allowed in prose fields; names are trimmed and
