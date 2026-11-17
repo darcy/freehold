@@ -5,13 +5,23 @@ import (
 	"path/filepath"
 )
 
-// ensurePrivateDir creates dir 0700 (no-op if exists), tightening an existing
-// looser dir — matching core/src/futil.rs::ensure_private_dir.
+// ensurePrivateDir asserts the CP state root's mode: 0711 — traverse-only,
+// never listable. Sandboxed capability doors run as an unprivileged user and
+// must TRAVERSE this dir to reach their own package dir (<state>/runner/<name>,
+// 0700 owned by that user): at 0700 a running door cannot append its audit log
+// (the containment guarantee) or re-read its identity, and a healthy unit is
+// never restarted by systemd, so the loss would be silent and steady-state.
+// Re-asserted on EVERY open — routine console traffic (overview, settings,
+// door flows) re-opens state continuously, so a 0700 assertion here strips
+// traversal out from under live doors. Contents stay protected by their own
+// modes: state.json 0600, world-secrets 0700/0600, console identity 0600,
+// per-door package dirs 0700. (The Rust mirror tightens only the runner's own
+// package dir, which the door user owns.)
 func ensurePrivateDir(dir string) error {
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	if err := os.MkdirAll(dir, 0o711); err != nil {
 		return err
 	}
-	return os.Chmod(dir, 0o700)
+	return os.Chmod(dir, 0o711)
 }
 
 // write0600Atomic writes data to path via a unique 0600-at-birth temp file +

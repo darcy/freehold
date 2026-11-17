@@ -1,6 +1,7 @@
 package state
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -73,5 +74,44 @@ func TestSettingsNilReadsZero(t *testing.T) {
 	}
 	if ro.Settings != nil && ro.Settings.OperatorTZ != "" {
 		t.Fatalf("pre-settings state read %+v, want nil/empty", ro.Settings)
+	}
+}
+
+// TestOpenAssertsTraverseOnlyStateDir: the CP state root must stay 0711
+// (traverse-only) across every Open. Sandboxed capability doors run as an
+// unprivileged user and re-open their audit log + identity through this
+// ancestor per exec; a 0700 assertion would strip traversal out from under
+// a healthy (never-restarted) door — the audit stream would die silently.
+// Contents stay private by their own modes.
+func TestOpenAssertsTraverseOnlyStateDir(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Open(dir); err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	info, err := os.Stat(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o711 {
+		t.Fatalf("state dir mode = %04o, want 0711 (traverse-only)", got)
+	}
+	// A door's own package dir stays 0700: traversal into the state root
+	// must never expose a sibling door's identity.
+	pkg := filepath.Join(dir, "runner", "some-door")
+	if err := os.MkdirAll(pkg, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Open(dir); err != nil {
+		t.Fatalf("re-open: %v", err)
+	}
+	pi, err := os.Stat(pkg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := pi.Mode().Perm(); got != 0o700 {
+		t.Fatalf("package dir mode = %04o, want 0700", got)
 	}
 }
