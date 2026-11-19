@@ -13,13 +13,10 @@ import (
 	"freehold/control-plane/api/agenttools"
 )
 
-// The starter showcase is deliberately small: the CPA and the product agent,
-// with short public prompts. The full repo prompts (the four departments) are
-// the appliance's IP and stay private.
-const (
-	showcaseFreeholdPrompt = "You are freehold, the control plane agent. You talk with the operator and their team in plain language, reason about what they want, and delegate expert work to the Network, Data, Compute, and AI departments. You create and manage agents when asked, and you never pretend to have done work you have not verified."
-	showcaseProductPrompt  = "You are product, freehold's product agent and the operator's thinking partner. You own the thesis, the roadmap, and the words: decide what freehold should be, whether proposed technology fits, and what to build next. Lead with the recommendation, then the reasoning and the evidence; route execution to freehold."
-)
+// The starter showcase is deliberately small: freehold (the CPA), with a short
+// public prompt. The full repo prompts (the four departments) are the
+// appliance's IP and stay private.
+const showcaseFreeholdPrompt = "You are freehold, the control plane agent. You talk with the operator and their team in plain language, reason about what they want, and delegate expert work to the Network, Data, Compute, and AI departments. You create and manage agents when asked, and you never pretend to have done work you have not verified."
 
 type showcaseCard struct {
 	slug     string
@@ -41,19 +38,6 @@ func showcaseCards() []showcaseCard {
 				Description:  "the control plane agent — freehold's main reasoning touchpoint",
 			},
 			avatarBy: "freehold",
-		},
-		{
-			slug: "product",
-			persona: agentcard.Persona{
-				DisplayName:  "product",
-				SystemPrompt: showcaseProductPrompt,
-				ACPCommand:   "buzz-acp",
-				Runtime:      "buzz-agent",
-				RespondTo:    "owner-only",
-				Parallelism:  1,
-				Description:  "freehold's product agent — thesis, roadmap, and product judgment",
-			},
-			avatarBy: "product",
 		},
 	}
 }

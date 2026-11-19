@@ -18,18 +18,12 @@ func TestPublishShowcaseCardsCanaryAndCompare(t *testing.T) {
 	cpaSec := make([]byte, 32)
 	cpaSec[31] = 2
 	cpaPk, _ := crypto.PubkeyFromSecret(cpaSec)
-	productSec := make([]byte, 32)
-	productSec[31] = 3
-	productPk, _ := crypto.PubkeyFromSecret(productSec)
 
 	reg, err := agenttools.OpenRegistry(t.TempDir() + "/registry.json")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := reg.RegisterAgent("freehold", cpaPk, "#freehold"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := reg.RegisterAgent("product", productPk, "#freehold"); err != nil {
 		t.Fatal(err)
 	}
 	f := newFakeFirstRunRelay(t, nil)
@@ -45,8 +39,8 @@ func TestPublishShowcaseCardsCanaryAndCompare(t *testing.T) {
 		t.Fatalf("publish showcase: %v", err)
 	}
 	got := f.published()
-	if len(got) != 2 {
-		t.Fatalf("published %d cards, want 2 (freehold canary then product)", len(got))
+	if len(got) != 1 {
+		t.Fatalf("published %d cards, want 1 (the freehold canary)", len(got))
 	}
 	check := func(raw, slug, wantAvatar string, wantPrompt string) {
 		var ev struct {
@@ -82,18 +76,17 @@ func TestPublishShowcaseCardsCanaryAndCompare(t *testing.T) {
 		}
 	}
 	check(got[0], "freehold", "https://cp.example/avatars/"+cpaPk+".png", "delegate expert work")
-	check(got[1], "product", "https://cp.example/avatars/"+productPk+".png", "own the thesis")
 
-	// A converged pair is not republished.
+	// A converged card is not republished.
 	if err := s.publishShowcaseCards(reg); err != nil {
 		t.Fatal(err)
 	}
-	if got := f.published(); len(got) != 2 {
-		t.Fatalf("converged cards republished: %d events", len(got))
+	if got := f.published(); len(got) != 1 {
+		t.Fatalf("converged card republished: %d events", len(got))
 	}
 }
 
-func TestPublishShowcaseCardsFallsBackForMissingProduct(t *testing.T) {
+func TestPublishShowcaseCardsFallsBackForMissingCpa(t *testing.T) {
 	ownerSec := make([]byte, 32)
 	ownerSec[31] = 1
 	ownerPk, _ := crypto.PubkeyFromSecret(ownerSec)
@@ -114,17 +107,17 @@ func TestPublishShowcaseCardsFallsBackForMissingProduct(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := f.published()
-	if len(got) != 2 {
-		t.Fatalf("published %d cards, want 2", len(got))
+	if len(got) != 1 {
+		t.Fatalf("published %d cards, want 1", len(got))
 	}
 	var ev struct {
 		Content string `json:"content"`
 	}
-	if err := json.Unmarshal([]byte(got[1]), &ev); err != nil {
+	if err := json.Unmarshal([]byte(got[0]), &ev); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(ev.Content, "/avatars/"+avatarSeed("product")+".png") {
-		t.Fatalf("missing product row must use the deterministic seed avatar: %s", ev.Content)
+	if !strings.Contains(ev.Content, "/avatars/"+avatarSeed("freehold")+".png") {
+		t.Fatalf("missing CPA row must use the deterministic seed avatar: %s", ev.Content)
 	}
 }
 
