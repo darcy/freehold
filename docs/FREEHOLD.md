@@ -26,9 +26,9 @@ the ordering across all of them is `docs/ROADMAP.md`.
     the provision path it hangs on is unbuilt.
 
 **Agent surfaces**
-*   The marketplace publishes a starter showcase only (`freehold` + `product`,
-    short prompts). Full cards for the four departments would publish the
-    appliance's repo prompts and remain an explicit operator decision.
+*   The marketplace publishes one starter showcase card (`freehold`, short
+    prompt). Full cards for the four departments would publish the appliance's
+    repo prompts and remain an explicit operator decision.
 
 **Migrations and update**
 *   No reverse migrations or downgrade verb.

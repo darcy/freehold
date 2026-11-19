@@ -66,16 +66,15 @@ past the head so NIP-33 newest-wins cannot keep a stale profile.
 
 ### Starter marketplace cards (kind-30175)
 
-Freehold publishes a small showcase of NIP-AP persona cards: `freehold` (the CPA)
-and `product`, each with a short public prompt, `acp_command: buzz-acp`,
-`runtime: buzz-agent`, an owner-only gate, and the same hosted HTTPS avatar. The
-event is owner-signed, has exactly one `d` tag (the NIP-AP slug) and one
-`["shared","true"]` catalog tag, and its content is an allowlist body — no env
-vars, secrets, workspaces, or memories. The CP refuses credential-like strings,
-caps content at NIP-AP's 65,535 bytes (the stricter limit; the 5 MB cap applies
-to import artifacts), compares the current head before publishing, and publishes
-the `freehold` card first as the canary. The four departments' full prompts are
-not published.
+Freehold publishes one starter showcase NIP-AP persona card: `freehold` (the
+CPA), with a short public prompt, `acp_command: buzz-acp`, `runtime: buzz-agent`,
+an owner-only gate, and the same hosted HTTPS avatar. The event is owner-signed,
+has exactly one `d` tag (the NIP-AP slug) and one `["shared","true"]` catalog tag,
+and its content is an allowlist body — no env vars, secrets, workspaces, or
+memories. The CP refuses credential-like strings, caps content at NIP-AP's 65,535
+bytes (the stricter limit; the 5 MB cap applies to import artifacts), compares the
+current head before publishing, and reads the accepted head back. The four
+departments' full prompts are not published.
 
 ## 4. Auth & wire surface
 

@@ -71,15 +71,15 @@ AI owns the gateway directly; the runtime is what all agents share.
     publishes. Avatars are deterministic identicons served publicly at
     `https://<cp-host>/avatars/<agent-pubkey>.png`; no per-agent image upload is
     needed.
-*   **Marketplace cards.** The build publishes a starter showcase of kind-30175
-    persona cards: `freehold` (the CPA) and `product`, with short public prompts,
-    `acp_command: buzz-acp`, `runtime: buzz-agent`, an owner-only gate, and the
-    hosted avatar. Cards are owner-signed, carry `["shared","true"]`, and use the
-    NIP-AP allowlist body — no env vars, secrets, workspaces, or memories. The CP
-    refuses credential-like strings, compares the current head before publishing,
-    and publishes the `freehold` card first as the canary. The four departments'
-    full repo prompts are deliberately not published; a full-card catalog is an
-    operator decision, not a build default.
+*   **Marketplace cards.** The build publishes one starter showcase card:
+    `freehold` (the CPA), with a short public prompt, `acp_command: buzz-acp`,
+    `runtime: buzz-agent`, an owner-only gate, and the hosted avatar. The card is
+    owner-signed, carries `["shared","true"]`, and uses the NIP-AP allowlist body
+    — no env vars, secrets, workspaces, or memories. The CP refuses
+    credential-like strings, compares the current head before publishing, and
+    reads the accepted head back. The four departments' full repo prompts are
+    deliberately not published; a wider card catalog is an operator decision,
+    not a build default.
 *   **Who may talk to whom** is the inbound author gate fixed at deploy: the CPA answers
     anyone in the relay; departments answer the operator and core agents (a custom
     agent's mention never wakes one); custom agents
