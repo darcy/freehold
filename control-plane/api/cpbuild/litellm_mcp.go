@@ -177,7 +177,9 @@ func (ls *litellmMCPStore) callStatus(method, path string, body any) ([]byte, in
 	}
 	defer resp.Body.Close()
 	out, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-	if resp.StatusCode != http.StatusOK {
+	// Any 2xx is success — a CREATE answers 201 Created (the registration's
+	// first POST), not just 200.
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		return out, resp.StatusCode, fmt.Errorf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(out)))
 	}
 	return out, resp.StatusCode, nil
