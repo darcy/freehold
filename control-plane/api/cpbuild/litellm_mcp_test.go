@@ -1276,7 +1276,7 @@ func TestMCPServiceManifest(t *testing.T) {
 		`"FREEHOLD_READ_ONLY","value":"1"`,                      // readonly per the scope
 		base64.StdEncoding.EncodeToString([]byte("broker-tok")), // the broker token rides (the Secret's data is base64)
 		"/mcp-sheets-binary",                                    // the bootstrap fetch
-		`"hostNetwork":true`,
+		`"securityContext":{"allowPrivilegeEscalation":false,"capabilities":{"drop":["ALL"]},"runAsNonRoot":true,"runAsUser":1000,"seccompProfile":{"type":"RuntimeDefault"}}`,
 	} {
 		if !strings.Contains(blob, want) {
 			t.Fatalf("manifest missing %q\n%s", want, blob)

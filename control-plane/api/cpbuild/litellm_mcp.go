@@ -732,10 +732,9 @@ func (s *Spec) provisionMCP(args agent.ProvisionMCPArgs, callerIsOperator bool, 
 		if args.ServicePort <= 0 || args.ServicePort > 65535 {
 			return "", fmt.Errorf("provision_mcp %s: service_port is required for a slotted capability (the MCP service's port)", name)
 		}
-		// The service pod is hostNetwork — its port is the NODE's port
-		// space, shared across every slotted capability (and the node's own
-		// listeners). A second capability claiming the same port would bind
-		// second and crash-loop.
+		// A distinct port per capability keeps the derived URLs unambiguous
+		// (a second capability claiming the same port would collide on the
+		// Service/URL shape).
 		for other, orec := range store.MCPCapabilityRecords() {
 			if other != name && orec.Namespace != "" && orec.ServicePort == args.ServicePort {
 				return "", fmt.Errorf("provision_mcp %s: service_port %d is already %s's (the service pods are hostNetwork — the port space is the node's, shared across capabilities)", name, args.ServicePort, other)
@@ -1205,9 +1204,9 @@ func (s *Spec) stageMCPServices(store *state.StateStore) (string, error) {
 // mcpServiceManifest renders one MCP service's manifests as a kubectl-
 // applicable JSON List. The pod runs the SPRIG image (already in the world
 // for the agent pods — no image build) and bootstraps the mcp-sheets binary
-// off the CP's /mcp-sheets-binary (the agent bridge's fetch pattern);
-// hostNetwork puts it on the node's LAN so it reaches the CP directly (the
-// same reason the agent pods run hostNetwork).
+// off the CP's /mcp-sheets-binary (the agent bridge's fetch pattern) — the
+// pod-CNI → LAN route is LIVE (verified on a real world: a cluster pod
+// reaches the CP guest's agent-tools port).
 func mcpServiceManifest(rec state.MCPCapabilityRecord, saKeyJSON, brokerToken, cpIP, agentToolsPort string) ([]byte, error) {
 	if rec.Namespace == "" || rec.ServicePort <= 0 {
 		return nil, fmt.Errorf("mcp service %s: namespace and service_port are required", rec.ServerName)
@@ -1276,7 +1275,11 @@ func mcpServiceManifest(rec state.MCPCapabilityRecord, saKeyJSON, brokerToken, c
 				"template": map[string]any{
 					"metadata": map[string]any{"labels": map[string]any{"app": rec.ServerName}},
 					"spec": map[string]any{
-						"hostNetwork": true,
+						// NO hostNetwork: the slot's baseline Pod Security
+						// rejects host namespaces, and the pod-CNI → LAN path
+						// WORKS (live-verified: a cluster pod reaches the CP's
+						// agent-tools port) — the binary fetch needs no host
+						// namespace.
 						"containers": []map[string]any{{
 							"name":    "sheets",
 							"image":   agent.SprigImage,
