@@ -248,7 +248,7 @@ MCP-service manifests + a re-apply stage, docs.
 | **1. State + registry** | `MCPCapabilityRecord`, maps, `CapabilityView`. | State + tests; no behavior change. | 2–3 days |
 | **2. LiteLLM permissions** | `mcptool-<pod>` mint/update/delete, fleet-wide `no-mcp-servers` sweep + drift overwrite, ConfigMap flag, registration helper. | Default-deny MCP, CP-authoritative permissions. | 2–3 days |
 | **3. Unified grants** | `provision_mcp`, `grant_capability`, `revoke_capability`; dispatch, guards, kill switch; console/CLI. | One grant/revoke surface for both planes. | 3–4 days |
-| **4. MCP services** | `mcp` slot carve (restricted), Sheets services per SA, console named-secret form, broker tokens CP-sealed, re-apply stage. | Read/write Google Sheets capabilities live. | 3–5 days |
+| **4. MCP services — DONE** | The `mcp` slot carved (baseline Pod Security), the `freehold-mcp-sheets` service (a stdlib-only pinned/authed MCP server riding the SPRIG image + a bootstrap fetch), `stageMCPServices` (the kube-slot re-apply pattern), `freehold-console mcp-sa` (the SA-key fill), `spreadsheet_id` end-to-end, the tolerant updater download, the port-space guard. **Live-smoke-tested on librem** (findings below). | The full chain verified on a real world. | done |
 | **5. Bridge** | MCP-over-HTTP upstream keyed from the conf file, merge/route/shadow-drop, SSE parsing, degradation. | Native MCP tools in the agent harness. | 3–5 days |
 | **6. Docs + acceptance** | Skill/prompt/docs; e2e; audit/readiness. | Docs match code; acceptance green. | 2–3 days |
 
@@ -300,6 +300,51 @@ Verdict: the option-2 design is buildable exactly as planned. The only plan
 changes are `static_headers` instead of `auth_type`/`auth_value` for the
 broker token (finding 7) and SSE-response parsing in the bridge (finding 9) —
 both already reflected in the workstreams above.
+
+### Phase 4 smoke findings (live on librem, 2026-11-24)
+
+Deployed `mcp` (v0.8.1-84+) to librem with `freehold update --ref mcp`; then,
+through the world's own doors:
+
+1. **The key plane is LIVE and self-healing.** The first build's sweep rewrote
+   all six core agents' `mcptool-<pod>` keys from CP state, swept the one
+   foreign key and every model key to the sentinel (bare-pod alias
+   classification working). Idempotent on every later build.
+2. **The gateway REFUSES hyphens in `server_name`** (SEP-986) — the
+   registration's WIRE name maps the slug (`-` → `_`); the pinned `server_id`
+   stays the slug and the key permissions reference the id. Found live; fixed.
+3. **A CREATE answers 201** — every 2xx is success (the first registration
+   "failed" on a 201 = Created). Found live; fixed.
+4. **The `mcp` slot carved by hand through the world's kube door** (the
+   manifest the CP's slot flow renders — namespace + SA + full-ns Role +
+   token Secret, `pod-security.kubernetes.io/enforce=baseline`).
+5. **`provision_runner kube-api-mcp` sealed the carved slot live** (the CP
+   read the SA token + sealed it; the door is green, granted to AI).
+6. **`provision_mcp sheet-a-ro` registered + granted live** — the gateway
+   created the server (wire name `sheet_a_ro`, the derived URL, `fh-mcp`,
+   pinned tools, the broker token as the static header), the record landed,
+   the `ai` agent's key carries the capability.
+7. **`stageMCPServices` applied the service** — Deployment + Service + two
+   Secrets (the SA key EMPTY until `freehold-console mcp-sa` fills it; the
+   broker token from the CP's sealed store), the pod fetches the binary off
+   the CP's `/mcp-sheets-binary` at bootstrap, hardened securityContext
+   (non-root, all caps dropped, RuntimeDefault seccomp).
+8. **Pod-CNI → LAN WORKS on the world** (a cluster pod reached the CP guest's
+   agent-tools port directly) — the service needs NO hostNetwork; the slot's
+   baseline Pod Security (which rejects host namespaces — live-verified) is
+   compatible.
+9. **The end-to-end tools path verified**: a throwaway key granted the
+   capability → `/mcp` initialize (the gateway is SESSION-STATEFUL — the
+   bridge must initialize first + keep the `Mcp-Session-Id`) →
+   `tools/list` returns the capability's PINNED read-only tools
+   (`sheet_a_ro-get_info`/`-get_cells`, `server_outcomes: ok`) →
+   `tools/call get_cells` proxied to the service (broker-authed) and failed
+   EXACTLY as designed ("no service account configured") — every hop except
+   the real Google call verified; that hop needs the operator's SA key + a
+   shared sheet.
+10. **Watch the throwaway keys**: a probe key minted then crashed-over stays
+    live on the gateway — the fleet sweep sweeps it to the sentinel at the
+    next build (self-healing verified).
 
 **PR strategy (operator-directed):** ALL MCP-plane phases land DIRECTLY on
 the `mcp` integration branch (no per-phase PRs); a single PR — #461,
