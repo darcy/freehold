@@ -65,6 +65,13 @@ func mcptoolKeyEnvKey(pod string) string {
 	return "mcptool-" + pod
 }
 
+// litellmServerName maps a capability's freehold slug to its LiteLLM wire
+// name: hyphens become underscores (LiteLLM refuses hyphens in
+// server_name). The pinned server_id stays the slug.
+func litellmServerName(slug string) string {
+	return strings.ReplaceAll(slug, "-", "_")
+}
+
 // mcpBrokerTokenEnvKey is the CP litellm store's env key holding an MCP
 // capability's broker token (LiteLLM → MCP service), keyed by the
 // capability's server slug.
@@ -398,7 +405,11 @@ func (s *Spec) registerLiteLLMMServer(store *state.StateStore, rec state.MCPCapa
 		}
 	}
 	registration := map[string]interface{}{
-		"server_name": rec.ServerName,
+		// The WIRE name: LiteLLM refuses hyphens in server_name (SEP-986) —
+		// the freehold slug's hyphens become underscores there. The PINNED
+		// server_id stays the slug (kebab accepted; the key permissions
+		// reference the id, so they are stable across re-registrations).
+		"server_name": litellmServerName(rec.ServerName),
 		"server_id":   rec.ServerName,
 		"url":         rec.URL,
 		"transport":   rec.Transport,
