@@ -48,6 +48,7 @@ type Set struct {
 	Console       string // freehold-console (release build)
 	Runner        string // runner (release build)
 	AgentTools    string // freehold-agent-tools
+	MCPSheets     string // freehold-mcp-sheets (the MCP plane's sheets service)
 	Freehold      string // the freehold CLI
 	MigrationsDir string
 	Version       string
@@ -139,7 +140,11 @@ func ListTags(ctx context.Context) ([]TagInfo, error) {
 	return tags, nil
 }
 
-// assets is the release asset set.
+// assets is the release asset set. freehold-mcp-sheets is fetched
+// SEPARATELY, tolerant of absence: releases from before the MCP plane don't
+// carry it — a 404 there leaves Set.MCPSheets empty and the deploy skips it
+// (the next release that carries the asset lands it). Old releases'
+// checksums.txt doesn't list it, so VerifyChecksums never checks it there.
 var assets = []string{"freehold", "freehold-console", "runner", "freehold-agent-tools", "migrations.tar.gz", "checksums.txt"}
 
 // AcquireRelease resolves the channel's newest tag, downloads + verifies its
@@ -167,6 +172,14 @@ func AcquireRelease(ctx context.Context, channel, dest string) (Set, error) {
 			return Set{}, err
 		}
 	}
+	// The MCP plane's sheets binary: TOLERANT of absence (releases from
+	// before the MCP plane don't carry the asset — a 404 leaves the Set
+	// entry empty and the deploy skips it; a NEW release's checksums.txt
+	// lists it, so VerifyChecksums verifies it there).
+	mcpPath := filepath.Join(dest, "freehold-mcp-sheets")
+	if err := download(ctx, tag, "freehold-mcp-sheets", mcpPath); err != nil {
+		_ = os.Remove(mcpPath)
+	}
 	if err := VerifyChecksums(dest); err != nil {
 		return Set{}, err
 	}
@@ -177,10 +190,15 @@ func AcquireRelease(ctx context.Context, channel, dest string) (Set, error) {
 	if err := extractTarGz(filepath.Join(dest, "migrations.tar.gz"), migDir); err != nil {
 		return Set{}, fmt.Errorf("extract migrations.tar.gz: %w", err)
 	}
+	mcp := ""
+	if _, err := os.Stat(filepath.Join(dest, "freehold-mcp-sheets")); err == nil {
+		mcp = filepath.Join(dest, "freehold-mcp-sheets")
+	}
 	return Set{
 		Console:       filepath.Join(dest, "freehold-console"),
 		Runner:        filepath.Join(dest, "runner"),
 		AgentTools:    filepath.Join(dest, "freehold-agent-tools"),
+		MCPSheets:     mcp,
 		Freehold:      filepath.Join(dest, "freehold"),
 		MigrationsDir: migDir,
 		Version:       tag,
@@ -335,6 +353,7 @@ func BuildTree(ctx context.Context, ref, sha, localDir, dest string) (Set, error
 		Console:       rel("target/release/freehold-console"),
 		Runner:        rel("target/release/runner"),
 		AgentTools:    rel("target/release/freehold-agent-tools"),
+		MCPSheets:     rel("target/release/freehold-mcp-sheets"),
 		Freehold:      rel("target/debug/freehold"),
 		MigrationsDir: rel("migrations"),
 		Version:       strings.TrimSpace(version),

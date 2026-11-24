@@ -1,0 +1,94 @@
+{
+  "schema_version": 2,
+  "diagram_type": "workflow",
+  "meta": {
+    "title": "MCP key to grant binding — three options + a root-exec finding",
+    "subtitle": "Where the key lives decides the access model; where the MCP client lives decides native tools vs door exec",
+    "quality_profile": "showcase",
+    "output": ".archify/workflow-mcp-key-grant-options-20261105-152043/mcp-key-grant-options.html",
+    "repository": {
+      "url": "https://github.com/darcy/freehold",
+      "provider": "github",
+      "link_mode": "web",
+      "revision": "402363251d68aa9daa57392e5c1f4689552b6edf"
+    }
+  },
+  "lanes": [
+    { "id": "opt1", "label": "Option 1 — shared key (rejected)", "variant": "exception" },
+    { "id": "opt2", "label": "Option 2 — key per grant, held by the agent" },
+    { "id": "opt3", "label": "Option 3 — key per capability, held by the door" },
+    { "id": "sec", "label": "Found: door exec runs as root", "variant": "exception" }
+  ],
+  "phases": [
+    { "id": "p_mint", "label": "Mint", "fromCol": 0, "toCol": 0 },
+    { "id": "p_call", "label": "Bind + call", "fromCol": 1, "toCol": 2, "variant": "emphasis" },
+    { "id": "p_end", "label": "Revoke + verdict", "fromCol": 3, "toCol": 3, "variant": "dashed" }
+  ],
+  "groups": [
+    { "id": "g1", "label": "One key, many holders", "lane": "opt1", "fromCol": 0, "toCol": 2, "variant": "dashed" },
+    { "id": "g2", "label": "Agent-held grant key", "lane": "opt2", "fromCol": 0, "toCol": 2, "variant": "emphasis" },
+    { "id": "g3", "label": "Door-held capability key", "lane": "opt3", "fromCol": 0, "toCol": 2, "variant": "emphasis" },
+    { "id": "g4", "label": "Root-exec finding — fixable", "lane": "sec", "fromCol": 0, "toCol": 2, "variant": "security" }
+  ],
+  "mainPath": ["o3_mint", "o3_door", "o3_exec", "o3_revoke"],
+  "nodes": [
+    { "id": "o1_mint", "lane": "opt1", "col": 0, "type": "backend", "label": "CP mints ONE shared key", "sublabel": "per capability", "width": 195, "sources": [{ "path": "control-plane/api/cpbuild/departments.go", "line": 980, "label": "key minting" }] },
+    { "id": "o1_hand", "lane": "opt1", "col": 1, "type": "security", "label": "same key to every grantee", "sublabel": "copied into each pod", "width": 195 },
+    { "id": "o1_call", "lane": "opt1", "col": 2, "type": "database", "label": "any holder calls; logs blind", "sublabel": "no per-agent audit", "width": 195 },
+    { "id": "o1_out", "lane": "opt1", "col": 3, "type": "security", "label": "Rejected", "sublabel": "revoke one = rotate all", "icon": "failure", "width": 195 },
+
+    { "id": "o2_mint", "lane": "opt2", "col": 0, "type": "backend", "label": "CP mints key per grant", "sublabel": "agent x capability, tools pinned", "width": 195, "sources": [{ "path": "control-plane/api/cpbuild/departments.go", "line": 980, "label": "key minting" }] },
+    { "id": "o2_pod", "lane": "opt2", "col": 1, "type": "database", "label": "key sealed into the pod", "sublabel": "bridge conf, 0600", "width": 195, "sources": [{ "path": "control-plane/api/agent/agent.go", "line": 204, "label": "bridge conf" }] },
+    { "id": "o2_bridge", "lane": "opt2", "col": 2, "type": "frontend", "label": "bridge = the MCP client", "sublabel": "LiteLLM /mcp; per-key ACL", "tag": "native MCP tools", "width": 195 },
+    { "id": "o2_revoke", "lane": "opt2", "col": 3, "type": "security", "label": "revoke = delete key", "sublabel": "instant, per agent", "width": 195 },
+
+    { "id": "o3_mint", "lane": "opt3", "col": 0, "type": "backend", "label": "CP mints key per capability", "sublabel": "seals to runner package", "width": 195 },
+    { "id": "o3_door", "lane": "opt3", "col": 1, "type": "database", "label": "key in door, never pod", "sublabel": "agent references by name", "width": 195 },
+    { "id": "o3_exec", "lane": "opt3", "col": 2, "type": "messagebus", "label": "exec curl /mcp-rest", "sublabel": "roster per call + key ACL", "tag": "same tools via shell", "width": 195 },
+    { "id": "o3_revoke", "lane": "opt3", "col": 3, "type": "security", "label": "revoke = roster removal", "sublabel": "key untouched; grant = roster", "tag": "no bridge change", "width": 195 },
+
+    { "id": "s_unit", "lane": "sec", "col": 0, "type": "security", "label": "door unit sets no User=", "sublabel": "runs as root on CP guest", "width": 195, "sources": [{ "path": "control-plane/api/cpbuild/departments.go", "line": 1361, "label": "doorUnitText" }] },
+    { "id": "s_blast", "lane": "sec", "col": 1, "type": "security", "label": "api exec = root, CP guest", "sublabel": "state, console id, op key", "width": 195, "sources": [{ "path": "control-plane/runner/src/mcp.rs", "line": 453, "label": "handle_api_exec" }] },
+    { "id": "s_fix", "lane": "sec", "col": 2, "type": "backend", "label": "fixable: User= by kind", "sublabel": "api/ssh unpriv; local root", "width": 195 },
+    { "id": "s_note", "lane": "sec", "col": 3, "type": "security", "label": "door off CP guest until fix", "sublabel": "resident runner, own guest", "width": 195 }
+  ],
+  "edges": [
+    { "id": "e1a", "from": "o1_mint", "to": "o1_hand", "variant": "dashed" },
+    { "id": "e1b", "from": "o1_hand", "to": "o1_call", "variant": "dashed" },
+    { "id": "e1c", "from": "o1_call", "to": "o1_out", "variant": "security", "role": "error" },
+
+    { "id": "e2a", "from": "o2_mint", "to": "o2_pod", "variant": "emphasis" },
+    { "id": "e2b", "from": "o2_pod", "to": "o2_bridge", "label": "MCP", "variant": "emphasis" },
+    { "id": "e2c", "from": "o2_bridge", "to": "o2_revoke", "variant": "default" },
+
+    { "id": "e3a", "from": "o3_mint", "to": "o3_door", "variant": "emphasis" },
+    { "id": "e3b", "from": "o3_door", "to": "o3_exec", "label": "by name", "variant": "emphasis" },
+    { "id": "e3c", "from": "o3_exec", "to": "o3_revoke", "variant": "default" },
+
+    { "id": "e4a", "from": "s_unit", "to": "s_blast", "variant": "security", "role": "error" },
+    { "id": "e4b", "from": "s_blast", "to": "s_fix", "label": "fixable", "variant": "default" },
+    { "id": "e4c", "from": "s_fix", "to": "s_note", "variant": "security" }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "Option 2 vs 3 — where the MCP client lives",
+      "items": [
+        "Option 2: the pod's bridge IS the MCP client — harness-native tools/list + tools/call; the model sees tool schemas automatically.",
+        "Option 3: no MCP client in the pod — exec curl hits /mcp-rest; /mcp-rest/tools/list returns the same schemas as command output.",
+        "Same tools, same reach, scope always on the key; different ergonomics: native tool calling vs shell access through a door."
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "Security finding — fixable: yes",
+      "items": [
+        "doorUnitText (departments.go) sets no User=: every CP-guest capability unit runs as root.",
+        "handle_api_exec (runner mcp.rs) runs commands locally as the runner's user, so an api-door grant = root exec on the CP guest.",
+        "Blast radius: CP state, the console identity, and the operator's sealed signing key — this exists today, independent of this plan.",
+        "Fix: per-kind User= (api/ssh doors unprivileged; local doors stay root by documented contract), NoNewPrivileges + ProtectSystem, chown package dirs, restart units.",
+        "Until fixed, host the option-3 LiteLLM door on a dedicated guest's resident runner (User=lxcadmin), never the CP guest."
+      ]
+    }
+  ]
+}

@@ -8,6 +8,30 @@
 # fireworks egress path (the freehold default provider); other providers
 # resolve normally and the pin is inert for them.
 
+resource "kubernetes_manifest" "litellm_config" {
+  depends_on = [kubernetes_manifest.litellm_namespace]
+  manifest = {
+    apiVersion = "v1"
+    kind       = "ConfigMap"
+    metadata = {
+      name      = "litellm-config"
+      namespace = "litellm"
+      labels    = { "app.kubernetes.io/managed-by" = "freehold" }
+    }
+    data = {
+      # The MCP plane's default-deny posture (Phase 2): a key with no
+      # explicit mcp_servers list reaches NO MCP server. Model registration
+      # stays DB-side (STORE_MODEL_IN_DB env); the DB object types are
+      # unaffected by pinning these two settings in config.
+      "config.yaml" = <<-YAML
+        general_settings:
+          store_model_in_db: true
+          require_key_mcp_access_defined: true
+      YAML
+    }
+  }
+}
+
 resource "kubernetes_manifest" "litellm_secret" {
   depends_on = [kubernetes_manifest.litellm_namespace]
   manifest = {
@@ -20,7 +44,7 @@ resource "kubernetes_manifest" "litellm_secret" {
 }
 
 resource "kubernetes_manifest" "litellm_deploy" {
-  depends_on = [kubernetes_manifest.litellm_secret, kubernetes_manifest.postgres_deploy]
+  depends_on = [kubernetes_manifest.litellm_secret, kubernetes_manifest.postgres_deploy, kubernetes_manifest.litellm_config]
   manifest = {
     apiVersion = "apps/v1"
     kind       = "Deployment"
@@ -38,7 +62,14 @@ resource "kubernetes_manifest" "litellm_deploy" {
           containers = [{
             name  = "litellm"
             image = "docker.litellm.ai/berriai/litellm:main-stable"
+            args  = ["--config", "/app/config.yaml", "--port", "4000"]
             ports = [{ containerPort = 4000 }]
+            volumeMounts = [{
+              name      = "config"
+              mountPath = "/app/config.yaml"
+              subPath   = "config.yaml"
+              readOnly  = true
+            }]
             env = [
               { name = "POSTGRES_PASSWORD", valueFrom = { secretKeyRef = { name = "litellm-pg", key = "postgres-pw" } } },
               { name = "DATABASE_URL", value = "postgresql://llmproxy:$(POSTGRES_PASSWORD)@postgres.litellm:5432/litellm" },
@@ -51,6 +82,10 @@ resource "kubernetes_manifest" "litellm_deploy" {
               failureThreshold    = 6
               initialDelaySeconds = 5
             }
+          }]
+          volumes = [{
+            name = "config"
+            configMap = { name = "litellm-config" }
           }]
         }
       }
