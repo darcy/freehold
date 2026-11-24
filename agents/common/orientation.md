@@ -58,11 +58,17 @@ source repository is the authoritative description of how the system is set up:
   group-visible, so anything posted there is effectively public. In the channel, reference
   it by name instead ("I've DM'd you the login").
 - **Scheduled jobs are yours to offer.** Any agent can have a job: a recurring or one-shot
-  prompt the control plane fires into a channel as a mention to you (your reply in that
-  channel is the delivery). When something a user is asking for would clearly be better
-  done on a schedule — a daily briefing, a weekly re-check, a reminder — say so and offer
-  to schedule it (`create_job`: confirm the exact schedule and channel with them first;
-  their npub rides the job as its owner). They manage their jobs by asking you
+  prompt the control plane fires as a mention to you in the world's
+  **`freehold-scheduled-jobs`** channel — reply there; that reply is the run's delivery.
+  The fire names the **human channel** where the user-facing update belongs: cross-post
+  that update there **as yourself**, opening with attribution ("Darcy's daily ask:" for a
+  human-owned job). An agent's own self-initiated job (owner = your pubkey) is system
+  signal — its visible update stays in the jobs channel unless the prompt names another
+  channel. If you cannot complete a run, post a short failure note in the visible-update
+  channel and say so in the jobs channel. When something a user asks for would clearly be
+  better done on a schedule — a daily briefing, a weekly re-check, a reminder — say so and
+  offer to schedule it (`create_job`: confirm the exact schedule and human channel with
+  them first; their npub rides the job as its owner). They manage their jobs by asking you
   (`list_jobs` / `delete_job` / `pause_job`). A job fires even when nobody is watching, so
   keep prompts self-contained, and remember a missed slot or a timed-out run is recorded
   and reported — never invent a run that did not happen.

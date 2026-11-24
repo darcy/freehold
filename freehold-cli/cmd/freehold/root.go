@@ -25,6 +25,7 @@ import (
 	"freehold/freehold-cli/install"
 	"freehold/freehold-cli/internal/stages"
 	"freehold/freehold-cli/profiles"
+	prunechannels "freehold/freehold-cli/prune-channels"
 	"freehold/freehold-cli/snapshot"
 	"freehold/freehold-cli/status"
 	"freehold/freehold-cli/teardown"
@@ -53,6 +54,7 @@ func init() {
 		build.Command(),
 		teardown.Command(),
 		snapshot.Command(),
+		prunechannels.Command(),
 		export.Command(),
 		backup.Command(),
 		uninstall.Command(),

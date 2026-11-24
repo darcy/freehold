@@ -1043,4 +1043,7 @@ func TestGatewayNftScriptQuotes(t *testing.T) {
 			}
 		}
 	}
+	if !strings.Contains(script, "ufw disable") {
+		t.Error("gateway script must disable ufw: its deny-routed default drops the forwarded edge")
+	}
 }

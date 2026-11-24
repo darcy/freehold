@@ -14,16 +14,36 @@ import "fmt"
 // an already-PVE host short-circuits (a re-adopt re-ensures cheaply).
 func PVEInstallScript() string {
 	return fmt.Sprintf(`set -e
-if command -v pct >/dev/null 2>&1 && command -v pvesm >/dev/null 2>&1 && pvesm status >/dev/null 2>&1; then
-  echo pve-install-ok
-  exit 0
-fi
 HN=$(hostname -s)
 IP=$(ip -4 -o addr show scope global | awk "{print \$4}" | head -1 | cut -d/ -f1)
 if grep -qE "^127\.0\.1\.1" /etc/hosts; then
   sed -i "s/^127\.0\.1\.1.*/$IP $HN/" /etc/hosts
-elif ! grep -qE "[[:space:]]$HN([[:space:]]|$)" /etc/hosts; then
+elif ! grep -qE "[[:space:]]$HN([[:space:]]|\$)" /etc/hosts; then
   echo "$IP $HN" >> /etc/hosts
+fi
+# pmxcfs requires the node name to resolve to a NON-loopback IP. cloud-init
+# rewrites /etc/hosts on every boot (manage_etc_hosts), so the one-shot fix
+# above does not survive a reboot. A pve-cluster drop-in runs this helper
+# immediately before pmxcfs starts, on every boot, so the node always
+# resolves to a non-loopback address.
+cat > /usr/local/sbin/freehold-fix-hosts <<EOF
+#!/bin/sh
+if grep -qE "^127\.0\.1\.1" /etc/hosts; then
+  sed -i "s/^127\.0\.1\.1.*/$IP $HN/" /etc/hosts
+elif ! grep -qE "[[:space:]]$HN([[:space:]]|\$)" /etc/hosts; then
+  echo "$IP $HN" >> /etc/hosts
+fi
+EOF
+chmod 755 /usr/local/sbin/freehold-fix-hosts
+mkdir -p /etc/systemd/system/pve-cluster.service.d
+cat > /etc/systemd/system/pve-cluster.service.d/freehold-hosts.conf <<EOF
+[Service]
+ExecStartPre=/usr/local/sbin/freehold-fix-hosts
+EOF
+systemctl daemon-reload >/dev/null 2>&1 || true
+if command -v pct >/dev/null 2>&1 && command -v pvesm >/dev/null 2>&1 && pvesm status >/dev/null 2>&1; then
+  echo pve-install-ok
+  exit 0
 fi
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq

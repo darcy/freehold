@@ -157,6 +157,25 @@ func TestMintRejectsBadInputs(t *testing.T) {
 	}
 }
 
+// TestMintProfile pins the kind-0 attestation: the conditions are the literal
+// "kind=0" (Buzz's profile provenance verifier evaluates them verbatim), and
+// the minted tag verifies only for the kind-0 agent it names.
+func TestMintProfile(t *testing.T) {
+	tag, err := MintProfile(vectorAgentPk, sk(1))
+	if err != nil {
+		t.Fatalf("mint profile: %v", err)
+	}
+	if tag.Conditions != "kind=0" {
+		t.Errorf("profile conditions = %q, want kind=0", tag.Conditions)
+	}
+	if err := Verify(vectorAgentPk, tag); err != nil {
+		t.Fatalf("profile tag does not verify: %v", err)
+	}
+	if err := Verify(vectorAgentPk, Tag{Owner: tag.Owner, Conditions: EngramConditions, Sig: tag.Sig}); err == nil {
+		t.Error("a profile attestation verified against the engram conditions")
+	}
+}
+
 func flipLast(s string) string {
 	b, err := hex.DecodeString(s)
 	if err != nil {

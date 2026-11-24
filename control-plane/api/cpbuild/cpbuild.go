@@ -26,6 +26,8 @@ import (
 	"time"
 
 	"freehold/agents"
+	"freehold/contract/agentsurface"
+	"freehold/contract/avatar"
 	"freehold/contract/client"
 	"freehold/contract/config"
 	"freehold/contract/crypto"
@@ -856,6 +858,9 @@ func (s *Spec) worldGateway() error {
 	// ruleset has none) — it rides `sh -c '...'` through the runner verbatim.
 	script := fmt.Sprintf(`set -e
 apt-get install -y -qq nftables dnsmasq >/dev/null 2>&1 || true
+# ufw default deny-routed drops the forwarded edge traffic even with the
+# nftables DNAT present — the freehold table is the firewall; keep ufw out.
+ufw disable >/dev/null 2>&1 || true
 sysctl net.ipv4.ip_forward=1 >/dev/null
 cat > /etc/nftables.conf <<NFT
 %sNFT
@@ -1867,6 +1872,17 @@ func BuildWorldApply(spec *Spec) agent.WorldApply {
 				}
 			}
 		}
+		// 8.25. The scheduled-jobs cut-over: create the world-level jobs
+		// channel, seat the operator + every agent, and remove the console
+		// identity from visible agent channels (fires land in the jobs channel
+		// now, so the console needs no seat where a human reads).
+		if spec.RelayHost != "" && len(spec.consoleSecret()) == 32 {
+			var serr error
+			report, serr = spec.stageScheduledJobsChannel(report)
+			if serr != nil {
+				return "", fmt.Errorf("world-build scheduled-jobs channel: %w", serr)
+			}
+		}
 		// 8.5. Self-heal re-check of 2.2 — a transient miss on the early stage
 		// (the relay API was still settling) degrades to the stock onboarding;
 		// the stage is read-first so this is a no-op on a healthy build.
@@ -2436,6 +2452,91 @@ func (s *Spec) mintAuthTag(agentPk, who string) (string, error) {
 	return tag.JSON(), nil
 }
 
+// ensureAgentProfile publishes a managed agent's kind-0 profile only when the
+// current head differs from freehold's projection. The profile carries the
+// owner's kind=0 attestation (Buzz's "Managed by" provenance), a real name,
+// the registry purpose as about, and a hosted HTTPS avatar. Reconcile runs on
+// every build, so a compare-first write is what keeps a converged world quiet
+// while still repairing a missing/stale profile.
+//
+// The CPA is created first in reconcileAgentsInto, so its profile is the
+// canary: a relay refusal here fails the build before the fleet publishes.
+func (s *Spec) ensureAgentProfile(name, purpose, pub string, nSec []byte) error {
+	ownerSec, err := s.ownerKey()
+	if err != nil {
+		return fmt.Errorf("agent profile: no owner key to attest the kind-0 profile: %w", err)
+	}
+	cpHost := strings.TrimSpace(s.CpHost)
+	if cpHost == "" {
+		return fmt.Errorf("agent profile: no CP host to derive the hosted avatar URL")
+	}
+	picture := avatar.URL(cpHost, pub)
+	profile := agentsurface.Profile{
+		Name:        name,
+		DisplayName: name,
+		About:       agentsurface.ClampAbout(purpose),
+		Picture:     picture,
+		NIP05:       profileNIP05(name, cpHost),
+		IsAgent:     true,
+	}
+	if _, err := agentsurface.NormalizeProfile(profile); err != nil {
+		return fmt.Errorf("agent profile: %w", err)
+	}
+	authURL := s.RelayAuthURL
+	if authURL == "" {
+		authURL = s.RelayURL
+	}
+	content, tags, headAt, err := relay.QueryAgentProfileAuth(s.relayDial(), authURL, nSec, pub)
+	if err != nil {
+		return fmt.Errorf("read current profile: %w", err)
+	}
+	if content != "" && relay.AgentProfileMatches(content, tags, profile, pub, s.OwnerPub) {
+		return nil
+	}
+	ts := time.Now().Unix()
+	if headAt >= ts {
+		ts = headAt + 1
+	}
+	if err := relay.PublishAgentProfileAuthAt(s.relayDial(), authURL, nSec, ownerSec, pub, profile, ts); err != nil {
+		return fmt.Errorf("publish: %w", err)
+	}
+	// Read the accepted head back: a relay that stores a different shape (or
+	// silently drops the auth tag) must fail the build, not leave a profile
+	// that renders as initials with no "Managed by" row.
+	content, tags, _, err = relay.QueryAgentProfileAuth(s.relayDial(), authURL, nSec, pub)
+	if err != nil {
+		return fmt.Errorf("verify published profile: %w", err)
+	}
+	if !relay.AgentProfileMatches(content, tags, profile, pub, s.OwnerPub) {
+		return fmt.Errorf("relay accepted the profile but the head does not carry the expected body + kind=0 attestation")
+	}
+	return nil
+}
+
+// profileNIP05 is the self-declared handle freehold publishes for an agent:
+// a slug derived from the name at the CP's host. It is a display handle, not a
+// verified NIP-05 mapping; the profile's auth tag is the provenance.
+func profileNIP05(name, host string) string {
+	slug := strings.ToLower(strings.TrimSpace(name))
+	var b strings.Builder
+	for _, r := range slug {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '-', r == '_':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('-')
+		}
+	}
+	slug = strings.Trim(b.String(), "-_")
+	if slug == "" {
+		slug = "agent"
+	}
+	if len(slug) > 64 {
+		slug = strings.Trim(slug[:64], "-_")
+	}
+	return slug + "@" + strings.TrimSpace(host)
+}
+
 // appendMemoryPlane appends the report line that makes the agent memory plane's
 // health visible at bring-up. It names the attesting identity rather than a bare
 // ok because the failure it covers is a silent one: a world whose agents answer
@@ -2872,7 +2973,8 @@ func (s *Spec) revokeOrgWideMemberships(name string) error {
 	return nil
 }
 
-func BuildCreateAgentFn(spec *Spec) agent.CreateAgentFn {	return func(name, purpose string, channels []string, private bool, model string) (string, error) {
+func BuildCreateAgentFn(spec *Spec) agent.CreateAgentFn {
+	return func(name, purpose string, channels []string, private bool, model string) (string, error) {
 		model = litellmModelFor(spec.CpaName, name, model)
 		if name == "" {
 			return "", fmt.Errorf("create-agent needs a non-empty name")
@@ -2945,7 +3047,7 @@ func BuildCreateAgentFn(spec *Spec) agent.CreateAgentFn {	return func(name, purp
 		if authURL == "" {
 			authURL = spec.RelayURL
 		}
-		if err := relay.PublishProfileAuth(spec.relayDial(), authURL, nSec, name, "freehold agent"); err != nil {
+		if err := spec.ensureAgentProfile(name, purpose, pub, nSec); err != nil {
 			return "", fmt.Errorf("publish %s profile: %w", name, err)
 		}
 		// Each named channel is resolved (created, owned by this agent, when
@@ -2987,17 +3089,6 @@ func BuildCreateAgentFn(spec *Spec) agent.CreateAgentFn {	return func(name, purp
 						}
 					}
 				}
-				// The CONSOLE identity rides every channel too — it is the
-				// scheduled-jobs fire identity (its mentions wake the agent).
-				// Signed by the CPA (the owner); a world where the console and
-				// operator coincide skips the duplicate.
-				if consolePK := spec.consolePubkey(); consolePK != "" && consolePK != spec.OwnerPub {
-					if member, merr := relay.IsMemberAuth(spec.relayDial(), authURL, cpaSec, channelID, consolePK); merr != nil || !member {
-						if err := relay.PutUserChannelAuth(spec.relayDial(), authURL, cpaSec, channelID, consolePK); err != nil {
-							return "", fmt.Errorf("add console identity to #freehold: %w", err)
-						}
-					}
-				}
 				joined = append(joined, channelRef{channelID, channelName})
 				continue
 			}
@@ -3015,16 +3106,13 @@ func BuildCreateAgentFn(spec *Spec) agent.CreateAgentFn {	return func(name, purp
 					}
 				}
 			}
-			// The console identity (the scheduled-jobs fire identity) rides
-			// every agent channel — best-effort like the CPA add below: a
-			// pre-existing private channel its signer doesn't own refuses,
-			// and the fire path reports the refusal at create/fire time.
-			if consolePK := spec.consolePubkey(); consolePK != "" && consolePK != spec.OwnerPub {
-				if member, merr := relay.IsMemberAuth(spec.relayDial(), authURL, nSec, channelID, consolePK); merr != nil || !member {
-					_ = relay.PutUserChannelAuth(spec.relayDial(), authURL, nSec, channelID, consolePK)
-				}
-			}
 			joined = append(joined, channelRef{channelID, channelName})
+		}
+		// Every agent is a member of the world's scheduled-jobs channel: fires
+		// land there and wake it by mention, and the timeout notice pings the
+		// owner there. Console-owned (relay owner), idempotent.
+		if err := spec.ensureJobsChannelMember(pub); err != nil {
+			return "", fmt.Errorf("add %s to #%s: %w", name, agenttools.ScheduledJobsChannelName, err)
 		}
 		if name != spec.CpaName {
 			if cpaPub := spec.cpaPubkey(); cpaPub != "" {
@@ -3322,20 +3410,198 @@ func (s *Spec) consolePubkey() string {
 	return pk
 }
 
+// consoleSecret returns the console identity's Nostr secret (the relay owner
+// and the scheduled-jobs channel owner), or nil when absent/unreadable.
+func (s *Spec) consoleSecret() []byte {
+	sec, err := cpstate.ConsoleSecret(s.consoleStateRoot())
+	if err != nil {
+		return nil
+	}
+	return sec
+}
+
+// ensureJobsChannelMember ensures the world's scheduled-jobs channel exists
+// (open, console-owned) and adds pub to it. Idempotent: a membership write is
+// state-idempotent but not event-idempotent, so an existing seat is skipped.
+func (s *Spec) ensureJobsChannelMember(pub string) error {
+	sec := s.consoleSecret()
+	if len(sec) != 32 {
+		return fmt.Errorf("the console identity is unavailable to own the jobs channel")
+	}
+	authURL := s.RelayAuthURL
+	if authURL == "" {
+		authURL = s.RelayURL
+	}
+	if _, _, ok, ferr := relay.FindChannelAuth(s.relayDial(), authURL, sec, "#"+agenttools.ScheduledJobsChannelName); ferr != nil {
+		return fmt.Errorf("resolve #%s: %w", agenttools.ScheduledJobsChannelName, ferr)
+	} else if !ok {
+		if err := delegate.EnsureChannelAuth(s.relayDial(), authURL, sec,
+			agenttools.ScheduledJobsChannelID, "#"+agenttools.ScheduledJobsChannelName); err != nil {
+			return fmt.Errorf("ensure #%s: %w", agenttools.ScheduledJobsChannelName, err)
+		}
+	}
+	if member, merr := relay.IsMemberAuth(s.relayDial(), authURL, sec, agenttools.ScheduledJobsChannelID, pub); merr == nil && member {
+		return nil
+	}
+	return relay.PutUserChannelAuth(s.relayDial(), authURL, sec, agenttools.ScheduledJobsChannelID, pub)
+}
+
+// stageScheduledJobsChannel is the cut-over: create the world's scheduled-jobs
+// channel, seat the operator + every registry agent, and remove the console
+// identity from every visible agent channel. Fires now land in the jobs
+// channel (the scheduler), so the console no longer needs a seat anywhere a
+// human reads. The current console key is left in the prune allow-list so a
+// sweep never removes the fire identity before this leg has run.
+func (s *Spec) stageScheduledJobsChannel(report []string) ([]string, error) {
+	sec := s.consoleSecret()
+	if len(sec) != 32 {
+		return report, fmt.Errorf("scheduled-jobs channel: the console identity is unreadable")
+	}
+	consolePK, err := crypto.PubkeyFromSecret(sec)
+	if err != nil {
+		return report, fmt.Errorf("scheduled-jobs channel: %w", err)
+	}
+	authURL := s.RelayAuthURL
+	if authURL == "" {
+		authURL = s.RelayURL
+	}
+	reg, err := agenttools.OpenRegistry(filepath.Join(s.agentToolsRoot(), agenttools.RegistryFile))
+	if err != nil {
+		return report, fmt.Errorf("scheduled-jobs channel: open registry: %w", err)
+	}
+	rows, err := reg.Agents()
+	if err != nil {
+		return report, fmt.Errorf("scheduled-jobs channel: read registry: %w", err)
+	}
+	// Seat the operator + every live agent in the jobs channel.
+	if s.OwnerPub != "" {
+		if err := s.ensureJobsChannelMember(s.OwnerPub); err != nil {
+			return report, fmt.Errorf("scheduled-jobs channel: operator: %w", err)
+		}
+	}
+	for _, a := range rows {
+		if a.Pubkey == "" {
+			continue
+		}
+		if err := s.ensureJobsChannelMember(a.Pubkey); err != nil {
+			return report, fmt.Errorf("scheduled-jobs channel: %s: %w", a.Name, err)
+		}
+	}
+	// Pre-existing jobs' owners predate the create-time seat: seat them (and
+	// any legacy agent pubkey) so their never-woke notices are deliverable.
+	jobs, jerr := agenttools.LoadJobsReadOnly(filepath.Join(s.agentToolsRoot(), agenttools.JobsFile))
+	if jerr != nil {
+		return report, fmt.Errorf("scheduled-jobs channel: read jobs: %w", jerr)
+	}
+	for _, j := range jobs {
+		if j.Owner != "" {
+			if err := s.ensureJobsChannelMember(j.Owner); err != nil {
+				return report, fmt.Errorf("scheduled-jobs channel: job owner %s: %w", agenttools.ShortHex(j.Owner), err)
+			}
+		}
+		if j.AgentPubkey != "" {
+			if err := s.ensureJobsChannelMember(j.AgentPubkey); err != nil {
+				return report, fmt.Errorf("scheduled-jobs channel: job agent %s: %w", agenttools.ShortHex(j.AgentPubkey), err)
+			}
+		}
+	}
+	// Stop the console's visible joins: remove its seat from every agent
+	// channel the registry knows about, plus the first-run channels. A world
+	// where the console and operator coincide keeps the operator's seat.
+	if consolePK == s.OwnerPub {
+		return append(report, "scheduled-jobs channel ensured (console == operator; visible seats kept)"), nil
+	}
+	names := map[string]bool{"#freehold": true, "#general": true}
+	for _, a := range rows {
+		for _, ch := range a.Channels {
+			if ch != "" {
+				names[ch] = true
+			}
+		}
+		if a.Channel != "" {
+			names[a.Channel] = true
+		}
+	}
+	removed := 0
+	for name := range names {
+		// freehold-created channels carry their name-derived id; #freehold is
+		// the fixed first-run channel. Deriving the id avoids the relay's
+		// membership-gated discovery (the console is not a member of private
+		// agent channels after the cut-over).
+		id := relay.ChannelIDFromName(name)
+		if name == "#freehold" {
+			id = relay.FreeholdChannelID
+		}
+		if id == agenttools.ScheduledJobsChannelID {
+			continue
+		}
+		// The channel's OWNER is the identity the relay admits for a
+		// membership write (a non-owner member can read but not remove):
+		// the CPA for the first-run channels, the creating agent for agent
+		// channels. Resolve it from the 9007 create event using a member's
+		// secret as the reader.
+		signer := sec
+		if name == "#freehold" || name == "#general" {
+			if cs := s.cpaSecret(); len(cs) == 32 {
+				signer = cs
+			}
+		} else {
+			var reader []byte
+			for _, a := range rows {
+				if slices.Contains(a.Channels, name) || a.Channel == name {
+					if as := s.agentSecret(a.Name); len(as) == 32 {
+						reader = as
+						break
+					}
+				}
+			}
+			if len(reader) == 32 {
+				signer = reader
+				if ownerPK, oerr := relay.ChannelOwnerAuth(s.relayDial(), authURL, id, reader); oerr == nil && ownerPK != "" {
+					for _, a := range rows {
+						if a.Pubkey == ownerPK {
+							if as := s.agentSecret(a.Name); len(as) == 32 {
+								signer = as
+							}
+							break
+						}
+					}
+				}
+			}
+		}
+		member, merr := relay.IsMemberAuth(s.relayDial(), authURL, signer, id, consolePK)
+		if merr != nil || !member {
+			continue
+		}
+		if rerr := relay.RemoveUserChannelAuth(s.relayDial(), authURL, signer, id, consolePK); rerr != nil {
+			// Hygiene, not load-bearing: the jobs channel + seats are already
+			// ensured above. A refused removal (an unreadable owner identity)
+			// must never brick reconcile — report it and move on.
+			report = append(report, fmt.Sprintf("WARN: scheduled-jobs channel: console still seated in %s (remove refused: %v)", name, rerr))
+			continue
+		}
+		removed++
+	}
+	return append(report, fmt.Sprintf("scheduled-jobs channel ensured; console removed from %d visible channel(s)", removed)), nil
+}
+
 // cpaSecret returns the CPA's Nostr secret (32 bytes), or nil when its identity
 // is absent/unreadable. #freehold is private and owned by the CPA, so its
 // membership writes must be signed by this key, not the joining agent's.
 func (s *Spec) cpaSecret() []byte {
-	name := s.CpaName
-	if name == "" {
-		name = agent.DefaultCPAName
-	}
+	return s.agentSecret(s.cpaNameOrDefault())
+}
+
+// agentSecret returns an agent's Nostr secret from its durable identity dir,
+// or nil when absent/unreadable. Membership writes on a channel are admitted
+// by its owner, so the owner's identity is the signer.
+func (s *Spec) agentSecret(name string) []byte {
 	id, err := identity.Load(filepath.Join(s.agentIdentityDir(), "agents", sanitizeDir(name)))
 	if err != nil {
 		return nil
 	}
 	sec, err := hex.DecodeString(id.NostrSecretHex)
-	if err != nil {
+	if err != nil || len(sec) != 32 {
 		return nil
 	}
 	return sec

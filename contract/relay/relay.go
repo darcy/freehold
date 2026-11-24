@@ -17,6 +17,8 @@ import (
 	"strings"
 	"time"
 
+	"freehold/contract/agentsurface"
+	"freehold/contract/nipoa"
 	"freehold/contract/wire"
 )
 
@@ -59,6 +61,43 @@ func ChannelIDFromName(name string) string {
 	h := sha256.Sum256([]byte("freehold-channel:" + n))
 	hexs := hex.EncodeToString(h[:16])
 	return fmt.Sprintf("%s-%s-%s-%s-%s", hexs[0:8], hexs[8:12], hexs[12:16], hexs[16:20], hexs[20:32])
+}
+
+// FreeholdChannelID is the fixed id of the shared #freehold channel (every
+// agent's workroom). Unlike name-derived channels it is a constant, so every
+// process agrees without a relay lookup.
+const FreeholdChannelID = "00000000-0000-4000-8000-00000000f0ef"
+
+// ChannelOwnerAuth returns the author of the newest valid kind-9007 channel
+// create event for channelID — the channel's creator/owner. The read signs as
+// authSecret, which must be able to see the channel (a member or the relay
+// admin). Empty when no create event is visible.
+func ChannelOwnerAuth(dialURL, authURL, channelID string, authSecret []byte) (string, error) {
+	filters := []interface{}{map[string]interface{}{
+		"kinds": []interface{}{wire.ChannelCreate},
+		"#h":    []interface{}{channelID},
+		"limit": 100,
+	}}
+	events, err := QueryEventsAuth(dialURL, authURL, authSecret, filters)
+	if err != nil {
+		return "", err
+	}
+	newest := int64(-1)
+	owner := ""
+	for _, ev := range events {
+		author, _ := ev["pubkey"].(string)
+		createdAt := intOr(ev["created_at"])
+		tags, _ := parseTags(ev)
+		content, _ := ev["content"].(string)
+		sig, _ := ev["sig"].(string)
+		if _, err := wire.VerifyEvent(author, createdAt, wire.ChannelCreate, tags, content, sig); err != nil {
+			continue
+		}
+		if createdAt >= newest {
+			newest, owner = createdAt, author
+		}
+	}
+	return owner, nil
 }
 
 // GroupMeta is a NIP-29 channel's id + display name (kind 39000 group meta).
@@ -726,6 +765,134 @@ func PublishProfileAuth(dialURL, authURL string, secret []byte, name, about stri
 	}
 	evBytes, _ := json.Marshal(ev)
 	return PublishEventJSONAuth(dialURL, authURL, secret, string(evBytes))
+}
+
+// CommunityMembersAuth returns every pubkey on the relay's current NIP-43
+// membership list (kind 13534, relay-signed). Empty on an unreadable list.
+func CommunityMembersAuth(dialURL, authURL string, authSecret []byte, relayPubkey string) ([]string, error) {
+	if relayPubkey == "" {
+		return nil, nil
+	}
+	events, err := QueryEventsAuth(dialURL, authURL, authSecret, []interface{}{map[string]interface{}{
+		"kinds": []interface{}{wire.KINDNip43Membership}, "authors": []interface{}{relayPubkey}, "limit": 1,
+	}})
+	if err != nil {
+		return nil, err
+	}
+	for _, ev := range events {
+		author, _ := ev["pubkey"].(string)
+		if author != relayPubkey {
+			continue
+		}
+		createdAt := eventCreatedAt(ev)
+		tags, _ := parseTags(ev)
+		content, _ := ev["content"].(string)
+		sig, _ := ev["sig"].(string)
+		if _, err := wire.VerifyEvent(author, createdAt, wire.KINDNip43Membership, tags, content, sig); err != nil {
+			continue
+		}
+		out := []string{}
+		for _, t := range tags {
+			if len(t) >= 2 && t[0] == "member" {
+				out = append(out, t[1])
+			}
+		}
+		return out, nil
+	}
+	return nil, nil
+}
+
+// PublishAgentProfileAuth publishes a managed agent's kind-0 profile. The
+// event is authored by the agent (its own nsec) and carries exactly one
+// NIP-OA auth tag attesting the owner — the provenance row Buzz renders as
+// "Managed by". The body is validated by contract/agentsurface first, so a
+// malformed or empty profile never reaches the relay.
+func PublishAgentProfileAuth(dialURL, authURL string, agentSecret, ownerSecret []byte, agentPk string, profile agentsurface.Profile) error {
+	return PublishAgentProfileAuthAt(dialURL, authURL, agentSecret, ownerSecret, agentPk, profile, time.Now().Unix())
+}
+
+// PublishAgentProfileAuthAt is PublishAgentProfileAuth with an explicit
+// created_at. Reconcile uses the head's timestamp + 1 on a real difference so
+// a same-second republish always supersedes (NIP-33 ties break by event id,
+// and a lower-id older event would otherwise win).
+func PublishAgentProfileAuthAt(dialURL, authURL string, agentSecret, ownerSecret []byte, agentPk string, profile agentsurface.Profile, ts int64) error {
+	body, err := agentsurface.ProfileBody(profile)
+	if err != nil {
+		return fmt.Errorf("agent profile: %w", err)
+	}
+	tag, err := nipoa.MintProfile(agentPk, ownerSecret)
+	if err != nil {
+		return fmt.Errorf("agent profile attestation: %w", err)
+	}
+	tags := [][]string{{"auth", tag.Owner, tag.Conditions, tag.Sig}}
+	pubkey, id, sig, err := wire.SignEvent(agentSecret, 0, ts, tags, string(body))
+	if err != nil {
+		return fmt.Errorf("agent profile signing: %w", err)
+	}
+	if pubkey != agentPk {
+		return fmt.Errorf("agent profile signing returned pubkey %s, want %s", pubkey, agentPk)
+	}
+	ev := map[string]interface{}{
+		"id": id, "pubkey": pubkey, "created_at": ts, "kind": 0,
+		"tags": tags, "content": string(body), "sig": sig,
+	}
+	evBytes, _ := json.Marshal(ev)
+	return PublishEventJSONAuth(dialURL, authURL, agentSecret, string(evBytes))
+}
+
+// QueryAgentProfileAuth reads the newest kind-0 event authored by the agent
+// (NIP-98 signed by the agent). It returns the content, tags, and created_at;
+// no event is ("", nil, 0, nil).
+func QueryAgentProfileAuth(dialURL, authURL string, agentSecret []byte, agentPk string) (content string, tags [][]string, createdAt int64, err error) {
+	evs, err := QueryEventsAuth(dialURL, authURL, agentSecret, []interface{}{map[string]interface{}{
+		"kinds":   []interface{}{0},
+		"authors": []interface{}{agentPk},
+		"limit":   1,
+	}})
+	if err != nil {
+		return "", nil, 0, err
+	}
+	if len(evs) == 0 {
+		return "", nil, 0, nil
+	}
+	// A relay returns newest-first and honors limit 1, but select the newest
+	// defensively: a double/test relay may hand back the whole set.
+	newest := evs[0]
+	for _, ev := range evs[1:] {
+		if eventCreatedAt(ev) > eventCreatedAt(newest) {
+			newest = ev
+		}
+	}
+	content, _ = newest["content"].(string)
+	tags, _ = parseTags(newest)
+	return content, tags, eventCreatedAt(newest), nil
+}
+
+// AgentProfileMatches reports whether the current kind-0 content/tags already
+// carry freehold's projection: the same owned body fields and exactly one
+// NIP-OA auth tag for the expected owner, bound to kind 0. Extra body fields
+// are preserved (see agentsurface.ProfileMatchesContent).
+func AgentProfileMatches(content string, tags [][]string, profile agentsurface.Profile, agentPk, ownerPk string) bool {
+	if !agentsurface.ProfileMatchesContent(content, profile) {
+		return false
+	}
+	var auths [][]string
+	for _, t := range tags {
+		if len(t) > 0 && t[0] == "auth" {
+			auths = append(auths, t)
+		}
+	}
+	if len(auths) != 1 || len(auths[0]) != 4 {
+		return false
+	}
+	t := auths[0]
+	if t[1] != ownerPk || t[2] != nipoa.ProfileConditions || len(t[3]) != 128 {
+		return false
+	}
+	if err := nipoa.Verify(agentPk, nipoa.Tag{Owner: t[1], Conditions: t[2], Sig: t[3]}); err != nil {
+		return false
+	}
+	return true
 }
 
 // IsCommunityMemberAuth reports whether pubkey is a member of the relay's

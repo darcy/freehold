@@ -218,6 +218,15 @@ func EnsureRunnerUser(kind, name, pkgDir string) (string, error) {
 	if out, err := exec.Command("chown", "-R", user+":"+user, pkgDir).CombinedOutput(); err != nil {
 		return "", fmt.Errorf("chown %s package: %v: %s", user, err, strings.TrimSpace(string(out)))
 	}
+	// The package dir lives under the CP state dir (0700 root); the door user
+	// must TRAVERSE that parent to reach its own package. Execute-only on the
+	// chain (no read/listing) keeps state.json + console identity 0600-root
+	// while letting the unprivileged unit open its identity.json.
+	for _, d := range []string{filepath.Dir(pkgDir), filepath.Dir(filepath.Dir(pkgDir))} {
+		if out, err := exec.Command("chmod", "o+x", d).CombinedOutput(); err != nil {
+			return "", fmt.Errorf("traverse %s: %v: %s", d, err, strings.TrimSpace(string(out)))
+		}
+	}
 	return user, nil
 }
 

@@ -14,6 +14,7 @@ import (
 
 	"freehold/contract/console"
 	"freehold/contract/crypto"
+	"freehold/contract/relay"
 	"freehold/control-plane/api/agent"
 	"freehold/platform/migrations"
 )
@@ -967,5 +968,140 @@ func TestOperatorPeerScope(t *testing.T) {
 	_ = json.Unmarshal(rec.Body.Bytes(), &resp)
 	if resp.Error == nil {
 		t.Fatal("an ungranted non-peer caller must be denied")
+	}
+}
+
+func TestCreateJobOwnerDefaultsAndSeats(t *testing.T) {
+	store := mkStore(t)
+	reg, err := OpenRegistry(t.TempDir() + "/registry.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	agentPK := strings.Repeat("aa", 32)
+	generalID := relay.ChannelIDFromName("#general")
+	if _, err := reg.RegisterAgent("cpa", agentPK, "#general"); err != nil {
+		t.Fatal(err)
+	}
+	var jobsMembers []string
+	var membershipChecks []string
+	s := &Server{
+		Jobs:  store,
+		Tools: &agent.Tools{Console: reg},
+		ResolveChannel: func(name string) (string, error) {
+			return generalID, nil
+		},
+		EnsureJobsMember: func(pub string) error {
+			jobsMembers = append(jobsMembers, pub)
+			return nil
+		},
+		IsChannelMember: func(channelID, pub string) (bool, error) {
+			membershipChecks = append(membershipChecks, channelID+"|"+pub)
+			return true, nil
+		},
+	}
+	job, err := s.createJob(createJobArgs{Prompt: "p", Cron: "@daily", Channel: "#general", Agent: "cpa"}, agentPK)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.Owner != agentPK {
+		t.Errorf("owner = %q, want the creating agent (self-initiated default)", job.Owner)
+	}
+	if len(jobsMembers) != 2 || jobsMembers[0] != agentPK || jobsMembers[1] != agentPK {
+		t.Errorf("jobs-channel seats = %v, want owner + agent", jobsMembers)
+	}
+	if len(membershipChecks) != 1 || membershipChecks[0] != generalID+"|"+agentPK {
+		t.Errorf("human-channel membership checks = %v, want the target agent in the resolved channel", membershipChecks)
+	}
+}
+
+func TestCreateJobHumanOwnerThreadRootAndSeats(t *testing.T) {
+	store := mkStore(t)
+	reg, err := OpenRegistry(t.TempDir() + "/registry.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	agentPK := strings.Repeat("bb", 32)
+	human := strings.Repeat("cc", 32)
+	generalID := relay.ChannelIDFromName("#general")
+	if _, err := reg.RegisterAgent("cpa", agentPK, "#general"); err != nil {
+		t.Fatal(err)
+	}
+	var jobsMembers []string
+	var membershipChecks []string
+	s := &Server{
+		Jobs:  store,
+		Tools: &agent.Tools{Console: reg},
+		ResolveChannel: func(name string) (string, error) {
+			return generalID, nil
+		},
+		EnsureJobsMember: func(pub string) error {
+			jobsMembers = append(jobsMembers, pub)
+			return nil
+		},
+		IsChannelMember: func(channelID, pub string) (bool, error) {
+			membershipChecks = append(membershipChecks, channelID+"|"+pub)
+			return true, nil
+		},
+	}
+	job, err := s.createJob(createJobArgs{
+		Prompt: "p", Cron: "@daily", Channel: "#general", Agent: "cpa",
+		Owner: human, Label: "daily ask", ThreadRoot: "root-event",
+	}, agentPK)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.Owner != human {
+		t.Errorf("owner = %q, want the asker's npub", job.Owner)
+	}
+	if job.ThreadRoot != "root-event" {
+		t.Errorf("thread root = %q, want root-event", job.ThreadRoot)
+	}
+	if len(jobsMembers) != 2 || jobsMembers[0] != human || jobsMembers[1] != agentPK {
+		t.Errorf("jobs-channel seats = %v, want owner + agent", jobsMembers)
+	}
+	if len(membershipChecks) != 1 || membershipChecks[0] != generalID+"|"+agentPK {
+		t.Errorf("human-channel membership checks = %v, want the target agent", membershipChecks)
+	}
+}
+
+// TestCreateJobUnregisteredChannelIsNotSeated: an agent may not steer an
+// owner-signed membership write into a channel its owner did not admit it to.
+// The job is created; the live-roster read reports non-membership and no write
+// happens (the agent reports a cross-post failure).
+func TestCreateJobUnregisteredChannelIsNotSeated(t *testing.T) {
+	store := mkStore(t)
+	reg, err := OpenRegistry(t.TempDir() + "/registry.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	agentPK := strings.Repeat("dd", 32)
+	if _, err := reg.RegisterAgent("cpa", agentPK, "#freehold"); err != nil {
+		t.Fatal(err)
+	}
+	privateID := strings.Repeat("ee", 18)
+	var checks []string
+	s := &Server{
+		Jobs:  store,
+		Tools: &agent.Tools{Console: reg},
+		ResolveChannel: func(name string) (string, error) {
+			return privateID, nil // an arbitrary private channel id
+		},
+		EnsureJobsMember: func(pub string) error { return nil },
+		IsChannelMember: func(channelID, pub string) (bool, error) {
+			checks = append(checks, channelID+"|"+pub)
+			return false, nil
+		},
+	}
+	job, err := s.createJob(createJobArgs{
+		Prompt: "p", Cron: "@daily", Channel: "#private", Agent: "cpa",
+	}, agentPK)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.ID == "" {
+		t.Error("the job must still be created")
+	}
+	if len(checks) != 1 || checks[0] != privateID+"|"+agentPK {
+		t.Errorf("membership checks = %v, want the private channel/agent", checks)
 	}
 }
